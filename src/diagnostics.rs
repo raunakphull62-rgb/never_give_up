@@ -167,6 +167,20 @@ impl Diagnostic {
         )
     }
 
+    /// Cross-module reference to a private declaration.
+    pub fn private_access(file: &str, start: usize, end: usize, path: &str) -> Self {
+        Self::error(
+            "E-PRIVATE",
+            &format!("`{path}` is private and cannot be referenced from another module"),
+            file,
+            start,
+            end,
+            "only `pub` declarations are visible across module boundaries",
+            &["mark the declaration `pub`", "use it from inside its own module"],
+            "modules/visibility",
+        )
+    }
+
     /// Generic parse error.
     pub fn parse_error(file: &str, start: usize, end: usize, message: &str) -> Self {
         Self::error(

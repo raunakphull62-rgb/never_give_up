@@ -475,9 +475,10 @@ fn run_file_mode(args: &[String]) {
     let prog = match load_with_imports(path) {
         Ok(prog) => {
             println!(
-                "parse: OK ({} functions, {} structs)",
+                "parse: OK ({} functions, {} structs, {} enums)",
                 prog.functions.len(),
-                prog.structs.len()
+                prog.structs.len(),
+                prog.enums.len()
             );
             for f in &prog.functions {
                 println!("  fn {} @{} effects={:?}", f.name, f.id, f.effects);
@@ -547,6 +548,8 @@ fn run_file_mode(args: &[String]) {
 fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
     use std::collections::{HashSet, VecDeque};
     let mut merged = klang::ast::Program {
+        mods: vec![],
+        enums: vec![],
         structs: vec![],
         imports: vec![],
         functions: vec![],
@@ -576,6 +579,8 @@ fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
         }
         let prefixed = prog.with_file_prefix(file_idx);
         file_idx += 1;
+        merged.mods.extend(prefixed.mods);
+        merged.enums.extend(prefixed.enums);
         merged.structs.extend(prefixed.structs);
         for f in prefixed.functions {
             if !fn_names.insert(f.name.clone()) {

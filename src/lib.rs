@@ -11,6 +11,7 @@ pub mod hir;
 pub mod jit;
 pub mod lsp;
 pub mod mir;
+pub mod modules;
 pub mod ownership;
 pub mod package;
 pub mod parser;

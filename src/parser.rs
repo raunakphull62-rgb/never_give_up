@@ -6,11 +6,18 @@
 //! scope entry is still on the stack.
 
 use crate::ast::{
-    AssignStmt, AssignTarget, Block, BreakStmt, ContinueStmt, Effect, Expr, ForInStmt,
-    ForRangeStmt, FunctionDecl, IfStmt, LetStmt, NodeId, Param, PrintStmt, Program, ReturnStmt,
-    Stmt, StructDecl, TaskGroup, WhileStmt,
+    AssignStmt, AssignTarget, Block, BreakStmt, ContinueStmt, Effect, EnumDecl, EnumVariant, Expr,
+    ForInStmt, ForRangeStmt, FunctionDecl, IfStmt, LetStmt, MatchArm, ModDecl, NodeId, Param,
+    PrintStmt, Program, ReturnStmt, Stmt, StructDecl, TaskGroup, WhileStmt,
 };
 use crate::diagnostics::Diagnostic;
+
+/// One `pub`-prefixed declaration (keyword routed after `pub`).
+enum DeclItem {
+    Struct(StructDecl),
+    Enum(EnumDecl),
+    Fn(FunctionDecl),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
@@ -35,7 +42,13 @@ pub enum TokenKind {
     Break,
     Continue,
     Import,
+    Enum,
+    Match,
+    Mod,
+    Pub,
     Arrow,
+    FatArrow,
+    ColonColon,
     LParen,
     RParen,
     LBrace,
@@ -148,6 +161,13 @@ fn tokenize(source: &str) -> Vec<Token> {
                 if i + 1 < n && bytes[i + 1] == b'=' {
                     toks.push(Token {
                         kind: TokenKind::EqEq,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else if i + 1 < n && bytes[i + 1] == b'>' {
+                    toks.push(Token {
+                        kind: TokenKind::FatArrow,
                         start,
                         end: i + 2,
                     });
@@ -270,12 +290,21 @@ fn tokenize(source: &str) -> Vec<Token> {
                 i += 1;
             }
             ':' => {
-                toks.push(Token {
-                    kind: TokenKind::Colon,
-                    start,
-                    end: i + 1,
-                });
-                i += 1;
+                if i + 1 < n && bytes[i + 1] == b':' {
+                    toks.push(Token {
+                        kind: TokenKind::ColonColon,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Token {
+                        kind: TokenKind::Colon,
+                        start,
+                        end: i + 1,
+                    });
+                    i += 1;
+                }
             }
             '.' => {
                 if i + 1 < n && bytes[i + 1] == b'.' {
@@ -438,6 +467,10 @@ fn tokenize(source: &str) -> Vec<Token> {
                     "for" => TokenKind::For,
                     "in" => TokenKind::In,
                     "struct" => TokenKind::Struct,
+                    "enum" => TokenKind::Enum,
+                    "match" => TokenKind::Match,
+                    "mod" => TokenKind::Mod,
+                    "pub" => TokenKind::Pub,
                     "break" => TokenKind::Break,
                     "continue" => TokenKind::Continue,
                     "import" => TokenKind::Import,
@@ -560,6 +593,80 @@ impl Parser {
         }
     }
 
+    /// Optional leading `pub` on a declaration. Inside a `mod` it marks the
+    /// item visible across modules; at top level it is accepted and ignored.
+    fn eat_pub(&mut self) -> bool {
+        if self.peek().kind == TokenKind::Pub {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One `pub`-prefixed declaration, routed to its parser by the keyword
+    /// after `pub` (which the decl parser itself consumes).
+    fn parse_pub_decl(&mut self) -> Result<DeclItem, Diagnostic> {
+        let next = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+        match next {
+            Some(TokenKind::Struct) => Ok(DeclItem::Struct(self.parse_struct()?)),
+            Some(TokenKind::Enum) => Ok(DeclItem::Enum(self.parse_enum()?)),
+            _ => Ok(DeclItem::Fn(self.parse_function()?)),
+        }
+    }
+
+    /// Push one parsed `pub` item into the right list.
+    fn push_decl(
+        structs: &mut Vec<StructDecl>,
+        enums: &mut Vec<EnumDecl>,
+        functions: &mut Vec<FunctionDecl>,
+        item: DeclItem,
+    ) {
+        match item {
+            DeclItem::Struct(s) => structs.push(s),
+            DeclItem::Enum(e) => enums.push(e),
+            DeclItem::Fn(f) => functions.push(f),
+        }
+    }
+
+    /// A type annotation: one identifier with optional `::` segments
+    /// (`i32`, `T`, `lexer::Token`). Joined as written; resolution happens
+    /// in HIR/modules.
+    fn parse_ty_name(&mut self, what: &str) -> Result<String, Diagnostic> {
+        let (mut name, _, _) = self.expect_ident(what)?;
+        while self.peek().kind == TokenKind::ColonColon {
+            self.bump();
+            let (seg, _, _) = self.expect_ident(what)?;
+            name.push_str("::");
+            name.push_str(&seg);
+        }
+        Ok(name)
+    }
+
+    /// Optional `<T, U, ...>` type-parameter list after a declaration name.
+    /// Absent (the common case) yields an empty vec; no new syntax nodes are
+    /// created, so structural identity is unaffected.
+    fn parse_type_params_opt(&mut self) -> Result<Vec<String>, Diagnostic> {
+        if self.peek().kind != TokenKind::Lt {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        let mut params = Vec::new();
+        if self.peek().kind != TokenKind::Gt {
+            loop {
+                let (name, _, _) = self.expect_ident("type parameter name")?;
+                params.push(name);
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::Gt, "`>`")?;
+        Ok(params)
+    }
+
     fn expect(&mut self, want: &TokenKind, what: &str) -> Result<Token, Diagnostic> {
         let t = self.peek().clone();
         let matches = matches!(
@@ -577,7 +684,11 @@ impl Parser {
                 | (TokenKind::For, TokenKind::For)
                 | (TokenKind::In, TokenKind::In)
                 | (TokenKind::Struct, TokenKind::Struct)
+                | (TokenKind::Enum, TokenKind::Enum)
+                | (TokenKind::Match, TokenKind::Match)
                 | (TokenKind::Arrow, TokenKind::Arrow)
+                | (TokenKind::FatArrow, TokenKind::FatArrow)
+                | (TokenKind::ColonColon, TokenKind::ColonColon)
                 | (TokenKind::LParen, TokenKind::LParen)
                 | (TokenKind::RParen, TokenKind::RParen)
                 | (TokenKind::LBrace, TokenKind::LBrace)
@@ -587,6 +698,8 @@ impl Parser {
                 | (TokenKind::Eq, TokenKind::Eq)
                 | (TokenKind::Comma, TokenKind::Comma)
                 | (TokenKind::Colon, TokenKind::Colon)
+                | (TokenKind::Gt, TokenKind::Gt)
+                | (TokenKind::Mod, TokenKind::Mod)
         );
         if matches {
             Ok(self.bump())
@@ -609,6 +722,8 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, Diagnostic> {
+        let mut mods = Vec::new();
+        let mut enums = Vec::new();
         let mut structs = Vec::new();
         let mut imports = Vec::new();
         let mut functions = Vec::new();
@@ -636,20 +751,72 @@ impl Parser {
                     }
                     let _ = t.start;
                 }
+                TokenKind::Mod => mods.push(self.parse_mod()?),
+                TokenKind::Pub => {
+                    let item = self.parse_pub_decl()?;
+                    Self::push_decl(&mut structs, &mut enums, &mut functions, item);
+                }
                 TokenKind::Struct => structs.push(self.parse_struct()?),
+                TokenKind::Enum => enums.push(self.parse_enum()?),
                 _ => functions.push(self.parse_function()?),
             }
         }
         Ok(Program {
+            mods,
+            enums,
             structs,
             imports,
             functions,
         })
     }
 
+    fn parse_mod(&mut self) -> Result<ModDecl, Diagnostic> {
+        self.expect(&TokenKind::Mod, "`mod`")?;
+        let (name, _, _) = self.expect_ident("module name")?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let id = self.next_id();
+        // Members generate their ids while the module scope is entered, so
+        // every member path extends the module path (structural identity).
+        self.enter_scope(&id);
+        let mut structs = Vec::new();
+        let mut enums = Vec::new();
+        let mut functions = Vec::new();
+        loop {
+            self.skip_dots();
+            match &self.peek().kind {
+                TokenKind::RBrace => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => {
+                    let p = self.peek().clone();
+                    self.exit_scope();
+                    return Err(self.err(p.start, p.end, "expected `}`"));
+                }
+                TokenKind::Pub => {
+                    let item = self.parse_pub_decl()?;
+                    Self::push_decl(&mut structs, &mut enums, &mut functions, item);
+                }
+                TokenKind::Struct => structs.push(self.parse_struct()?),
+                TokenKind::Enum => enums.push(self.parse_enum()?),
+                _ => functions.push(self.parse_function()?),
+            }
+        }
+        self.exit_scope();
+        Ok(ModDecl {
+            id,
+            name,
+            structs,
+            enums,
+            functions,
+        })
+    }
+
     fn parse_struct(&mut self) -> Result<StructDecl, Diagnostic> {
+        let is_pub = self.eat_pub();
         self.expect(&TokenKind::Struct, "`struct`")?;
         let (name, _, _) = self.expect_ident("struct name")?;
+        let type_params = self.parse_type_params_opt()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
         let id = self.next_id();
         let mut fields = Vec::new();
@@ -665,14 +832,69 @@ impl Parser {
             }
             let (fname, _, _) = self.expect_ident("field name")?;
             self.expect(&TokenKind::Colon, "`:`")?;
-            let (fty, _, _) = self.expect_ident("field type")?;
+            let fty = self.parse_ty_name("field type")?;
             fields.push(Param {
                 name: fname,
                 ty: fty,
             });
             self.consume_comma_opt();
         }
-        Ok(StructDecl { id, name, fields })
+        Ok(StructDecl {
+            id,
+            name,
+            is_pub,
+            type_params,
+            fields,
+        })
+    }
+
+    fn parse_enum(&mut self) -> Result<EnumDecl, Diagnostic> {
+        let is_pub = self.eat_pub();
+        self.expect(&TokenKind::Enum, "`enum`")?;
+        let (name, _, _) = self.expect_ident("enum name")?;
+        let type_params = self.parse_type_params_opt()?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let id = self.next_id();
+        let mut variants = Vec::new();
+        loop {
+            self.skip_dots();
+            if self.peek().kind == TokenKind::RBrace {
+                self.bump();
+                break;
+            }
+            if self.peek().kind == TokenKind::Eof {
+                let p = self.peek().clone();
+                return Err(self.err(p.start, p.end, "expected `}`"));
+            }
+            let (vname, _, _) = self.expect_ident("variant name")?;
+            let mut fields = Vec::new();
+            if self.peek().kind == TokenKind::LParen {
+                self.bump();
+                if self.peek().kind != TokenKind::RParen {
+                    loop {
+                        let (fname, _, _) = self.expect_ident("field name")?;
+                        self.expect(&TokenKind::Colon, "`:`")?;
+                        let fty = self.parse_ty_name("field type")?;
+                        fields.push(Param { name: fname, ty: fty });
+                        if self.peek().kind == TokenKind::Comma {
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::RParen, "`)`")?;
+            }
+            variants.push(EnumVariant { name: vname, fields });
+            self.consume_comma_opt();
+        }
+        Ok(EnumDecl {
+            id,
+            name,
+            is_pub,
+            type_params,
+            variants,
+        })
     }
 
     fn consume_comma_opt(&mut self) {
@@ -682,13 +904,15 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<FunctionDecl, Diagnostic> {
+        let is_pub = self.eat_pub();
         self.expect(&TokenKind::Fn, "`fn`")?;
         let (name, ns, ne) = self.expect_ident("function name")?;
+        let type_params = self.parse_type_params_opt()?;
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
         self.expect(&TokenKind::Arrow, "`->`")?;
-        let (return_ty, _, _) = self.expect_ident("return type")?;
+        let return_ty = self.parse_ty_name("return type")?;
         let mut effects = Vec::new();
         loop {
             match self.peek().kind {
@@ -738,6 +962,8 @@ impl Parser {
             id: fn_id,
             name,
             name_span: (ns, ne),
+            is_pub,
+            type_params,
             params,
             return_ty,
             effects,
@@ -753,7 +979,7 @@ impl Parser {
         loop {
             let (name, _, _) = self.expect_ident("parameter name")?;
             self.expect(&TokenKind::Colon, "`:`")?;
-            let (ty, _, _) = self.expect_ident("parameter type")?;
+            let ty = self.parse_ty_name("parameter type")?;
             params.push(Param { name, ty });
             if self.peek().kind == TokenKind::Comma {
                 self.bump();
@@ -1019,6 +1245,89 @@ impl Parser {
             cond,
             then_block,
             else_block,
+        })
+    }
+
+    fn parse_match(&mut self) -> Result<Expr, Diagnostic> {
+        self.expect(&TokenKind::Match, "`match`")?;
+        let scrutinee = self.parse_expr()?;
+        let open = self.expect(&TokenKind::LBrace, "`{`")?;
+        let id = self.next_id();
+        let mut arms = Vec::new();
+        loop {
+            self.skip_dots();
+            if self.peek().kind == TokenKind::RBrace {
+                self.bump();
+                break;
+            }
+            if self.peek().kind == TokenKind::Eof {
+                let p = self.peek().clone();
+                return Err(self.err(p.start, p.end, "expected `}`"));
+            }
+            arms.push(self.parse_match_arm()?);
+            self.consume_comma_opt();
+        }
+        if arms.is_empty() {
+            return Err(self.err(open.start, open.end, "match needs at least one arm"));
+        }
+        Ok(Expr::Match {
+            id,
+            scrutinee: Box::new(scrutinee),
+            arms,
+        })
+    }
+
+    fn parse_match_arm(&mut self) -> Result<MatchArm, Diagnostic> {
+        let id = self.next_id();
+        let head = self.peek().clone();
+        if let TokenKind::Ident(n) = &head.kind {
+            if n == "_" {
+                self.bump();
+                self.expect(&TokenKind::FatArrow, "`=>`")?;
+                let body = self.parse_expr()?;
+                return Ok(MatchArm {
+                    id,
+                    enum_name: None,
+                    variant: None,
+                    bindings: Vec::new(),
+                    body,
+                });
+            }
+        }
+        let (mut enum_name, _, _) = self.expect_ident("enum name")?;
+        self.expect(&TokenKind::ColonColon, "`::`")?;
+        let (mut variant, _, _) = self.expect_ident("variant name")?;
+        if self.peek().kind == TokenKind::ColonColon {
+            // `mod::Enum::Variant`: the first two segments name the enum.
+            self.bump();
+            let (real_variant, _, _) = self.expect_ident("variant name")?;
+            enum_name = format!("{enum_name}::{variant}");
+            variant = real_variant;
+        }
+        let mut bindings = Vec::new();
+        if self.peek().kind == TokenKind::LParen {
+            self.bump();
+            if self.peek().kind != TokenKind::RParen {
+                loop {
+                    let (b, _, _) = self.expect_ident("binding name")?;
+                    bindings.push(b);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+        }
+        self.expect(&TokenKind::FatArrow, "`=>`")?;
+        let body = self.parse_expr()?;
+        Ok(MatchArm {
+            id,
+            enum_name: Some(enum_name),
+            variant: Some(variant),
+            bindings,
+            body,
         })
     }
 
@@ -1396,10 +1705,54 @@ impl Parser {
                 let id = self.next_id();
                 Ok(Expr::Await { id, name })
             }
+            TokenKind::Match => self.parse_match(),
             TokenKind::Ident(name) => {
                 let name = name.clone();
                 let (s, e) = (t.start, t.end);
                 self.bump();
+                if self.peek().kind == TokenKind::ColonColon {
+                    // `Enum::Variant`, `Enum::Variant(args)`,
+                    // `mod::Enum::Variant`, `mod::Enum::Variant(args)`,
+                    // `mod::Fn(args)` (resolved in modules), or
+                    // `mod::Struct { ... }` (qualified struct literal).
+                    self.bump();
+                    let (second, _, _) = self.expect_ident("name after `::`")?;
+                    if self.peek().kind == TokenKind::ColonColon {
+                        self.bump();
+                        let (variant, _, _) = self.expect_ident("variant name after `::`")?;
+                        let args = self.parse_call_args_opt()?;
+                        let id = self.next_id();
+                        let _ = (s, e);
+                        return Ok(Expr::EnumCtor {
+                            id,
+                            enum_name: format!("{name}::{second}"),
+                            variant,
+                            args,
+                        });
+                    }
+                    if self.peek().kind == TokenKind::LBrace {
+                        // `mod::Struct { f: v, ... }`; a `{` can never start
+                        // enum-constructor args, so this is unambiguous.
+                        self.bump();
+                        let fields = self.parse_struct_lit_fields()?;
+                        let id = self.next_id();
+                        let _ = (s, e);
+                        return Ok(Expr::StructLit {
+                            id,
+                            name: format!("{name}::{second}"),
+                            fields,
+                        });
+                    }
+                    let args = self.parse_call_args_opt()?;
+                    let id = self.next_id();
+                    let _ = (s, e);
+                    return Ok(Expr::EnumCtor {
+                        id,
+                        enum_name: name,
+                        variant: second,
+                        args,
+                    });
+                }
                 if self.peek().kind == TokenKind::LParen {
                     self.bump();
                     let mut args = Vec::new();
@@ -1426,21 +1779,7 @@ impl Parser {
                 {
                     // `Point { x: 1, y: 2 }` struct literal (capitalized).
                     self.bump();
-                    let mut fields = Vec::new();
-                    if self.peek().kind != TokenKind::RBrace {
-                        loop {
-                            let (fname, _, _) = self.expect_ident("field name")?;
-                            self.expect(&TokenKind::Colon, "`:`")?;
-                            let val = self.parse_expr()?;
-                            fields.push((fname, val));
-                            if self.peek().kind == TokenKind::Comma {
-                                self.bump();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(&TokenKind::RBrace, "`}`")?;
+                    let fields = self.parse_struct_lit_fields()?;
                     let id = self.next_id();
                     Ok(Expr::StructLit { id, name, fields })
                 } else {
@@ -1450,5 +1789,45 @@ impl Parser {
             }
             _ => Err(self.err(t.start, t.end, "expected an expression")),
         }
+    }
+
+    /// Optional `(a, b, ...)` call/constructor arguments (empty when absent).
+    fn parse_call_args_opt(&mut self) -> Result<Vec<Expr>, Diagnostic> {
+        let mut args = Vec::new();
+        if self.peek().kind == TokenKind::LParen {
+            self.bump();
+            if self.peek().kind != TokenKind::RParen {
+                loop {
+                    args.push(self.parse_expr()?);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+        }
+        Ok(args)
+    }
+
+    /// `{ f: v, ... }` struct-literal fields (brace already consumed).
+    fn parse_struct_lit_fields(&mut self) -> Result<Vec<(String, Expr)>, Diagnostic> {
+        let mut fields = Vec::new();
+        if self.peek().kind != TokenKind::RBrace {
+            loop {
+                let (fname, _, _) = self.expect_ident("field name")?;
+                self.expect(&TokenKind::Colon, "`:`")?;
+                let val = self.parse_expr()?;
+                fields.push((fname, val));
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RBrace, "`}`")?;
+        Ok(fields)
     }
 }

@@ -339,6 +339,170 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
             );
             dst
         }
+        Expr::EnumCtor {
+            enum_name, variant, args, ..
+        } => {
+            // Enums reuse the struct runtime value: the tag lives in a
+            // hidden `__variant` string field, payloads in positional
+            // `f0`, `f1`, ... fields. No new MIR op is needed, so the
+            // existing backends keep working unchanged.
+            let tag = tmp_name(tmp);
+            push(
+                instrs,
+                e.id(),
+                MirOp::ConstStr {
+                    into: tag.clone(),
+                    value: variant.clone(),
+                },
+            );
+            let mut fields = vec![("__variant".to_string(), tag)];
+            for (i, a) in args.iter().enumerate() {
+                let v = lower_expr_to_value(a, instrs, tmp);
+                fields.push((format!("f{i}"), v));
+            }
+            let dst = tmp_name(tmp);
+            push(
+                instrs,
+                e.id(),
+                MirOp::StructNew {
+                    into: dst.clone(),
+                    name: enum_name.clone(),
+                    fields,
+                },
+            );
+            dst
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            // Tag dispatch over existing ops: read `__variant`, compare
+            // against each arm in order, bind payloads with `FieldGet`.
+            let s = lower_expr_to_value(scrutinee, instrs, tmp);
+            let tag = tmp_name(tmp);
+            push(
+                instrs,
+                e.id(),
+                MirOp::FieldGet {
+                    into: tag.clone(),
+                    base: s.clone(),
+                    field: "__variant".to_string(),
+                },
+            );
+            let dst = tmp_name(tmp);
+            // Arm bindings share the flat value namespace, so save any
+            // same-named outer bindings and restore them per arm.
+            let mut names: Vec<String> = Vec::new();
+            for arm in arms.iter() {
+                for b in arm.bindings.iter() {
+                    if !names.contains(b) {
+                        names.push(b.clone());
+                    }
+                }
+            }
+            let mut saved: Vec<(String, String)> = Vec::new();
+            for n in names.iter() {
+                let sv = tmp_name(tmp);
+                push(
+                    instrs,
+                    e.id(),
+                    MirOp::Copy {
+                        into: sv.clone(),
+                        from: n.clone(),
+                    },
+                );
+                saved.push((n.clone(), sv));
+            }
+            let mut pending_jfalse: Option<usize> = None;
+            let mut end_jumps: Vec<usize> = Vec::new();
+            for arm in arms.iter() {
+                if let Some(jf) = pending_jfalse.take() {
+                    let target = instrs.len();
+                    patch_target(instrs, jf, target);
+                }
+                if !arm.is_wildcard() {
+                    let want = tmp_name(tmp);
+                    push(
+                        instrs,
+                        e.id(),
+                        MirOp::ConstStr {
+                            into: want.clone(),
+                            value: arm.variant.clone().unwrap_or_default(),
+                        },
+                    );
+                    let cmp = tmp_name(tmp);
+                    push(
+                        instrs,
+                        e.id(),
+                        MirOp::Eq {
+                            into: cmp.clone(),
+                            left: tag.clone(),
+                            right: want,
+                        },
+                    );
+                    pending_jfalse = Some(push(
+                        instrs,
+                        e.id(),
+                        MirOp::JumpIfFalse {
+                            cond: cmp,
+                            target: usize::MAX,
+                        },
+                    ));
+                }
+                for (i, b) in arm.bindings.iter().enumerate() {
+                    push(
+                        instrs,
+                        &arm.id,
+                        MirOp::FieldGet {
+                            into: b.clone(),
+                            base: s.clone(),
+                            field: format!("f{i}"),
+                        },
+                    );
+                }
+                let v = lower_expr_to_value(&arm.body, instrs, tmp);
+                if v != dst {
+                    push(
+                        instrs,
+                        e.id(),
+                        MirOp::Copy {
+                            into: dst.clone(),
+                            from: v,
+                        },
+                    );
+                }
+                for (n, sv) in saved.iter() {
+                    push(
+                        instrs,
+                        e.id(),
+                        MirOp::Copy {
+                            into: n.clone(),
+                            from: sv.clone(),
+                        },
+                    );
+                }
+                end_jumps.push(push(instrs, e.id(), MirOp::Jump { target: usize::MAX }));
+            }
+            // No arm matched (unreachable when HIR accepted the program):
+            // force a loud runtime error, never a silent default value.
+            if let Some(jf) = pending_jfalse.take() {
+                let target = instrs.len();
+                patch_target(instrs, jf, target);
+            }
+            push(
+                instrs,
+                e.id(),
+                MirOp::FieldGet {
+                    into: dst.clone(),
+                    base: s.clone(),
+                    field: "__match_fallthrough".to_string(),
+                },
+            );
+            let end_at = instrs.len();
+            for j in end_jumps {
+                patch_target(instrs, j, end_at);
+            }
+            dst
+        }
         Expr::Index { base, index, .. } => {
             let b = lower_expr_to_value(base, instrs, tmp);
             let i = lower_expr_to_value(index, instrs, tmp);
@@ -580,6 +744,10 @@ fn bin(
 
 /// Lower a fully-checked program to MIR.
 pub fn lower(program: &Program) -> MirModule {
+    // Same module flattening as the checker (callers must check first;
+    // unresolved references lower best-effort, as before).
+    let (flat, _) = crate::modules::resolve(program);
+    let program = &flat;
     let mut out = MirModule::default();
     for f in &program.functions {
         let mut instrs = Vec::new();

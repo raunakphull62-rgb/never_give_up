@@ -1,86 +1,68 @@
-# Language Features (v0.1 scope)
+# Language Features
 
-## Built-in Effects (only these three at first)
-- `throws` - typed, propagatable failure (Rust `Result`-style, not exceptions)
-- `async` - marks a function as performing asynchronous work
-- `cancel` - cooperative cancellation signal within a task tree
+## v0.1 (Stage 1 - verified complete)
+- Built-in effects: throws, async, cancel
+- Structured concurrency: task_group, spawn, await, compile-time
+  detection of unawaited/leaked tasks (E-TASK-CANCEL,
+  E-SPAWN-OUTSIDE-GROUP)
+- Structural, per-scope node identity (no global counters; every
+  child's path is generated while its parent's scope is still entered)
+- Structured JSON-object diagnostics
+- Managed memory mode only
+- Single blessed CLI, including a working formatter (klang fmt)
+- Basic package manifest + lockfile with tamper detection
+- Salsa-based incremental compilation, verified via salsa_gates and
+  salsa_spike test suites
 
-Effects are inferred where possible but must be visible in a function's
-signature when they affect callers.
+v0.1 is verified: 79 tests passing across 12 test files, including the
+exact parent-prefix containment and sibling-uniqueness assertions that
+twice shipped broken in earlier attempts.
 
-## Structured Concurrency
-- `task_group { ... }` creates a lexical scope owning all tasks spawned inside it
-- `spawn expr()` creates a child task tied to the enclosing task_group
-- A child task that is not `await`-ed or explicitly detached before its
-  `task_group` scope ends is a **compile error**, not a runtime leak
-- Start single-threaded with lexical task groups only. No detached tasks,
-  no arbitrary spawning, no multiple async runtimes in v0.1.
-- Failure propagation: lossless by default (Python `ExceptionGroup`
-  semantics) - one child failure returns unwrapped, several become
-  `E-TASK-GROUP` with each failure under `related`; siblings are
-  cancelled (loop back-edges are checkpoints) and joined, never detached
+## v0.2 - Maturity Phase (current)
 
-## Type System
-- Explicit absence (no implicit null)
-- Type inference for local bindings; explicit types on public function signatures
-- `throws` and `async` are the only visible effect markers in v0.1
-- Generics deferred past v0.1
+Goal: make Klang expressive enough to eventually host its own compiler.
+Self-hosting itself is NOT part of this phase - only the language
+features a compiler would need to exist first.
 
-## Error Handling
-- `throws` functions return a typed failure channel, propagated with a
-  low-friction operator, not exceptions
-- Every compiler-raised error is a structured diagnostic object (see
-  ARCHITECTURE.md), never a bare string
+### 1. Enums with pattern matching
+- Tagged sum-type declarations, variants may carry data
+- `match` expressions/statements that destructure variants
+- Exhaustiveness checking as a real compile-time diagnostic (not a
+  runtime panic) when a match does not cover all variants
 
-## Metaprogramming (deliberately minimal in v0.1)
-- Only typed, append-only `derive`-style declarations are allowed
-- Every generated node carries an origin chain back to its source
-- No arbitrary procedural macros in the first release
+### 2. Generics
+- Generic type parameters on structs, enums, and functions
+- Type inference for generic calls where the type argument is
+  unambiguous from the arguments given
+- At minimum: a generic list-like container and a generic key-value
+  container, since a compiler's own AST/symbol-table representation
+  needs both
 
-## Toolchain (single blessed CLI)
-- `warden build` / `warden run` / `warden test` / `warden fmt` / `warden check` / `warden doc`
-- One package manifest as the single source of truth
-- Content-addressed lockfile for reproducible builds
+### 3. Multi-file module system
+- Named modules, explicit pub/private visibility on declarations
+- Qualified cross-module references (e.g. lexer::Token)
+- A private cross-module reference is a compile error, not a silent
+  success
 
-## Memory Safety (progressive)
-v0.1 ships **Managed mode only** (tracing/reference-counted safe runtime,
-no lifetime annotations required). Value/Owned/Unsafe modes are deferred.
+### Mandatory test requirements for v0.2 (same discipline as v0.1)
+Every test must be a real #[test] with assert!/assert_eq!/assert_ne! -
+not a print-based demo. At minimum:
+- Enum: correct destructuring of a data-carrying variant; a
+  non-exhaustive match is a compile-time diagnostic with a real error
+  code
+- Generics: two instantiations of the same generic with different
+  concrete types do not share or corrupt state; a type mismatch in a
+  generic call site is a compile-time diagnostic
+- Modules: a private declaration is a compile error when referenced
+  from another module; a pub declaration is successfully callable via
+  its qualified path; same-named private items in different modules do
+  not collide
 
-## AI-Legibility (the differentiator)
-- Every diagnostic is machine-parseable JSON
-- Executable contracts/preconditions, not full theorem proving
-- Killer demo target: the same subtly-wrong AI-generated function that
-  compiles silently in Python/Java fails to compile here with an exact,
-  fixable reason
-
-## Mandatory Test Requirements (added after two shipped scoping bugs)
-
-These are not optional "nice to have" tests - a Stage 1 implementation is
-not complete without them, and no PR should be merged without them passing:
-
-1. **Sibling uniqueness at every depth.** For each of: two top-level
-   functions, two statements inside the same block, two nested task_groups
-   - assert their generated NodeIds/paths are distinct.
-
-2. **Parent-prefix containment.** For every node type that has children
-   (`FunctionDecl`, `TaskGroup`, `Block`), assert every child's path
-   `starts_with()` the parent's own path, generated *while the parent's
-   scope is still entered*. This is the exact assertion that would have
-   caught the task_group bug before it shipped twice.
-
-3. **No dead/duplicate core types.** A CI check (`grep -c "struct NodeId"
-   src/*.rs` equal to 1, same for `struct Parser`) - this project has
-   twice accumulated a second, unused copy of these types in a different
-   file while fixes were applied only to one of them.
-
-4. **Print real values, not narration.** Any test/demo function whose job
-   is to prove a property (e.g. `demonstrate_sibling_uniqueness`) must
-   assert the property in code (`assert_ne!`, `assert!(x.starts_with(y))`)
-   and panic on failure - not just print a success message string.
-
-## Explicitly Out of Scope for v0.1
-- General algebraic effect handlers
-- Arbitrary procedural macros
-- Multi-threaded/parallel task execution
-- Production-grade borrow checker / ownership modes beyond "managed"
-- A theorem prover or full refinement-type system
+## Explicitly Out of Scope for v0.2
+- Self-hosting the compiler or any self-hosted compiler component
+- Anything already present in the codebase beyond v0.1's original scope
+  (Salsa internals, JIT, LSP, ownership modes, package manager
+  internals) - leave as-is unless it directly blocks one of the three
+  features above
+- Generic trait bounds / typeclasses (deferred to a later phase)
+- Full ownership/borrow modes (still deferred per v0.1's original scope)

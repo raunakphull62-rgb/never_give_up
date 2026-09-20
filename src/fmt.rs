@@ -4,7 +4,9 @@
 //! parenthesized (always correct, idempotent: re-parse drops parens,
 //! re-emit restores them). `fmt(fmt(x)) == fmt(x)`.
 
-use crate::ast::{AssignTarget, Block, Expr, FunctionDecl, Program, Stmt, StructDecl};
+use crate::ast::{
+    AssignTarget, Block, EnumDecl, Expr, FunctionDecl, ModDecl, Program, Stmt, StructDecl,
+};
 
 fn indent(n: usize) -> String {
     "    ".repeat(n)
@@ -36,7 +38,17 @@ pub fn fmt_program(p: &Program) -> String {
         out.push_str(&fmt_struct(s));
         out.push('\n');
     }
-    if !p.structs.is_empty() && !p.functions.is_empty() {
+    for e in &p.enums {
+        out.push_str(&fmt_enum(e));
+        out.push('\n');
+    }
+    for m in &p.mods {
+        out.push_str(&fmt_mod(m));
+        out.push('\n');
+    }
+    if (!p.structs.is_empty() || !p.enums.is_empty() || !p.mods.is_empty())
+        && !p.functions.is_empty()
+    {
         out.push('\n');
     }
     for (i, f) in p.functions.iter().enumerate() {
@@ -48,13 +60,84 @@ pub fn fmt_program(p: &Program) -> String {
     out
 }
 
+fn fmt_tparams(tps: &[String]) -> String {
+    if tps.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", tps.join(", "))
+    }
+}
+
+fn fmt_pub(is_pub: bool) -> &'static str {
+    if is_pub {
+        "pub "
+    } else {
+        ""
+    }
+}
+
+fn fmt_mod(m: &ModDecl) -> String {
+    let mut out = format!("mod {} {{\n", m.name);
+    for s in &m.structs {
+        out.push_str(&indent(1));
+        out.push_str(&fmt_struct(s));
+        out.push('\n');
+    }
+    for e in &m.enums {
+        out.push_str(&indent(1));
+        out.push_str(&fmt_enum(e));
+        out.push('\n');
+    }
+    for f in &m.functions {
+        for line in fmt_function(f).lines() {
+            out.push_str(&indent(1));
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
 fn fmt_struct(s: &StructDecl) -> String {
     let fields: Vec<String> = s
         .fields
         .iter()
         .map(|f| format!("{}: {}", f.name, f.ty))
         .collect();
-    format!("struct {} {{ {} }}", s.name, fields.join(", "))
+    format!(
+        "{}struct {}{} {{ {} }}",
+        fmt_pub(s.is_pub),
+        s.name,
+        fmt_tparams(&s.type_params),
+        fields.join(", ")
+    )
+}
+
+fn fmt_enum(e: &EnumDecl) -> String {
+    let variants: Vec<String> = e
+        .variants
+        .iter()
+        .map(|v| {
+            if v.fields.is_empty() {
+                v.name.clone()
+            } else {
+                let fs: Vec<String> = v
+                    .fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, f.ty))
+                    .collect();
+                format!("{}({})", v.name, fs.join(", "))
+            }
+        })
+        .collect();
+    format!(
+        "{}enum {}{} {{ {} }}",
+        fmt_pub(e.is_pub),
+        e.name,
+        fmt_tparams(&e.type_params),
+        variants.join(", ")
+    )
 }
 
 fn fmt_function(f: &FunctionDecl) -> String {
@@ -69,8 +152,10 @@ fn fmt_function(f: &FunctionDecl) -> String {
         effects.push_str(e.name());
     }
     format!(
-        "fn {}({}) -> {}{} {{\n{}}}\n",
+        "{}fn {}{}({}) -> {}{} {{\n{}}}\n",
+        fmt_pub(f.is_pub),
         f.name,
+        fmt_tparams(&f.type_params),
         params.join(", "),
         f.return_ty,
         effects,
@@ -174,6 +259,42 @@ fn fmt_expr(e: &Expr) -> String {
                 .map(|(k, v)| format!("{k}: {}", fmt_expr(v)))
                 .collect();
             format!("{name} {{ {} }}", fs.join(", "))
+        }
+        Expr::EnumCtor {
+            enum_name,
+            variant,
+            args,
+            ..
+        } => {
+            if args.is_empty() {
+                format!("{enum_name}::{variant}")
+            } else {
+                format!(
+                    "{enum_name}::{variant}({})",
+                    args.iter().map(fmt_expr).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            let as_: Vec<String> = arms
+                .iter()
+                .map(|a| {
+                    let pat = match (&a.enum_name, &a.variant) {
+                        (Some(en), Some(v)) => {
+                            if a.bindings.is_empty() {
+                                format!("{en}::{v}")
+                            } else {
+                                format!("{en}::{v}({})", a.bindings.join(", "))
+                            }
+                        }
+                        _ => "_".to_string(),
+                    };
+                    format!("{} => {}", pat, fmt_expr(&a.body))
+                })
+                .collect();
+            format!("match {} {{ {} }}", fmt_expr(scrutinee), as_.join(", "))
         }
         Expr::Index { base, index, .. } => {
             format!("{}[{}]", fmt_expr(base), fmt_expr(index))

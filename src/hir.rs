@@ -12,10 +12,13 @@
 //! - struct literals must name a declared `struct`, else E-UNDEFINED
 //! - binary/unary ops, calls, returns and conditions are type-checked,
 //!   else E-TYPE (`Unknown` from maps/indexes/method generics is a wildcard)
+//! - generic functions/structs/enums (`fn f<T>`, `struct B<T>`, `enum O<T>`)
+//!   infer `T` per call/construction site from the argument types; a
+//!   conflicting instantiation is E-TYPE
 
 use std::collections::HashMap;
 
-use crate::ast::{AssignTarget, Block, Effect, Expr, FunctionDecl, Program, Stmt};
+use crate::ast::{AssignTarget, Block, Effect, Expr, FunctionDecl, MatchArm, Program, Stmt};
 use crate::diagnostics::Diagnostic;
 
 pub const FILE: &str = "input.warden";
@@ -24,6 +27,9 @@ pub const FILE: &str = "input.warden";
 ///
 /// `Unknown` is the wildcard: map lookups, dynamic indexes and generic
 /// method results coerce to anything without emitting E-TYPE.
+/// `Param` is a generic type variable (e.g. `T` in `fn f<T>(x: T)`); it is
+/// also a wildcard wherever a concrete type is required, because its
+/// instantiation is only known per call site, never in a generic body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Int,
@@ -33,6 +39,8 @@ pub enum Ty {
     Array,
     Map,
     Struct(String),
+    Enum(String),
+    Param(String),
     Void,
     Unknown,
 }
@@ -47,6 +55,8 @@ impl Ty {
             Ty::Array => "array".to_string(),
             Ty::Map => "map".to_string(),
             Ty::Struct(n) => n.clone(),
+            Ty::Enum(n) => n.clone(),
+            Ty::Param(n) => n.clone(),
             Ty::Void => "void".to_string(),
             Ty::Unknown => "unknown".to_string(),
         }
@@ -67,6 +77,31 @@ pub fn parse_ty(s: &str) -> Ty {
         "bool" => Ty::Bool,
         "void" | "()" => Ty::Void,
         _ => Ty::Unknown,
+    }
+}
+
+/// Enum registry: enum name -> variant name -> payload field types.
+pub type EnumTable = HashMap<String, HashMap<String, Vec<Ty>>>;
+
+/// Resolve a parameter annotation: known enum names become nominal
+/// `Ty::Enum`, everything else keeps `parse_ty` behavior (struct names
+/// stay `Unknown`, as before).
+fn resolve_param_ty(s: &str, enums: &EnumTable) -> Ty {
+    if enums.contains_key(s) {
+        Ty::Enum(s.to_string())
+    } else {
+        parse_ty(s)
+    }
+}
+
+/// Resolve a declared annotation inside a generic declaration: a name that
+/// matches one of the declaration's own type parameters becomes a rigid
+/// `Ty::Param`, everything else keeps the existing behavior.
+fn resolve_generic_ty(s: &str, type_params: &[String], enums: &EnumTable) -> Ty {
+    if type_params.iter().any(|t| t == s) {
+        Ty::Param(s.to_string())
+    } else {
+        resolve_param_ty(s, enums)
     }
 }
 
@@ -106,25 +141,92 @@ pub struct TypedHIR {
 struct Sig {
     effects: Vec<Effect>,
     arity: usize,
+    type_params: Vec<String>,
     param_tys: Vec<Ty>,
     return_ty: Ty,
 }
 
 impl TypedHIR {
     pub fn check(program: Program) -> Result<Self, Vec<Diagnostic>> {
-        let mut diags: Vec<Diagnostic> = Vec::new();
+        // Modules resolve first: `mod` blocks flatten into qualified
+        // top-level items (`m::f`) with references rewritten and visibility
+        // enforced. Module-free programs come back identical.
+        let (flat, mut diags) = crate::modules::resolve(&program);
+        let program = flat;
+        // enum name -> variant name -> payload field types (built first so
+        // parameter annotations can resolve to nominal enum types).
+        let mut enums: EnumTable = HashMap::new();
+        let mut enum_names: Vec<String> = Vec::new();
+        for e in &program.enums {
+            enum_names.push(e.name.clone());
+            check_type_params_dup(&e.name, &e.type_params, &mut diags);
+            let mut variants: HashMap<String, Vec<Ty>> = HashMap::new();
+            for v in &e.variants {
+                if variants.contains_key(&v.name) {
+                    diags.push(duplicate(&format!(
+                        "duplicate variant `{}` in enum `{}`",
+                        v.name, e.name
+                    )));
+                }
+                variants.insert(
+                    v.name.clone(),
+                    v.fields
+                        .iter()
+                        .map(|f| {
+                            // Non-generic enums keep the exact historical resolution.
+                            if e.type_params.is_empty() {
+                                parse_ty(&f.ty)
+                            } else {
+                                resolve_generic_ty(&f.ty, &e.type_params, &enums)
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            if enums.contains_key(&e.name) {
+                diags.push(duplicate(&format!("duplicate enum `{}`", e.name)));
+            }
+            enums.insert(e.name.clone(), variants);
+        }
+        enum_names.sort();
+        enum_names.dedup();
+        if enum_names.len() != program.enums.len() {
+            diags.push(Diagnostic::error(
+                "E-DUPLICATE",
+                "duplicate enum name",
+                FILE,
+                0,
+                0,
+                "two enums share one name",
+                &["rename one of them"],
+                "names/duplicate",
+            ));
+        }
         let mut sigs: HashMap<String, Sig> = HashMap::new();
         for f in &program.functions {
             if sigs.contains_key(&f.name) {
                 diags.push(duplicate(&format!("duplicate function `{}`", f.name)));
             }
+            check_type_params_dup(&f.name, &f.type_params, &mut diags);
+            // Non-generic functions keep the exact historical resolution
+            // (`parse_ty` on the return type); generic ones preserve `Param`.
+            let return_ty = if f.type_params.is_empty() {
+                parse_ty(&f.return_ty)
+            } else {
+                resolve_generic_ty(&f.return_ty, &f.type_params, &enums)
+            };
             sigs.insert(
                 f.name.clone(),
                 Sig {
                     effects: f.effects.clone(),
                     arity: f.params.len(),
-                    param_tys: f.params.iter().map(|p| parse_ty(&p.ty)).collect(),
-                    return_ty: parse_ty(&f.return_ty),
+                    type_params: f.type_params.clone(),
+                    param_tys: f
+                        .params
+                        .iter()
+                        .map(|p| resolve_generic_ty(&p.ty, &f.type_params, &enums))
+                        .collect(),
+                    return_ty,
                 },
             );
         }
@@ -133,6 +235,7 @@ impl TypedHIR {
         let mut struct_names: Vec<String> = Vec::new();
         for s in &program.structs {
             struct_names.push(s.name.clone());
+            check_type_params_dup(&s.name, &s.type_params, &mut diags);
             let mut fields = HashMap::new();
             for fld in &s.fields {
                 if fields.contains_key(&fld.name) {
@@ -141,7 +244,13 @@ impl TypedHIR {
                         fld.name, s.name
                     )));
                 }
-                fields.insert(fld.name.clone(), parse_ty(&fld.ty));
+                // Non-generic structs keep the exact historical resolution.
+                let fty = if s.type_params.is_empty() {
+                    parse_ty(&fld.ty)
+                } else {
+                    resolve_generic_ty(&fld.ty, &s.type_params, &enums)
+                };
+                fields.insert(fld.name.clone(), fty);
             }
             struct_fields.insert(s.name.clone(), fields);
         }
@@ -160,8 +269,16 @@ impl TypedHIR {
             ));
         }
         let structs: Vec<String> = struct_names;
+        for e in &program.enums {
+            if struct_fields.contains_key(&e.name) {
+                diags.push(duplicate(&format!(
+                    "type `{}` declared as both enum and struct",
+                    e.name
+                )));
+            }
+        }
         for f in &program.functions {
-            check_function(f, &sigs, &structs, &struct_fields, &mut diags);
+            check_function(f, &sigs, &structs, &struct_fields, &enums, &mut diags);
         }
         if diags.is_empty() {
             Ok(Self { program })
@@ -184,6 +301,7 @@ fn check_function(
     sigs: &HashMap<String, Sig>,
     structs: &[String],
     struct_fields: &HashMap<String, HashMap<String, Ty>>,
+    enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
 ) {
     let mut defined: HashMap<String, Ty> = HashMap::new();
@@ -194,7 +312,7 @@ fn check_function(
                 p.name, f.name
             )));
         }
-        defined.insert(p.name.clone(), parse_ty(&p.ty));
+        defined.insert(p.name.clone(), resolve_param_ty(&p.ty, enums));
     }
     let mut cx = Ctx { loop_depth: 0 };
     check_block(
@@ -203,6 +321,7 @@ fn check_function(
         sigs,
         structs,
         struct_fields,
+        enums,
         diags,
         0,
         &mut Vec::new(),
@@ -231,6 +350,7 @@ fn check_block(
     sigs: &HashMap<String, Sig>,
     structs: &[String],
     struct_fields: &HashMap<String, HashMap<String, Ty>>,
+    enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
     depth: usize,
     group_stack: &mut Vec<Vec<PendingSpawn>>,
@@ -263,6 +383,7 @@ fn check_block(
                         sigs,
                         structs,
                         struct_fields,
+                        enums,
                         diags,
                         depth,
                         &mut awaited_here,
@@ -275,6 +396,7 @@ fn check_block(
                         sigs,
                         structs,
                         struct_fields,
+                        enums,
                         diags,
                         depth,
                         &mut awaited_here,
@@ -293,6 +415,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -304,6 +427,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -330,6 +454,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -343,6 +468,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -367,6 +493,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -394,6 +521,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -408,6 +536,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth + 1,
                     group_stack,
@@ -424,6 +553,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -435,6 +565,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -456,6 +587,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth + 1,
                     group_stack,
@@ -472,6 +604,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -491,6 +624,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth + 1,
                     group_stack,
@@ -507,6 +641,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth,
                     &mut awaited_here,
@@ -521,6 +656,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth + 1,
                     group_stack,
@@ -536,6 +672,7 @@ fn check_block(
                         sigs,
                         structs,
                         struct_fields,
+                        enums,
                         diags,
                         depth + 1,
                         group_stack,
@@ -553,6 +690,7 @@ fn check_block(
                     sigs,
                     structs,
                     struct_fields,
+                    enums,
                     diags,
                     depth + 1,
                     group_stack,
@@ -574,8 +712,10 @@ fn check_block(
 
 /// `value` of type `got` flows into a slot of type `want`.
 /// `Unknown` on either side is a wildcard (dynamic maps/indexes).
+/// `Param` on either side is also a wildcard: a type variable's
+/// instantiation is only known per call site, never in a generic body.
 fn assignable(got: &Ty, want: &Ty) -> bool {
-    if matches!(got, Ty::Unknown) || matches!(want, Ty::Unknown) {
+    if matches!(got, Ty::Unknown | Ty::Param(_)) || matches!(want, Ty::Unknown | Ty::Param(_)) {
         return true;
     }
     match (got, want) {
@@ -605,6 +745,7 @@ fn check_assign_target(
     sigs: &HashMap<String, Sig>,
     structs: &[String],
     struct_fields: &HashMap<String, HashMap<String, Ty>>,
+    enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
     depth: usize,
     awaited: &mut Vec<String>,
@@ -621,10 +762,10 @@ fn check_assign_target(
         }
         AssignTarget::Index { base, index } => {
             let base_ty = check_expr(
-                base, caller, sigs, structs, struct_fields, diags, depth, awaited, defined,
+                base, caller, sigs, structs, struct_fields, enums, diags, depth, awaited, defined,
             );
             let idx_ty = check_expr(
-                index, caller, sigs, structs, struct_fields, diags, depth, awaited, defined,
+                index, caller, sigs, structs, struct_fields, enums, diags, depth, awaited, defined,
             );
             match &base_ty {
                 Ty::Array => {
@@ -650,7 +791,7 @@ fn check_assign_target(
         }
         AssignTarget::Field { base, field } => {
             let base_ty = check_expr(
-                base, caller, sigs, structs, struct_fields, diags, depth, awaited, defined,
+                base, caller, sigs, structs, struct_fields, enums, diags, depth, awaited, defined,
             );
             match &base_ty {
                 Ty::Struct(name) => {
@@ -714,6 +855,112 @@ fn arity_mismatch(caller: &str, callee: &str, want: usize, got: usize) -> Diagno
     )
 }
 
+/// Non-exhaustive `match`: a real diagnostic naming every missing variant.
+fn match_exhaustive(enum_name: &str, missing: &[String]) -> Diagnostic {
+    let want: Vec<String> = missing
+        .iter()
+        .map(|m| format!("{enum_name}::{m}"))
+        .collect();
+    Diagnostic::error(
+        "E-MATCH-EXHAUSTIVE",
+        &format!("non-exhaustive match on `{enum_name}`: missing {}", want.join(", ")),
+        FILE,
+        0,
+        0,
+        &format!("match on `{enum_name}` does not cover all variants"),
+        &["add arms for the missing variants", "add a wildcard `_` arm"],
+        "match/exhaustiveness",
+    )
+}
+
+fn enum_payload_arity(enum_name: &str, variant: &str, want: usize, got: usize) -> Diagnostic {
+    Diagnostic::error(
+        "E-ARITY",
+        &format!("`{enum_name}::{variant}` carries {want} payloads, got {got}"),
+        FILE,
+        0,
+        0,
+        "enum constructor arity must match the variant declaration",
+        &["pass the right number of payload values"],
+        "calls/arity",
+    )
+}
+
+fn match_binding_arity(enum_name: &str, variant: &str, want: usize, got: usize) -> Diagnostic {
+    Diagnostic::error(
+        "E-ARITY",
+        &format!("pattern `{enum_name}::{variant}` binds {got} names but the variant carries {want}"),
+        FILE,
+        0,
+        0,
+        "match bindings must match the variant payload",
+        &["bind exactly the payload fields"],
+        "match/bindings",
+    )
+}
+
+/// Unify one formal (possibly containing `Ty::Param`) against an actual
+/// argument type, extending `subst`. `subst` is always fresh per call or
+/// construction site, so instantiations never leak across sites. Returns
+/// false after pushing an `E-TYPE` diagnostic on conflict.
+fn unify_generic(
+    formal: &Ty,
+    actual: &Ty,
+    subst: &mut HashMap<String, Ty>,
+    what: &str,
+    diags: &mut Vec<Diagnostic>,
+) -> bool {
+    match formal {
+        Ty::Param(p) => match actual {
+            // Dynamic actuals constrain nothing; identical variables agree.
+            Ty::Unknown | Ty::Param(_) => true,
+            _ => match subst.get(p) {
+                None => {
+                    subst.insert(p.clone(), actual.clone());
+                    true
+                }
+                Some(bound) => {
+                    if assignable(actual, bound) {
+                        true
+                    } else {
+                        diags.push(type_mismatch(what, &bound.name(), actual));
+                        false
+                    }
+                }
+            },
+        },
+        _ => {
+            if assignable(actual, formal) {
+                true
+            } else {
+                diags.push(type_mismatch(what, &formal.name(), actual));
+                false
+            }
+        }
+    }
+}
+
+/// Substitute inferred bindings into a generic return type. Unbound
+/// variables (nothing constrained them) become `Unknown`, never an error.
+fn substitute_ty(ty: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::Param(p) => subst.get(p).cloned().unwrap_or(Ty::Unknown),
+        _ => ty.clone(),
+    }
+}
+
+/// Reject duplicated type-parameter names (`fn f<T, T>`).
+fn check_type_params_dup(owner: &str, type_params: &[String], diags: &mut Vec<Diagnostic>) {
+    let mut seen: Vec<&String> = Vec::new();
+    for t in type_params {
+        if seen.contains(&t) {
+            diags.push(duplicate(&format!("duplicate type parameter `{t}` in `{owner}`")));
+        } else {
+            seen.push(t);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_expr(
     e: &Expr,
@@ -721,6 +968,7 @@ fn check_expr(
     sigs: &HashMap<String, Sig>,
     structs: &[String],
     struct_fields: &HashMap<String, HashMap<String, Ty>>,
+    enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
     _depth: usize,
     awaited: &mut Vec<String>,
@@ -743,7 +991,7 @@ fn check_expr(
             // handled by the caller): an unawaitable thread. Reject.
             diags.push(Diagnostic::spawn_position(FILE));
             check_expr(
-                call, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                call, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             )
         }
         Expr::Await { name, .. } => {
@@ -756,7 +1004,7 @@ fn check_expr(
             let mut arg_tys = Vec::with_capacity(args.len());
             for a in args {
                 arg_tys.push(check_expr(
-                    a, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                    a, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                 ));
             }
             if is_builtin(func) {
@@ -780,16 +1028,33 @@ fn check_expr(
                     diags.push(arity_mismatch(&caller.name, func, sig.arity, args.len()));
                     return Ty::Unknown;
                 }
-                for (i, (got, want)) in arg_tys.iter().zip(sig.param_tys.iter()).enumerate() {
-                    if !assignable(got, want) {
-                        diags.push(type_mismatch(
-                            &format!("`{func}` arg {i}"),
-                            &want.name(),
-                            got,
-                        ));
+                if sig.type_params.is_empty() {
+                    for (i, (got, want)) in arg_tys.iter().zip(sig.param_tys.iter()).enumerate() {
+                        if !assignable(got, want) {
+                            diags.push(type_mismatch(
+                                &format!("`{func}` arg {i}"),
+                                &want.name(),
+                                got,
+                            ));
+                        }
+                    }
+                    sig.return_ty.clone()
+                } else {
+                    // Generic call: infer a fresh substitution from the
+                    // arguments, then check each argument against it.
+                    let mut subst: HashMap<String, Ty> = HashMap::new();
+                    let mut ok = true;
+                    for (i, (got, want)) in arg_tys.iter().zip(sig.param_tys.iter()).enumerate() {
+                        if !unify_generic(want, got, &mut subst, &format!("`{func}` arg {i}"), diags) {
+                            ok = false;
+                        }
+                    }
+                    if ok {
+                        substitute_ty(&sig.return_ty, &subst)
+                    } else {
+                        Ty::Unknown
                     }
                 }
-                sig.return_ty.clone()
             } else {
                 diags.push(undefined(func));
                 Ty::Unknown
@@ -806,7 +1071,7 @@ fn check_expr(
         Expr::ArrayLit { elems, .. } => {
             for el in elems {
                 check_expr(
-                    el, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                    el, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                 );
             }
             Ty::Array
@@ -816,24 +1081,21 @@ fn check_expr(
                 diags.push(undefined(name));
                 for (_, v) in fields {
                     check_expr(
-                        v, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                        v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                     );
                 }
                 return Ty::Unknown;
             }
             if let Some(known) = struct_fields.get(name) {
+                // Fresh substitution per literal: each construction site
+                // instantiates the struct's type parameters independently.
+                let mut subst: HashMap<String, Ty> = HashMap::new();
                 for (fname, v) in fields {
                     let vty = check_expr(
-                        v, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                        v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                     );
                     if let Some(want) = known.get(fname) {
-                        if !assignable(&vty, want) {
-                            diags.push(type_mismatch(
-                                &format!("`{name}.{fname}`"),
-                                &want.name(),
-                                &vty,
-                            ));
-                        }
+                        unify_generic(want, &vty, &mut subst, &format!("`{name}.{fname}`"), diags);
                     } else {
                         diags.push(undefined(fname));
                     }
@@ -841,7 +1103,7 @@ fn check_expr(
             } else {
                 for (_, v) in fields {
                     check_expr(
-                        v, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                        v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                     );
                 }
             }
@@ -849,10 +1111,10 @@ fn check_expr(
         }
         Expr::Index { base, index, .. } => {
             let b = check_expr(
-                base, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                base, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let idx = check_expr(
-                index, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                index, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             match &b {
                 Ty::Array => {
@@ -878,20 +1140,27 @@ fn check_expr(
         Expr::MapLit { entries, .. } => {
             for (_, v) in entries {
                 check_expr(
-                    v, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                    v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                 );
             }
             Ty::Map
         }
         Expr::Field { base, field, .. } => {
             let b = check_expr(
-                base, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                base, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             match &b {
                 Ty::Struct(name) => {
                     if let Some(fields) = struct_fields.get(name) {
                         if let Some(ty) = fields.get(field) {
-                            ty.clone()
+                            // A generic field's instantiation is unknown at
+                            // the use site (instantiations are per literal),
+                            // so it stays dynamic instead of constraining
+                            // operators downstream.
+                            match ty {
+                                Ty::Param(_) => Ty::Unknown,
+                                _ => ty.clone(),
+                            }
                         } else {
                             diags.push(undefined(field));
                             Ty::Unknown
@@ -909,22 +1178,22 @@ fn check_expr(
         }
         Expr::MethodCall { base, method, args, .. } => {
             let b = check_expr(
-                base, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                base, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let mut arg_tys = Vec::with_capacity(args.len());
             for a in args {
                 arg_tys.push(check_expr(
-                    a, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                    a, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                 ));
             }
             check_method_call(&b, method, &arg_tys, diags)
         }
         Expr::Add { left, right, .. } => {
             let l = check_expr(
-                left, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let r = check_expr(
-                right, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             match (&l, &r) {
                 (Ty::Unknown, _) | (_, Ty::Unknown) => Ty::Unknown,
@@ -950,10 +1219,10 @@ fn check_expr(
                 _ => "`%`",
             };
             let l = check_expr(
-                left, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let r = check_expr(
-                right, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             if matches!(e, Expr::Mod { .. }) {
                 // `%` is integers only.
@@ -982,10 +1251,10 @@ fn check_expr(
         }
         Expr::Eq { left, right, .. } | Expr::NotEq { left, right, .. } => {
             let l = check_expr(
-                left, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let r = check_expr(
-                right, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             if !equality_ok(&l, &r) {
                 diags.push(type_mismatch("`==` operands", &l.name(), &r));
@@ -997,10 +1266,10 @@ fn check_expr(
         | Expr::Gt { left, right, .. }
         | Expr::GtEq { left, right, .. } => {
             let l = check_expr(
-                left, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let r = check_expr(
-                right, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let ok = matches!(
                 (&l, &r),
@@ -1019,10 +1288,10 @@ fn check_expr(
         }
         Expr::And { left, right, .. } | Expr::Or { left, right, .. } => {
             let l = check_expr(
-                left, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             let r = check_expr(
-                right, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             for (ty, what) in [(&l, "left `&&`/`||`"), (&r, "right `&&`/`||`")] {
                 if !matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown) {
@@ -1033,7 +1302,7 @@ fn check_expr(
         }
         Expr::Not { inner, .. } => {
             let t = check_expr(
-                inner, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                inner, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             if !matches!(t, Ty::Bool | Ty::Int | Ty::Unknown) {
                 diags.push(type_mismatch("`!` operand", "bool", &t));
@@ -1051,7 +1320,7 @@ fn check_expr(
                 return Ty::Int;
             }
             let t = check_expr(
-                inner, caller, sigs, structs, struct_fields, diags, _depth, awaited, defined,
+                inner, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
             );
             match &t {
                 Ty::Int => Ty::Int,
@@ -1063,12 +1332,232 @@ fn check_expr(
                 }
             }
         }
+        Expr::EnumCtor {
+            enum_name, variant, args, ..
+        } => {
+            let payload: Option<Vec<Ty>> = enums
+                .get(enum_name)
+                .and_then(|vs| vs.get(variant))
+                .cloned();
+            match payload {
+                None => {
+                    if enums.contains_key(enum_name) {
+                        diags.push(undefined(&format!("{enum_name}::{variant}")));
+                    } else {
+                        diags.push(undefined(enum_name));
+                    }
+                    for a in args {
+                        check_expr(
+                            a, caller, sigs, structs, struct_fields, enums, diags, _depth,
+                            awaited, defined,
+                        );
+                    }
+                    Ty::Unknown
+                }
+                Some(wants) => {
+                    if args.len() != wants.len() {
+                        diags.push(enum_payload_arity(
+                            enum_name,
+                            variant,
+                            wants.len(),
+                            args.len(),
+                        ));
+                    }
+                    // Fresh substitution per construction site.
+                    let mut subst: HashMap<String, Ty> = HashMap::new();
+                    for (a, want) in args.iter().zip(wants.iter()) {
+                        let got = check_expr(
+                            a, caller, sigs, structs, struct_fields, enums, diags, _depth,
+                            awaited, defined,
+                        );
+                        unify_generic(
+                            want,
+                            &got,
+                            &mut subst,
+                            &format!("`{enum_name}::{variant}` payload"),
+                            diags,
+                        );
+                    }
+                    for a in args.iter().skip(wants.len()) {
+                        check_expr(
+                            a, caller, sigs, structs, struct_fields, enums, diags, _depth,
+                            awaited, defined,
+                        );
+                    }
+                    Ty::Enum(enum_name.clone())
+                }
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => check_match(
+            scrutinee,
+            arms,
+            caller,
+            sigs,
+            structs,
+            struct_fields,
+            enums,
+            diags,
+            _depth,
+            awaited,
+            defined,
+        ),
+    }
+}
+
+/// Check a `match` expression: arm shapes, binding types, branch result
+/// agreement, and exhaustiveness over the scrutinee enum's variants.
+/// Returns the common result type (`Unknown` when nothing is known).
+#[allow(clippy::too_many_arguments)]
+fn check_match(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    caller: &FunctionDecl,
+    sigs: &HashMap<String, Sig>,
+    structs: &[String],
+    struct_fields: &HashMap<String, HashMap<String, Ty>>,
+    enums: &EnumTable,
+    diags: &mut Vec<Diagnostic>,
+    depth: usize,
+    awaited: &mut Vec<String>,
+    defined: &HashMap<String, Ty>,
+) -> Ty {
+    let s_ty = check_expr(
+        scrutinee, caller, sigs, structs, struct_fields, enums, diags, depth, awaited,
+        defined,
+    );
+    match &s_ty {
+        Ty::Enum(ename) => {
+            let variants: HashMap<String, Vec<Ty>> =
+                enums.get(ename).cloned().unwrap_or_default();
+            let mut covered: Vec<String> = Vec::new();
+            let mut has_wildcard = false;
+            let mut result: Option<Ty> = None;
+            for arm in arms {
+                // Arm bindings are scoped to the arm body only.
+                let mut arm_defined = defined.clone();
+                if arm.is_wildcard() {
+                    has_wildcard = true;
+                } else {
+                    let aname = arm.enum_name.as_deref().unwrap_or("");
+                    let avar = arm.variant.as_deref().unwrap_or("");
+                    if aname != ename.as_str() {
+                        diags.push(type_mismatch(
+                            "match arm",
+                            &format!("variant of `{ename}`"),
+                            &Ty::Enum(aname.to_string()),
+                        ));
+                        for b in &arm.bindings {
+                            arm_defined.insert(b.clone(), Ty::Unknown);
+                        }
+                    } else if let Some(wants) = variants.get(avar) {
+                        if arm.bindings.len() != wants.len() {
+                            diags.push(match_binding_arity(
+                                ename,
+                                avar,
+                                wants.len(),
+                                arm.bindings.len(),
+                            ));
+                        }
+                        for (b, w) in arm.bindings.iter().zip(wants.iter()) {
+                            // Payloads of generic type parameters erase to
+                            // dynamic at the use site (same rule as field
+                            // access): the arm cannot know the instantiation.
+                            match w {
+                                Ty::Param(_) => arm_defined.insert(b.clone(), Ty::Unknown),
+                                _ => arm_defined.insert(b.clone(), w.clone()),
+                            };
+                        }
+                        for b in arm.bindings.iter().skip(wants.len()) {
+                            arm_defined.insert(b.clone(), Ty::Unknown);
+                        }
+                        if !covered.contains(&avar.to_string()) {
+                            covered.push(avar.to_string());
+                        }
+                    } else {
+                        diags.push(undefined(&format!("{ename}::{avar}")));
+                        for b in &arm.bindings {
+                            arm_defined.insert(b.clone(), Ty::Unknown);
+                        }
+                    }
+                }
+                let body_ty = check_expr(
+                    &arm.body, caller, sigs, structs, struct_fields, enums, diags, depth,
+                    awaited, &arm_defined,
+                );
+                match &result {
+                    None => result = Some(body_ty),
+                    Some(t0) => {
+                        if !assignable(&body_ty, t0) {
+                            diags.push(type_mismatch("match arm", &t0.name(), &body_ty));
+                        }
+                    }
+                }
+            }
+            if !has_wildcard {
+                let mut missing: Vec<String> = variants
+                    .keys()
+                    .filter(|v| !covered.contains(*v))
+                    .cloned()
+                    .collect();
+                missing.sort();
+                if !missing.is_empty() {
+                    diags.push(match_exhaustive(ename, &missing));
+                }
+            }
+            result.unwrap_or(Ty::Unknown)
+        }
+        Ty::Unknown => {
+            // Dynamic scrutinee: validate arm shapes, skip exhaustiveness.
+            let mut result: Option<Ty> = None;
+            for arm in arms {
+                let mut arm_defined = defined.clone();
+                if !arm.is_wildcard() {
+                    let aname = arm.enum_name.as_deref().unwrap_or("");
+                    let avar = arm.variant.as_deref().unwrap_or("");
+                    let known = enums
+                        .get(aname)
+                        .and_then(|vs| vs.get(avar))
+                        .is_some();
+                    if !known {
+                        diags.push(undefined(&format!("{aname}::{avar}")));
+                    }
+                    for b in &arm.bindings {
+                        arm_defined.insert(b.clone(), Ty::Unknown);
+                    }
+                }
+                let body_ty = check_expr(
+                    &arm.body, caller, sigs, structs, struct_fields, enums, diags, depth,
+                    awaited, &arm_defined,
+                );
+                if result.is_none() {
+                    result = Some(body_ty);
+                }
+            }
+            result.unwrap_or(Ty::Unknown)
+        }
+        other => {
+            diags.push(type_mismatch("match scrutinee", "enum", other));
+            for arm in arms {
+                let mut arm_defined = defined.clone();
+                for b in &arm.bindings {
+                    arm_defined.insert(b.clone(), Ty::Unknown);
+                }
+                check_expr(
+                    &arm.body, caller, sigs, structs, struct_fields, enums, diags, depth,
+                    awaited, &arm_defined,
+                );
+            }
+            Ty::Unknown
+        }
     }
 }
 
 /// `==` allows numeric mixes, identical types, or anything-Unknown.
+/// Type variables are wildcards too (instantiation unknown in the body).
 fn equality_ok(l: &Ty, r: &Ty) -> bool {
-    if matches!(l, Ty::Unknown) || matches!(r, Ty::Unknown) {
+    if matches!(l, Ty::Unknown | Ty::Param(_)) || matches!(r, Ty::Unknown | Ty::Param(_)) {
         return true;
     }
     if l == r {
@@ -1302,6 +1791,10 @@ fn expr_has_spawn(e: &Expr) -> bool {
         Expr::MethodCall { base, args, .. } => {
             expr_has_spawn(base) || args.iter().any(expr_has_spawn)
         }
+        Expr::EnumCtor { args, .. } => args.iter().any(expr_has_spawn),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => expr_has_spawn(scrutinee) || arms.iter().any(|a| expr_has_spawn(&a.body)),
         _ => false,
     }
 }

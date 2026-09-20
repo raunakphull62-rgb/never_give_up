@@ -221,6 +221,8 @@ fn real_import_merges_files() {
     ap.imports.clear();
     let ap = ap.with_file_prefix(1);
     let merged = klang::ast::Program {
+        mods: [lp.mods, ap.mods].concat(),
+        enums: [lp.enums, ap.enums].concat(),
         structs: [lp.structs, ap.structs].concat(),
         imports: vec![],
         functions: [lp.functions, ap.functions].concat(),

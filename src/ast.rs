@@ -66,19 +66,53 @@ impl Effect {
     }
 }
 
-/// Whole parsed program: structs, imports, then a flat list of functions.
+/// Whole parsed program: modules, enums, structs, imports, then functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
+    pub mods: Vec<ModDecl>,
+    pub enums: Vec<EnumDecl>,
     pub structs: Vec<StructDecl>,
     pub imports: Vec<String>,
     pub functions: Vec<FunctionDecl>,
 }
 
-/// A top-level `struct Name { field: Type, ... }` declaration.
+/// A named `mod name { ... }` module: its own namespace of items.
+/// Members are visible outside only when `pub` and only via a qualified
+/// path (`name::item`); identical private names in different modules never
+/// collide because resolution qualifies them (`a::h` vs `b::h`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModDecl {
+    pub id: NodeId,
+    pub name: String,
+    pub structs: Vec<StructDecl>,
+    pub enums: Vec<EnumDecl>,
+    pub functions: Vec<FunctionDecl>,
+}
+
+/// A top-level `enum Name<T> { Variant, Other(field: Type, ...), ... }` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDecl {
+    pub id: NodeId,
+    pub name: String,
+    pub is_pub: bool,
+    pub type_params: Vec<String>,
+    pub variants: Vec<EnumVariant>,
+}
+
+/// One enum variant with optional positional payload fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Vec<Param>,
+}
+
+/// A top-level `struct Name<T> { field: Type, ... }` declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructDecl {
     pub id: NodeId,
     pub name: String,
+    pub is_pub: bool,
+    pub type_params: Vec<String>,
     pub fields: Vec<Param>,
 }
 
@@ -87,6 +121,22 @@ impl Program {
     /// globally unique, parent-prefixed identity.
     pub fn with_file_prefix(&self, file_idx: u32) -> Program {
         let mut prog = self.clone();
+        for m in &mut prog.mods {
+            prefix_id(&mut m.id, file_idx);
+            for e in &mut m.enums {
+                prefix_id(&mut e.id, file_idx);
+            }
+            for s in &mut m.structs {
+                prefix_id(&mut s.id, file_idx);
+            }
+            for f in &mut m.functions {
+                prefix_id(&mut f.id, file_idx);
+                prefix_block(&mut f.body, file_idx);
+            }
+        }
+        for e in &mut prog.enums {
+            prefix_id(&mut e.id, file_idx);
+        }
         for s in &mut prog.structs {
             prefix_id(&mut s.id, file_idx);
         }
@@ -196,6 +246,20 @@ fn prefix_expr(e: &mut Expr, file_idx: u32) {
                 prefix_expr(v, file_idx);
             }
         }
+        Expr::EnumCtor { args, .. } => {
+            for a in args {
+                prefix_expr(a, file_idx);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            prefix_expr(scrutinee, file_idx);
+            for arm in arms {
+                prefix_id(&mut arm.id, file_idx);
+                prefix_expr(&mut arm.body, file_idx);
+            }
+        }
         Expr::Index { base, index, .. } => {
             prefix_expr(base, file_idx);
             prefix_expr(index, file_idx);
@@ -233,12 +297,31 @@ fn prefix_expr(e: &mut Expr, file_idx: u32) {
     }
 }
 
-/// A top-level `fn` declaration.
+/// One `match` arm: `Enum::Variant(bindings...) => body`, or `_ => body`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub id: NodeId,
+    pub enum_name: Option<String>,
+    pub variant: Option<String>,
+    pub bindings: Vec<String>,
+    pub body: Expr,
+}
+
+impl MatchArm {
+    /// True for the `_` wildcard arm.
+    pub fn is_wildcard(&self) -> bool {
+        self.variant.is_none()
+    }
+}
+
+/// A top-level `fn` declaration, optionally generic (`fn f<T>(...)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDecl {
     pub id: NodeId,
     pub name: String,
     pub name_span: (usize, usize),
+    pub is_pub: bool,
+    pub type_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_ty: String,
     pub effects: Vec<Effect>,
@@ -425,6 +508,19 @@ pub enum Expr {
         name: String,
         fields: Vec<(String, Expr)>,
     },
+    /// `Enum::Variant(args...)` value construction.
+    EnumCtor {
+        id: NodeId,
+        enum_name: String,
+        variant: String,
+        args: Vec<Expr>,
+    },
+    /// `match scrutinee { Enum::Variant(b...) => body, ... _ => body }`.
+    Match {
+        id: NodeId,
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
     Index {
         id: NodeId,
         base: Box<Expr>,
@@ -544,6 +640,8 @@ impl Expr {
             | Expr::ArrayLit { id, .. }
             | Expr::MapLit { id, .. }
             | Expr::StructLit { id, .. }
+            | Expr::EnumCtor { id, .. }
+            | Expr::Match { id, .. }
             | Expr::Index { id, .. }
             | Expr::Field { id, .. }
             | Expr::MethodCall { id, .. }
@@ -587,6 +685,8 @@ impl Expr {
             | Expr::ArrayLit { id, .. }
             | Expr::MapLit { id, .. }
             | Expr::StructLit { id, .. }
+            | Expr::EnumCtor { id, .. }
+            | Expr::Match { id, .. }
             | Expr::Index { id, .. }
             | Expr::Field { id, .. }
             | Expr::MethodCall { id, .. }
