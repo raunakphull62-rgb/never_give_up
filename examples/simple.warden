@@ -1,0 +1,8 @@
+//! examples/simple.warden
+
+// A simple arithmetic expression
+let x = 42;
+let y = x + 2;
+
+// Output the result
+print(y);

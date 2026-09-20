@@ -1,0 +1,11 @@
+// examples/app.klang — multi-file program via `import`.
+//
+// Run: cargo run -- examples/app.klang main
+
+import "lib.klang"
+
+fn main() -> i32 {
+    let v = double(21)
+    print(v)
+    return v
+}

@@ -1,0 +1,10 @@
+// examples/lib.klang — imported by app.klang.
+
+fn double(n: i32) -> i32 {
+    return n * 2
+}
+
+fn greet(name: i32) -> i32 {
+    print(name)
+    return 0
+}

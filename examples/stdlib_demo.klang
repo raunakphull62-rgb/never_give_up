@@ -1,0 +1,17 @@
+// examples/stdlib_demo.klang — file IO + env + types.
+//
+// Run: cargo run -- run examples/stdlib_demo.klang main
+// Check: cargo run -- check examples/stdlib_demo.klang
+// Fmt: cargo run -- fmt examples/stdlib_demo.klang
+
+fn main() -> i32 {
+    let path = "/tmp/klang_demo.txt"
+    let n = write_file(path, "hello klang")
+    print(read_file(path))
+    print(n)
+    if exists(path) {
+        return n
+    } else {
+        return 0
+    }
+}

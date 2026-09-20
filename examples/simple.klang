@@ -1,0 +1,38 @@
+// examples/simple.klang — real Klang v0.2 program.
+//
+// Run: cargo run -- examples/simple.klang main
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+fn max(a: i32, b: i32) -> i32 {
+    if a < b {
+        return b
+    } else {
+        return a
+    }
+}
+
+fn fetch(n: i32) -> i32 {
+    return n * 2
+}
+
+fn main() -> i32 {
+    let x = 2 + 3 * 4
+    print(x)
+    print(max(add(20, 2), 21))
+    if x == 14 {
+        return add(40, 2)
+    } else {
+        return 0
+    }
+}
+
+fn combine() -> i32 throws async {
+    task_group {
+        let a = spawn fetch(20)
+        let b = spawn fetch(1)
+        return await a + await b
+    }
+}
