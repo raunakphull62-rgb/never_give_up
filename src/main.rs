@@ -575,6 +575,18 @@ fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
             .map(|d| d.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         for imp in &prog.imports {
+            // Root confinement: reject absolute imports and `..` escapes so
+            // untrusted `.klang` files cannot pull in `../../…` or absolute
+            // paths. Plain relative imports (`mylib.klang`, `./x.klang`)
+            // keep working.
+            let imp_path = std::path::Path::new(imp);
+            if imp_path.is_absolute()
+                || imp.contains("..")
+                || imp.starts_with("~")
+                || imp.contains('\0')
+            {
+                return Err(format!("unsafe import `{imp}` from `{path}`"));
+            }
             queue.push_back(dir.join(imp).to_string_lossy().to_string());
         }
         let prefixed = prog.with_file_prefix(file_idx);

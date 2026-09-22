@@ -180,6 +180,11 @@ pub fn run(
     Ok(v)
 }
 
+/// Max concurrent child tasks per function frame. Each `spawn` is an OS
+/// thread (default 8 MiB stack): unbounded spawning exhausts host memory.
+/// `range()` is capped at 100k; task spawning gets an analogous bound.
+pub const MAX_CONCURRENT_TASKS: usize = 256;
+
 /// Run with explicit args + captured `print` output.
 pub fn run_with_output(
     module: &MirModule,
@@ -187,6 +192,27 @@ pub fn run_with_output(
     args: &[Value],
     stubs: &HashMap<String, i32>,
 ) -> Result<(i32, Vec<String>), Diagnostic> {
+    // Entry arity must match exactly (calling-convention safety), mirroring
+    // the JIT backend. The CLI always passes zero args, so missing params
+    // are an arity error, not silent zeros.
+    if let Some(f) = module.find(entry) {
+        if args.len() != f.params.len() {
+            return Err(Diagnostic::error(
+                "E-ARITY",
+                &format!(
+                    "entry `{entry}` takes {} args, got {}",
+                    f.params.len(),
+                    args.len()
+                ),
+                "runtime",
+                0,
+                0,
+                "call arity must match the callee parameter list",
+                &["pass the right number of arguments"],
+                "calls/arity",
+            ));
+        }
+    }
     let ctx = ExecCtx {
         module: Arc::new(module.clone()),
         stubs: stubs
@@ -197,7 +223,12 @@ pub fn run_with_output(
     };
     let v = exec_function(&ctx, entry, args, 0, &CancelToken::default())?;
     let out = ctx.output.lock().unwrap().clone();
-    Ok((v.as_int() as i32, out))
+    // Do not silently truncate via `as i32`: surface out-of-range results.
+    let n = v.as_int();
+    if n < i32::MIN as i64 || n > i32::MAX as i64 {
+        return Err(runtime_err("integer overflow: result out of i32 range"));
+    }
+    Ok((n as i32, out))
 }
 
 fn lookup(
@@ -266,9 +297,37 @@ fn exec_function(
     })?;
     let instrs = f.instrs.clone();
     let params = f.params.clone();
+    // Validate jump targets up front: `break`/`continue` outside a loop
+    // lower to `Jump { target: usize::MAX }` (HIR rejects, but `lower` is
+    // public). Out-of-range targets must be `Err`, never a host panic, and
+    // the JIT maps past-the-end to `end` so both backends agree.
+    for ins in &instrs {
+        match &ins.op {
+            MirOp::Jump { target } | MirOp::JumpIfFalse { target, .. } => {
+                if *target > instrs.len() {
+                    return Err(runtime_err("invalid jump target (unlowered break/continue?)"));
+                }
+            }
+            _ => {}
+        }
+    }
     let mut values: HashMap<String, Value> = HashMap::new();
     for (param, val) in params.iter().zip(args.iter()) {
         values.insert(param.clone(), val.clone());
+    }
+    // Strict arity for internal calls too (mirrors JIT entry check; HIR
+    // already guarantees this for checked programs).
+    if args.len() != params.len() {
+        return Err(Diagnostic::error(
+            "E-ARITY",
+            &format!("`{name}` takes {} args, got {}", params.len(), args.len()),
+            "runtime",
+            0,
+            0,
+            "call arity must match the callee parameter list",
+            &["pass the right number of arguments"],
+            "calls/arity",
+        ));
     }
     let mut groups: Vec<(String, CancelToken)> = Vec::new();
     let mut group_depth: usize = 0;
@@ -291,11 +350,48 @@ fn exec_function(
             MirOp::LeaveGroup { .. } => {
                 group_depth = group_depth.saturating_sub(1);
                 groups.pop();
+                // Structured concurrency: no task may outlive its group.
+                // HIR guarantees `pending` is empty here; if unchecked MIR
+                // reaches this with live handles, join them (never detach)
+                // then fail closed so the leak surfaces.
+                if !pending.is_empty() {
+                    // Join to avoid detaching threads, then report.
+                    let mut rest: Vec<String> = pending.keys().cloned().collect();
+                    rest.sort();
+                    for h in rest {
+                        if let Some(jh) = pending.remove(&h) {
+                            let _ = jh.join();
+                        }
+                    }
+                    return Err(Diagnostic::task_leak("runtime", 0, 0, "task group"));
+                }
                 pc += 1;
             }
             MirOp::Spawn { handle, func, args } => {
                 if group_depth == 0 {
                     return Err(Diagnostic::spawn_outside_group("runtime", 0, 0));
+                }
+                if pending.len() >= MAX_CONCURRENT_TASKS {
+                    return Err(runtime_err("too many concurrent tasks (limit 256)"));
+                }
+                // Re-binding a live handle (`for i in 0..3 { let a = spawn
+                // f() }`) would previously overwrite the JoinHandle and
+                // detach the earlier thread. Join the previous thread first
+                // (never detach), surfacing its failure if any.
+                if let Some(old) = pending.remove(handle) {
+                    match old.join() {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(d)) => {
+                            return fail_group(&current(&groups, parent), &mut pending, d);
+                        }
+                        Err(_) => {
+                            return fail_group(
+                                &current(&groups, parent),
+                                &mut pending,
+                                runtime_err("task panicked"),
+                            );
+                        }
+                    }
                 }
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for a in args {
@@ -332,7 +428,12 @@ fn exec_function(
                             );
                         }
                     }
-                } else if lookup(&values, &ctx.stubs, handle).is_some() {
+                } else if values.contains_key(handle) {
+                    // Already-awaited handle in this frame: idempotent.
+                    // NOTE: stub names (`fetch_a`) are deliberately NOT
+                    // accepted here (previously `lookup` consulted the stub
+                    // table, so `await fetch_a` without `spawn` silently
+                    // succeeded). Only real values count.
                     pc += 1;
                 } else {
                     return Err(Diagnostic::task_leak("runtime", 0, 0, handle));
@@ -644,10 +745,41 @@ fn exec_function(
                 pc = *target;
             }
             MirOp::Return { value } => {
+                // `return` inside a group with live handles would detach
+                // threads (previous code dropped `pending` unjoined). Join
+                // first (never detach), then fail closed so the leak
+                // surfaces instead of silently detaching.
+                if !pending.is_empty() {
+                    let mut rest: Vec<String> = pending.keys().cloned().collect();
+                    rest.sort();
+                    for h in rest {
+                        if let Some(jh) = pending.remove(&h) {
+                            let _ = jh.join();
+                        }
+                    }
+                    return Err(Diagnostic::task_leak("runtime", 0, 0, "return"));
+                }
                 let v = lookup(&values, &ctx.stubs, value).unwrap_or(last.clone());
                 return Ok(v);
             }
         }
+    }
+    // Fall-off-the-end yields the last computed value, or 0 for empty
+    // bodies (documented default; empty stub functions like
+    // `fn fetch_a() -> i32 throws {}` rely on the stub table via
+    // `call_value`, not on this path). HIR accepts this; the JIT mirrors
+    // it via a dominating `last` variable seeded with 0.
+    // Any live `pending` here means a group was never left (unchecked MIR):
+    // join (never detach) then fail closed.
+    if !pending.is_empty() {
+        let mut rest: Vec<String> = pending.keys().cloned().collect();
+        rest.sort();
+        for h in rest {
+            if let Some(jh) = pending.remove(&h) {
+                let _ = jh.join();
+            }
+        }
+        return Err(Diagnostic::task_leak("runtime", 0, 0, "task group"));
     }
     Ok(last)
 }
@@ -790,6 +922,7 @@ fn exec_builtin(
                 return Err(runtime_err("read_file() takes 1 argument"));
             }
             let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
             std::fs::read_to_string(&path)
                 .map(Value::Str)
                 .map_err(|e| runtime_err(&format!("read_file({path}) failed: {e}")))
@@ -800,6 +933,7 @@ fn exec_builtin(
             }
             let path = get(&args[0]).render();
             let content = get(&args[1]).render();
+            reject_unsafe_path(&path)?;
             std::fs::write(&path, &content)
                 .map(|_| Value::Int(content.len() as i64))
                 .map_err(|e| runtime_err(&format!("write_file({path}) failed: {e}")))
@@ -809,6 +943,7 @@ fn exec_builtin(
                 return Err(runtime_err("exists() takes 1 argument"));
             }
             let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
             Ok(Value::Int(i64::from(std::path::Path::new(&path).exists())))
         }
         "env" => {
@@ -820,6 +955,37 @@ fn exec_builtin(
         }
         _ => Err(runtime_err("unknown builtin")),
     }
+}
+
+/// Capability guard for file builtins: untrusted `.klang` files must not
+/// escape via `../../…` or absolute paths. Trusted scripts (tests, stdlib)
+/// use temp-dir or relative paths and are unaffected. `env` is left
+/// unrestricted (reads process env, returns empty when unset).
+fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
+    let p = std::path::Path::new(path);
+    // Absolute paths are allowed only inside the system temp dir (tests use
+    // `std::env::temp_dir()`); everything else must be relative without
+    // parent components. This blocks `../../etc/passwd` and `/etc/passwd`
+    // while keeping `mylib.klang`, `./a.klang`, `/tmp/...` working.
+    if p.is_absolute() {
+        let tmp = std::env::temp_dir();
+        if !p.starts_with(&tmp) {
+            return Err(runtime_err(&format!("unsafe absolute path `{path}`")));
+        }
+        return Ok(());
+    }
+    for comp in p.components() {
+        if matches!(
+            comp,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        ) {
+            return Err(runtime_err(&format!("unsafe path `{path}`")));
+        }
+    }
+    if path.is_empty() {
+        return Err(runtime_err("empty path"));
+    }
+    Ok(())
 }
 
 /// `base.method(args...)` dispatch by runtime value type.

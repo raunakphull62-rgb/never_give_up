@@ -8,6 +8,21 @@ use crate::mir::{MirModule, MirOp};
 
 /// Emit a stable text listing (one line per instruction).
 pub fn emit_listing(module: &MirModule) -> String {
+    fn esc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    }
     let mut out = String::new();
     for f in &module.functions {
         out.push_str(&format!(
@@ -31,7 +46,7 @@ pub fn emit_listing(module: &MirModule) -> String {
                 MirOp::ConstFloat { into, bits } => {
                     format!("  {into} = const_float {}", f64::from_bits(*bits))
                 }
-                MirOp::ConstStr { into, value } => format!("  {into} = const_str \"{value}\""),
+                MirOp::ConstStr { into, value } => format!("  {into} = const_str \"{}\"", esc(value)),
                 MirOp::Copy { into, from } => format!("  {into} = copy {from}"),
                 MirOp::Add { into, left, right } => format!("  {into} = add {left} {right}"),
                 MirOp::Sub { into, left, right } => format!("  {into} = sub {left} {right}"),

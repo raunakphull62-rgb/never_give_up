@@ -97,9 +97,10 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn tokenize(source: &str) -> Vec<Token> {
+fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
     let bytes = source.as_bytes();
     let mut toks: Vec<Token> = Vec::new();
+    let mut lex_errs: Vec<(usize, usize, String)> = Vec::new();
     let mut i: usize = 0;
     let n = bytes.len();
     while i < n {
@@ -116,11 +117,29 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
         if c == '/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let cstart = i;
             i += 2;
-            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+            let mut closed = false;
+            while i + 1 < n {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    closed = true;
+                    i += 2;
+                    break;
+                }
                 i += 1;
             }
-            i = (i + 2).min(n);
+            if !closed {
+                // Unterminated block comment: do not silently discard the
+                // rest of the file. Emit a diagnostic via an Invalid token
+                // and stop lexing.
+                lex_errs.push((cstart, n, "unterminated block comment".to_string()));
+                toks.push(Token {
+                    kind: TokenKind::Invalid,
+                    start: cstart,
+                    end: n,
+                });
+                i = n;
+            }
             continue;
         }
         let start = i;
@@ -384,10 +403,16 @@ fn tokenize(source: &str) -> Vec<Token> {
                 i += 1;
             }
             '"' => {
-                // String literal with simple escapes.
+                // String literal with simple escapes. Decodes UTF-8 by chars
+                // (not bytes) so non-ASCII literals are preserved.
                 let mut j = i + 1;
                 let mut val = String::new();
-                while j < n && bytes[j] != b'"' {
+                let mut closed = false;
+                while j < n {
+                    if bytes[j] == b'"' {
+                        closed = true;
+                        break;
+                    }
                     if bytes[j] == b'\\' && j + 1 < n {
                         match bytes[j + 1] {
                             b'n' => val.push('\n'),
@@ -401,17 +426,28 @@ fn tokenize(source: &str) -> Vec<Token> {
                         }
                         j += 2;
                     } else {
-                        val.push(bytes[j] as char);
-                        j += 1;
+                        // Decode one full UTF-8 char to stay on boundaries.
+                        let ch = source[j..].chars().next().unwrap_or('\u{FFFD}');
+                        val.push(ch);
+                        j += ch.len_utf8();
                     }
                 }
-                let end = (j + 1).min(n + 1).min(source.len() + 1);
-                toks.push(Token {
-                    kind: TokenKind::StrLit(val),
-                    start,
-                    end: end.min(source.len()),
-                });
-                i = (j + 1).min(n);
+                if !closed {
+                    lex_errs.push((start, n, "unterminated string literal".to_string()));
+                    toks.push(Token {
+                        kind: TokenKind::Invalid,
+                        start,
+                        end: n,
+                    });
+                    i = n;
+                } else {
+                    toks.push(Token {
+                        kind: TokenKind::StrLit(val),
+                        start,
+                        end: (j + 1).min(source.len()),
+                    });
+                    i = j + 1;
+                }
             }
             _ if c.is_ascii_digit() => {
                 let mut j = i;
@@ -425,20 +461,45 @@ fn tokenize(source: &str) -> Vec<Token> {
                     while k < n && (bytes[k] as char).is_ascii_digit() {
                         k += 1;
                     }
-                    let num: f64 = source[i..k].parse().unwrap_or(0.0);
-                    toks.push(Token {
-                        kind: TokenKind::FloatLit(num.to_bits()),
-                        start,
-                        end: k,
-                    });
+                    match source[i..k].parse::<f64>() {
+                        Ok(num) => toks.push(Token {
+                            kind: TokenKind::FloatLit(num.to_bits()),
+                            start,
+                            end: k,
+                        }),
+                        Err(_) => {
+                            lex_errs.push((start, k, "invalid float literal".to_string()));
+                            toks.push(Token {
+                                kind: TokenKind::Invalid,
+                                start,
+                                end: k,
+                            });
+                        }
+                    }
                     i = k;
                 } else {
-                    let num: i64 = source[i..j].parse().unwrap_or(0);
-                    toks.push(Token {
-                        kind: TokenKind::IntLit(num),
-                        start,
-                        end: j,
-                    });
+                    match source[i..j].parse::<i64>() {
+                        Ok(num) => toks.push(Token {
+                            kind: TokenKind::IntLit(num),
+                            start,
+                            end: j,
+                        }),
+                        Err(_) => {
+                            // Overflow beyond i64 (and thus i32): do not
+                            // silently become 0. Surface as invalid so the
+                            // parser reports instead of evaluating to 0.
+                            lex_errs.push((
+                                start,
+                                j,
+                                "integer literal out of range".to_string(),
+                            ));
+                            toks.push(Token {
+                                kind: TokenKind::Invalid,
+                                start,
+                                end: j,
+                            });
+                        }
+                    }
                     i = j;
                 }
             }
@@ -503,7 +564,7 @@ fn tokenize(source: &str) -> Vec<Token> {
         start: n,
         end: n,
     });
-    toks
+    (toks, lex_errs)
 }
 
 #[derive(Debug, Clone)]
@@ -524,6 +585,7 @@ pub struct Parser {
     pos: usize,
     scopes: Vec<Scope>,
     file: String,
+    lex_error: Option<Diagnostic>,
 }
 
 impl Parser {
@@ -532,7 +594,10 @@ impl Parser {
     }
 
     pub fn new_with_file(source: &str, file: &str) -> Self {
-        let tokens = tokenize(source);
+        let (tokens, lex_errs) = tokenize(source);
+        let lex_error = lex_errs.into_iter().next().map(|(s, e, msg)| {
+            Diagnostic::parse_error(file, s, e, &msg)
+        });
         Self {
             tokens,
             pos: 0,
@@ -541,6 +606,7 @@ impl Parser {
                 next: 0,
             }],
             file: file.to_string(),
+            lex_error,
         }
     }
 
@@ -578,12 +644,6 @@ impl Parser {
     fn exit_scope(&mut self) {
         if self.scopes.len() > 1 {
             self.scopes.pop();
-        }
-    }
-
-    fn skip_dots(&mut self) {
-        while self.peek().kind == TokenKind::Dot {
-            self.bump();
         }
     }
 
@@ -722,15 +782,25 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, Diagnostic> {
+        if let Some(e) = self.lex_error.clone() {
+            return Err(e);
+        }
         let mut mods = Vec::new();
         let mut enums = Vec::new();
         let mut structs = Vec::new();
         let mut imports = Vec::new();
         let mut functions = Vec::new();
         loop {
-            self.skip_dots();
             match &self.peek().kind {
                 TokenKind::Eof => break,
+                TokenKind::Invalid => {
+                    let p = self.peek().clone();
+                    return Err(self.err(p.start, p.end, "invalid token"));
+                }
+                TokenKind::Dot => {
+                    let p = self.peek().clone();
+                    return Err(self.err(p.start, p.end, "stray `.`"));
+                }
                 TokenKind::Import => {
                     let t = self.bump();
                     match &self.peek().kind {
@@ -782,7 +852,7 @@ impl Parser {
         let mut enums = Vec::new();
         let mut functions = Vec::new();
         loop {
-            self.skip_dots();
+            
             match &self.peek().kind {
                 TokenKind::RBrace => {
                     self.bump();
@@ -821,7 +891,7 @@ impl Parser {
         let id = self.next_id();
         let mut fields = Vec::new();
         loop {
-            self.skip_dots();
+            
             if self.peek().kind == TokenKind::RBrace {
                 self.bump();
                 break;
@@ -857,7 +927,7 @@ impl Parser {
         let id = self.next_id();
         let mut variants = Vec::new();
         loop {
-            self.skip_dots();
+            
             if self.peek().kind == TokenKind::RBrace {
                 self.bump();
                 break;
@@ -938,7 +1008,7 @@ impl Parser {
         self.enter_scope(&blk_id);
         let mut stmts = Vec::new();
         loop {
-            self.skip_dots();
+            
             match self.peek().kind {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 _ => stmts.push(self.parse_stmt()?),
@@ -991,7 +1061,7 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, Diagnostic> {
-        self.skip_dots();
+        
         match self.peek().kind {
             TokenKind::Let => Ok(Stmt::Let(self.parse_let()?)),
             TokenKind::Return => Ok(Stmt::Return(self.parse_return()?)),
@@ -1196,7 +1266,7 @@ impl Parser {
     fn parse_stmt_list(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
         let mut stmts = Vec::new();
         loop {
-            self.skip_dots();
+            
             match self.peek().kind {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 _ => stmts.push(self.parse_stmt()?),
@@ -1255,7 +1325,7 @@ impl Parser {
         let id = self.next_id();
         let mut arms = Vec::new();
         loop {
-            self.skip_dots();
+            
             if self.peek().kind == TokenKind::RBrace {
                 self.bump();
                 break;

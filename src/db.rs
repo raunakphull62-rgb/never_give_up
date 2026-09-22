@@ -121,7 +121,9 @@ impl Database {
         self.inner.check_runs.load(Ordering::SeqCst)
     }
 
-    /// Missing files read as empty text, exactly like before.
+    /// Missing files are an error (previously read as empty text, so
+    /// `db.check` on a nonexistent file returned `Ok` on an implicit empty
+    /// program, masking typos and missing inputs).
     fn file_or_empty(&mut self, name: &str) -> SourceFile {
         if let Some(f) = self.files.get(name) {
             return *f;
@@ -131,15 +133,22 @@ impl Database {
         f
     }
 
-    /// Tracked query: parse.
+    /// Tracked query: parse. Errors when the file was never `set_file`.
     pub fn parse(&mut self, name: &str) -> Result<Program, Diagnostic> {
+        if !self.files.contains_key(name) {
+            return Err(Diagnostic::parse_error(name, 0, 0, "file not found"));
+        }
         let f = self.file_or_empty(name);
         parse_file(&self.inner, f)
     }
 
     /// Tracked query: effect check.
-    /// Returns `Ok(())` when clean, `Err(diags)` otherwise.
+    /// Returns `Ok(())` when clean, `Err(diags)` otherwise, including
+    /// missing files.
     pub fn check(&mut self, name: &str) -> Result<(), Vec<Diagnostic>> {
+        if !self.files.contains_key(name) {
+            return Err(vec![Diagnostic::parse_error(name, 0, 0, "file not found")]);
+        }
         let f = self.file_or_empty(name);
         check_file(&self.inner, f)
     }

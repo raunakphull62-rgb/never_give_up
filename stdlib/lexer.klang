@@ -1,0 +1,423 @@
+// stdlib/lexer.klang - byte-offset lexer for Klang source.
+//
+// Contract: len(str) is byte length (SPEC 4, Rust String::len).
+// Token spans are byte offsets matching src/parser.rs.
+// Method: chars() splits to characters, len(each char) is its width,
+// byte_table maps char index -> byte offset. Never mix len(src) with src[i].
+
+mod lexer {
+    pub fn byte_len(s: str) -> i32 {
+        return len(s)
+    }
+
+    pub fn char_count(s: str) -> i32 {
+        let cs = s.chars()
+        return len(cs)
+    }
+
+    pub fn char_width(c: str) -> i32 {
+        return len(c)
+    }
+
+    pub fn byte_table(src: str) -> array {
+        let cs = src.chars()
+        let t = []
+        push(t, 0)
+        let total = 0
+        for c in cs {
+            total = total + len(c)
+            push(t, total)
+        }
+        return t
+    }
+
+    fn is_space(c: str) -> i32 {
+        if c == " " {
+            return 1
+        } else if c == "\n" {
+            return 1
+        } else if c == "\t" {
+            return 1
+        } else {
+            return 0
+        }
+    }
+
+    fn is_digit(c: str) -> i32 {
+        if "0" <= c {
+            if c <= "9" {
+                return 1
+            }
+        }
+        return 0
+    }
+
+    fn is_alpha(c: str) -> i32 {
+        if "a" <= c {
+            if c <= "z" {
+                return 1
+            }
+        }
+        if "A" <= c {
+            if c <= "Z" {
+                return 1
+            }
+        }
+        return 0
+    }
+
+    fn is_ident_start(c: str) -> i32 {
+        if is_alpha(c) {
+            return 1
+        }
+        if c == "_" {
+            return 1
+        }
+        return 0
+    }
+
+    fn is_ident_char(c: str) -> i32 {
+        if is_alpha(c) {
+            return 1
+        }
+        if is_digit(c) {
+            return 1
+        }
+        if c == "_" {
+            return 1
+        }
+        return 0
+    }
+
+    fn keyword_kind(w: str) -> str {
+        if w == "fn" {
+            return "fn"
+        } else if w == "let" {
+            return "let"
+        } else if w == "return" {
+            return "return"
+        } else if w == "task_group" {
+            return "task_group"
+        } else if w == "spawn" {
+            return "spawn"
+        } else if w == "await" {
+            return "await"
+        } else if w == "throws" {
+            return "throws"
+        } else if w == "async" {
+            return "async"
+        } else if w == "cancel" {
+            return "cancel"
+        } else if w == "if" {
+            return "if"
+        } else if w == "else" {
+            return "else"
+        } else if w == "print" {
+            return "print"
+        } else if w == "true" {
+            return "true"
+        } else if w == "false" {
+            return "false"
+        } else if w == "while" {
+            return "while"
+        } else if w == "for" {
+            return "for"
+        } else if w == "in" {
+            return "in"
+        } else if w == "struct" {
+            return "struct"
+        } else if w == "break" {
+            return "break"
+        } else if w == "continue" {
+            return "continue"
+        } else if w == "import" {
+            return "import"
+        } else if w == "enum" {
+            return "enum"
+        } else if w == "match" {
+            return "match"
+        } else if w == "mod" {
+            return "mod"
+        } else if w == "pub" {
+            return "pub"
+        } else {
+            return "ident"
+        }
+    }
+
+    pub fn scan(src: str) -> array {
+        let cs = src.chars()
+        let t = byte_table(src)
+        let n_chars = len(cs)
+        let toks = []
+        let j = 0
+        while j < n_chars {
+            let c = cs[j]
+            if is_space(c) {
+                j = j + 1
+            } else if c == "/" {
+                if j + 1 < n_chars {
+                    let d = cs[j + 1]
+                    if d == "/" {
+                        j = j + 2
+                        while j < n_chars {
+                            if cs[j] == "\n" {
+                                break
+                            }
+                            j = j + 1
+                        }
+                    } else if d == "*" {
+                        j = j + 2
+                        while j + 1 < n_chars {
+                            if cs[j] == "*" {
+                                if cs[j + 1] == "/" {
+                                    break
+                                }
+                            }
+                            j = j + 1
+                        }
+                        j = j + 2
+                        if j > n_chars {
+                            j = n_chars
+                        }
+                    } else {
+                        push(toks, {"kind": "slash", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "slash", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "(" {
+                push(toks, {"kind": "lparen", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == ")" {
+                push(toks, {"kind": "rparen", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "{" {
+                push(toks, {"kind": "lbrace", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "}" {
+                push(toks, {"kind": "rbrace", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "[" {
+                push(toks, {"kind": "lbracket", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "]" {
+                push(toks, {"kind": "rbracket", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "=" {
+                if j + 1 < n_chars {
+                    let d2 = cs[j + 1]
+                    if d2 == "=" {
+                        push(toks, {"kind": "eqeq", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else if d2 == ">" {
+                        push(toks, {"kind": "fatarrow", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "eq", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "eq", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "!" {
+                if j + 1 < n_chars {
+                    let d3 = cs[j + 1]
+                    if d3 == "=" {
+                        push(toks, {"kind": "noteq", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "bang", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "bang", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "<" {
+                if j + 1 < n_chars {
+                    let d4 = cs[j + 1]
+                    if d4 == "=" {
+                        push(toks, {"kind": "lteq", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "lt", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "lt", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == ">" {
+                if j + 1 < n_chars {
+                    let d5 = cs[j + 1]
+                    if d5 == "=" {
+                        push(toks, {"kind": "gteq", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "gt", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "gt", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "+" {
+                push(toks, {"kind": "plus", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "-" {
+                if j + 1 < n_chars {
+                    let d6 = cs[j + 1]
+                    if d6 == ">" {
+                        push(toks, {"kind": "arrow", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "minus", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "minus", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "*" {
+                push(toks, {"kind": "star", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == ";" {
+                push(toks, {"kind": "semi", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "," {
+                push(toks, {"kind": "comma", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == ":" {
+                if j + 1 < n_chars {
+                    let d7 = cs[j + 1]
+                    if d7 == ":" {
+                        push(toks, {"kind": "coloncolon", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "colon", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "colon", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "." {
+                if j + 1 < n_chars {
+                    let d8 = cs[j + 1]
+                    if d8 == "." {
+                        push(toks, {"kind": "dotdot", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "dot", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "dot", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "&" {
+                if j + 1 < n_chars {
+                    let d9 = cs[j + 1]
+                    if d9 == "&" {
+                        push(toks, {"kind": "andand", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "amp", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "amp", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "|" {
+                if j + 1 < n_chars {
+                    let d10 = cs[j + 1]
+                    if d10 == "|" {
+                        push(toks, {"kind": "oror", "start": t[j], "end": t[j + 2]})
+                        j = j + 2
+                    } else {
+                        push(toks, {"kind": "pipe", "start": t[j], "end": t[j + 1]})
+                        j = j + 1
+                    }
+                } else {
+                    push(toks, {"kind": "pipe", "start": t[j], "end": t[j + 1]})
+                    j = j + 1
+                }
+            } else if c == "%" {
+                push(toks, {"kind": "percent", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            } else if c == "\"" {
+                let sc = j
+                j = j + 1
+                let done = 0
+                while j < n_chars {
+                    let ch = cs[j]
+                    if ch == "\"" {
+                        done = 1
+                        break
+                    } else if ch == "\\" {
+                        j = j + 2
+                    } else {
+                        j = j + 1
+                    }
+                }
+                let ec = j
+                if done == 1 {
+                    ec = j + 1
+                }
+                if ec > n_chars {
+                    ec = n_chars
+                }
+                push(toks, {"kind": "str", "start": t[sc], "end": t[ec]})
+                j = ec
+            } else if is_digit(c) {
+                let sc2 = j
+                while j < n_chars {
+                    if is_digit(cs[j]) {
+                        j = j + 1
+                    } else {
+                        break
+                    }
+                }
+                let kind = "int"
+                if j + 1 < n_chars {
+                    if cs[j] == "." {
+                        if is_digit(cs[j + 1]) {
+                            kind = "float"
+                            j = j + 1
+                            while j < n_chars {
+                                if is_digit(cs[j]) {
+                                    j = j + 1
+                                } else {
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+                push(toks, {"kind": kind, "start": t[sc2], "end": t[j]})
+            } else if is_ident_start(c) {
+                let sc3 = j
+                let word = ""
+                while j < n_chars {
+                    if is_ident_char(cs[j]) {
+                        word = word + cs[j]
+                        j = j + 1
+                    } else {
+                        break
+                    }
+                }
+                push(toks, {"kind": keyword_kind(word), "start": t[sc3], "end": t[j]})
+            } else {
+                push(toks, {"kind": "invalid", "start": t[j], "end": t[j + 1]})
+                j = j + 1
+            }
+        }
+        push(toks, {"kind": "eof", "start": len(src), "end": len(src)})
+        return toks
+    }
+}

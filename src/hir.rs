@@ -244,6 +244,29 @@ impl TypedHIR {
                         fld.name, s.name
                     )));
                 }
+                // Reserve the enum runtime representation (`__variant`,
+                // `f0`, `f1`, ...): user structs declaring these fields
+                // could spoof or corrupt `match` dispatch.
+                if fld.name == "__variant"
+                    || fld.name.starts_with("__")
+                    || (fld.name.len() >= 2
+                        && fld.name.starts_with('f')
+                        && fld.name[1..].chars().all(|c| c.is_ascii_digit()))
+                {
+                    diags.push(Diagnostic::error(
+                        "E-RESERVED-FIELD",
+                        &format!(
+                            "field `{}` in struct `{}` uses reserved enum tag name",
+                            fld.name, s.name
+                        ),
+                        FILE,
+                        0,
+                        0,
+                        "enum tags live in `__variant` / `f0...` fields",
+                        &["rename the field"],
+                        "types/reserved",
+                    ));
+                }
                 // Non-generic structs keep the exact historical resolution.
                 let fty = if s.type_params.is_empty() {
                     parse_ty(&fld.ty)
@@ -296,6 +319,36 @@ fn has_effect(effects: &[Effect], want: Effect) -> bool {
     effects.contains(&want)
 }
 
+/// Resolve a parameter annotation inside a function body: type parameters
+/// become rigid `Ty::Param`, known enums become nominal `Ty::Enum`, known
+/// structs become nominal `Ty::Struct`, everything else keeps `parse_ty`
+/// behavior. Previously struct names and type params erased to `Unknown`,
+/// letting `x - 1` pass for generic `T` and `p.nonexistent` pass for
+/// struct params.
+fn resolve_body_ty(
+    s: &str,
+    type_params: &[String],
+    enums: &EnumTable,
+    structs: &[String],
+) -> Ty {
+    if type_params.iter().any(|t| t == s) {
+        return Ty::Param(s.to_string());
+    }
+    if enums.contains_key(s) {
+        return Ty::Enum(s.to_string());
+    }
+    if structs.iter().any(|n| n == s) {
+        return Ty::Struct(s.to_string());
+    }
+    // Qualified `m::T` paths: resolve against known enums/structs (flattened
+    // names like `m::Token`). Unknown qualified paths stay `Unknown` (lenient,
+    // as before) to avoid false positives on function paths.
+    if s.contains("::") {
+        return Ty::Unknown;
+    }
+    parse_ty(s)
+}
+
 fn check_function(
     f: &FunctionDecl,
     sigs: &HashMap<String, Sig>,
@@ -312,7 +365,10 @@ fn check_function(
                 p.name, f.name
             )));
         }
-        defined.insert(p.name.clone(), resolve_param_ty(&p.ty, enums));
+        defined.insert(
+            p.name.clone(),
+            resolve_body_ty(&p.ty, &f.type_params, enums, structs),
+        );
     }
     let mut cx = Ctx { loop_depth: 0 };
     check_block(
@@ -328,6 +384,20 @@ fn check_function(
         &mut defined,
         &mut cx,
     );
+    // Effect gate: task-group/spawn/await require `async`. Only `throws`
+    // was previously enforced; `async`/`cancel` were parsed but ignored.
+    if fn_uses_tasks(f) && !has_effect(&f.effects, Effect::Async) {
+        diags.push(Diagnostic::error(
+            "E-EFFECT-MISMATCH",
+            &format!("`{}` uses task_group/spawn/await without `async`", f.name),
+            FILE,
+            0,
+            0,
+            "task concurrency requires visible `async` effect in caller signature",
+            &["declare `async` in the function signature"],
+            "effects/visibility",
+        ));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -369,6 +439,22 @@ fn check_block(
                     if group_stack.is_empty() {
                         diags.push(Diagnostic::spawn_outside_group(FILE, l.span.0, l.span.1));
                     } else {
+                        // Re-binding a live handle without awaiting it leaks
+                        // the earlier thread at runtime (`pending.insert`
+                        // overwrites). Reject unless the previous spawn was
+                        // already awaited in this block.
+                        let pending = group_stack.last().expect("group present");
+                        if pending.iter().any(|p| p.handle == l.name)
+                            && !awaited_here.contains(&l.name)
+                        {
+                            diags.push(Diagnostic::task_leak(FILE, l.span.0, l.span.1, &l.name));
+                        } else if pending.iter().any(|p| p.handle == l.name) {
+                            // Previous spawn was awaited: drop its entry so
+                            // the group-exit check does not double-count.
+                            let p = group_stack.last_mut().expect("group present");
+                            p.retain(|x| x.handle != l.name);
+                            awaited_here.retain(|x| x != &l.name);
+                        }
                         group_stack
                             .last_mut()
                             .expect("group present")
@@ -376,6 +462,11 @@ fn check_block(
                                 handle: l.name.clone(),
                                 span: l.span,
                             });
+                    }
+                    // `await` inside the spawned call itself may not use
+                    // not-yet-bound handles; check outside-group as well.
+                    if expr_contains_await(call) && group_stack.is_empty() {
+                        diags.push(await_outside_group());
                     }
                     check_expr(
                         call,
@@ -390,6 +481,9 @@ fn check_block(
                         defined,
                     )
                 } else {
+                    if expr_contains_await(&l.value) && group_stack.is_empty() {
+                        diags.push(await_outside_group());
+                    }
                     check_expr(
                         &l.value,
                         caller,
@@ -409,6 +503,9 @@ fn check_block(
                 defined.insert(l.name.clone(), ty);
             }
             Stmt::Assign(a) => {
+                if expr_contains_await(&a.value) && group_stack.is_empty() {
+                    diags.push(await_outside_group());
+                }
                 let target_ty = check_assign_target(
                     &a.target,
                     caller,
@@ -448,6 +545,9 @@ fn check_block(
                     let (s, en) = expr_span_hint(e);
                     diags.push(Diagnostic::spawn_outside_group(FILE, s, en));
                 }
+                if expr_contains_await(e) && group_stack.is_empty() {
+                    diags.push(await_outside_group());
+                }
                 check_expr(
                     e,
                     caller,
@@ -462,6 +562,9 @@ fn check_block(
                 );
             }
             Stmt::Return(r) => {
+                if expr_contains_await(&r.value) && group_stack.is_empty() {
+                    diags.push(await_outside_group());
+                }
                 let got = check_expr(
                     &r.value,
                     caller,
@@ -487,6 +590,9 @@ fn check_block(
                 }
             }
             Stmt::Print(p) => {
+                if expr_contains_await(&p.value) && group_stack.is_empty() {
+                    diags.push(await_outside_group());
+                }
                 check_expr(
                     &p.value,
                     caller,
@@ -515,6 +621,9 @@ fn check_block(
                 }
             }
             Stmt::While(w) => {
+                if expr_contains_await(&w.cond) && group_stack.is_empty() {
+                    diags.push(await_outside_group());
+                }
                 let cond_ty = check_expr(
                     &w.cond,
                     caller,
@@ -530,6 +639,7 @@ fn check_block(
                 require_condition(&cond_ty, "while", diags);
                 cx.loop_depth += 1;
                 let mut body_defined = defined.clone();
+                let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
                 let inner = check_block(
                     &w.body,
                     caller,
@@ -544,7 +654,17 @@ fn check_block(
                     cx,
                 );
                 cx.loop_depth -= 1;
-                awaited_here.extend(inner);
+                // Soundness: a loop may execute zero times, and a handle
+                // spawned in one iteration is a different thread each trip.
+                // Spawns inside must be awaited inside the same body; awaits
+                // inside never satisfy an outer group (no propagation).
+                if let Some(pending) = group_stack.last() {
+                    for p in pending.iter().skip(pending_before) {
+                        if !inner.contains(&p.handle) {
+                            diags.push(Diagnostic::task_leak(FILE, p.span.0, p.span.1, &p.handle));
+                        }
+                    }
+                }
             }
             Stmt::ForRange(fr) => {
                 let s_ty = check_expr(
@@ -581,6 +701,7 @@ fn check_block(
                 // Loop var rebinds at runtime (MIR `Copy`), shadowing any
                 // outer binding of the same name.
                 body_defined.insert(fr.var.clone(), Ty::Int);
+                let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
                 let inner = check_block(
                     &fr.body,
                     caller,
@@ -595,7 +716,13 @@ fn check_block(
                     cx,
                 );
                 cx.loop_depth -= 1;
-                awaited_here.extend(inner);
+                if let Some(pending) = group_stack.last() {
+                    for p in pending.iter().skip(pending_before) {
+                        if !inner.contains(&p.handle) {
+                            diags.push(Diagnostic::task_leak(FILE, p.span.0, p.span.1, &p.handle));
+                        }
+                    }
+                }
             }
             Stmt::ForIn(fi) => {
                 let iter_ty = check_expr(
@@ -610,14 +737,22 @@ fn check_block(
                     &mut awaited_here,
                     defined,
                 );
+                // Maps are rejected: MIR lowers `for-in` to integer-indexed
+                // iteration, and indexing a map with `0`, `1`, ... always
+                // fails at runtime with "missing map key". Use `keys()` +
+                // indexing or iterate an array/str instead.
                 match &iter_ty {
-                    Ty::Array | Ty::Map | Ty::Str | Ty::Unknown => {}
-                    other => diags.push(type_mismatch("for-in iterable", "array/map/str", other)),
+                    Ty::Array | Ty::Str | Ty::Unknown => {}
+                    Ty::Map => {
+                        diags.push(type_mismatch("for-in iterable", "array/str", &iter_ty));
+                    }
+                    other => diags.push(type_mismatch("for-in iterable", "array/str", other)),
                 }
                 cx.loop_depth += 1;
                 let mut body_defined = defined.clone();
                 // Element type is dynamic without generics.
                 body_defined.insert(fi.var.clone(), Ty::Unknown);
+                let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
                 let inner = check_block(
                     &fi.body,
                     caller,
@@ -632,9 +767,18 @@ fn check_block(
                     cx,
                 );
                 cx.loop_depth -= 1;
-                awaited_here.extend(inner);
+                if let Some(pending) = group_stack.last() {
+                    for p in pending.iter().skip(pending_before) {
+                        if !inner.contains(&p.handle) {
+                            diags.push(Diagnostic::task_leak(FILE, p.span.0, p.span.1, &p.handle));
+                        }
+                    }
+                }
             }
             Stmt::If(s) => {
+                if expr_contains_await(&s.cond) && group_stack.is_empty() {
+                    diags.push(await_outside_group());
+                }
                 let cond_ty = check_expr(
                     &s.cond,
                     caller,
@@ -649,6 +793,9 @@ fn check_block(
                 );
                 require_condition(&cond_ty, "if", diags);
                 // Branches are block-scoped: new lets inside do not leak out.
+                // Must-analysis: only awaits on every path satisfy an outer
+                // spawn. Awaits in one branch alone never propagate.
+                let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
                 let mut then_defined = defined.clone();
                 let then_awaited = check_block(
                     &s.then_block,
@@ -663,8 +810,78 @@ fn check_block(
                     &mut then_defined,
                     cx,
                 );
-                awaited_here.extend(then_awaited);
-                if let Some(else_b) = &s.else_block {
+                // Spawns inside the then-branch must be awaited in the same
+                // branch; awaiting outside is unsound (branch may not run).
+                if let Some(pending) = group_stack.last() {
+                    // Only the spawns added by the then-branch.
+                    let new_then: Vec<PendingSpawn> =
+                        pending.iter().skip(pending_before).cloned().collect();
+                    for p in &new_then {
+                        if !then_awaited.contains(&p.handle) {
+                            diags.push(Diagnostic::task_leak(FILE, p.span.0, p.span.1, &p.handle));
+                        }
+                    }
+                    // Remove then-branch spawns from pending so the else
+                    // branch check starts clean; re-add them after.
+                    let mut saved = new_then;
+                    let plen = group_stack.last().map(|v| v.len()).unwrap_or(0);
+                    if plen >= saved.len() {
+                        group_stack
+                            .last_mut()
+                            .expect("group")
+                            .truncate(plen - saved.len());
+                    }
+                    if let Some(else_b) = &s.else_block {
+                        let mut else_defined = defined.clone();
+                        let else_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
+                        let else_awaited = check_block(
+                            else_b,
+                            caller,
+                            sigs,
+                            structs,
+                            struct_fields,
+                            enums,
+                            diags,
+                            depth + 1,
+                            group_stack,
+                            &mut else_defined,
+                            cx,
+                        );
+                        if let Some(pending2) = group_stack.last() {
+                            for p in pending2.iter().skip(else_before) {
+                                if !else_awaited.contains(&p.handle) {
+                                    diags.push(Diagnostic::task_leak(
+                                        FILE,
+                                        p.span.0,
+                                        p.span.1,
+                                        &p.handle,
+                                    ));
+                                }
+                            }
+                            // Drop else-branch spawns (already diagnosed if
+                            // unawaited) and restore then-branch spawns for
+                            // outer must-analysis.
+                            let elen = group_stack.last().map(|v| v.len()).unwrap_or(0);
+                            if elen >= else_before {
+                                group_stack.last_mut().expect("group").truncate(else_before);
+                            }
+                        }
+                        for p in saved.drain(..) {
+                            group_stack.last_mut().expect("group").push(p);
+                        }
+                        // Propagate only the intersection (must-await).
+                        for h in then_awaited {
+                            if else_awaited.contains(&h) && !awaited_here.contains(&h) {
+                                awaited_here.push(h);
+                            }
+                        }
+                    } else {
+                        for p in saved.drain(..) {
+                            group_stack.last_mut().expect("group").push(p);
+                        }
+                        // No else: nothing propagates (then may not run).
+                    }
+                } else if let Some(else_b) = &s.else_block {
                     let mut else_defined = defined.clone();
                     let else_awaited = check_block(
                         else_b,
@@ -679,7 +896,11 @@ fn check_block(
                         &mut else_defined,
                         cx,
                     );
-                    awaited_here.extend(else_awaited);
+                    for h in then_awaited {
+                        if else_awaited.contains(&h) && !awaited_here.contains(&h) {
+                            awaited_here.push(h);
+                        }
+                    }
                 }
             }
             Stmt::TaskGroup(g) => {
@@ -995,6 +1216,13 @@ fn check_expr(
             )
         }
         Expr::Await { name, .. } => {
+            // `await` of an undefined handle is never diagnosed previously:
+            // `fn main() -> i32 { return await b }` checked clean and failed
+            // only at runtime. Emit E-UNDEFINED here (the task-leak check
+            // still fires separately when inside a group).
+            if !defined.contains_key(name) {
+                diags.push(undefined(name));
+            }
             if !awaited.contains(name) {
                 awaited.push(name.clone());
             }
@@ -1008,6 +1236,26 @@ fn check_expr(
                 ));
             }
             if is_builtin(func) {
+                // `push`/`pop` mutating a temporary (`push([1,2], 3)`,
+                // `[1,2].push(3)`) silently no-ops at runtime (mutates a
+                // discarded temp). Require a variable receiver.
+                if (func == "push" || func == "pop") && !args.is_empty() {
+                    match &args[0] {
+                        Expr::Var { .. } => {}
+                        _ => {
+                            diags.push(Diagnostic::error(
+                                "E-TYPE",
+                                &format!("`{func}()` must mutate a variable, not a temporary"),
+                                FILE,
+                                0,
+                                0,
+                                "mutating a temporary value is discarded",
+                                &["bind the array to a variable first"],
+                                "types/mutation",
+                            ));
+                        }
+                    }
+                }
                 return check_builtin_call(func, &arg_tys, diags);
             }
             if let Some(sig) = sigs.get(func) {
@@ -1185,6 +1433,25 @@ fn check_expr(
                 arg_tys.push(check_expr(
                     a, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
                 ));
+            }
+            if method == "push" || method == "pop" {
+                // `arr.push`/`arr.pop` mutate in place: require a variable
+                // receiver, not a temporary (`[1,2].push(3)` no-ops).
+                match base.as_ref() {
+                    Expr::Var { .. } => {}
+                    _ => {
+                        diags.push(Diagnostic::error(
+                            "E-TYPE",
+                            &format!("`.{method}()` must mutate a variable, not a temporary"),
+                            FILE,
+                            0,
+                            0,
+                            "mutating a temporary value is discarded",
+                            &["bind the array to a variable first"],
+                            "types/mutation",
+                        ));
+                    }
+                }
             }
             check_method_call(&b, method, &arg_tys, diags)
         }
@@ -1489,8 +1756,59 @@ fn check_match(
                 match &result {
                     None => result = Some(body_ty),
                     Some(t0) => {
-                        if !assignable(&body_ty, t0) {
-                            diags.push(type_mismatch("match arm", &t0.name(), &body_ty));
+                        // Order-independent unification: Int/Float mix to
+                        // Float either way; otherwise require assignability
+                        // in either direction (previously Int-then-Float
+                        // errored while Float-then-Int passed).
+                        let unified = unify_match_arms(t0, &body_ty);
+                        match unified {
+                            Some(u) => result = Some(u),
+                            None => {
+                                diags.push(type_mismatch("match arm", &t0.name(), &body_ty));
+                            }
+                        }
+                    }
+                }
+            }
+            // Duplicate arms and arms after `_` are dead code: diagnose.
+            {
+                let mut seen: Vec<String> = Vec::new();
+                let mut seen_wildcard = false;
+                for arm in arms {
+                    if seen_wildcard {
+                        diags.push(Diagnostic::error(
+                            "E-MATCH-UNREACHABLE",
+                            "unreachable match arm after `_` wildcard",
+                            FILE,
+                            0,
+                            0,
+                            "arms after the wildcard never run",
+                            &["remove the dead arm", "move it before `_`"],
+                            "match/unreachable",
+                        ));
+                        break;
+                    }
+                    if arm.is_wildcard() {
+                        seen_wildcard = true;
+                    } else {
+                        let key = format!(
+                            "{}::{}",
+                            arm.enum_name.as_deref().unwrap_or(""),
+                            arm.variant.as_deref().unwrap_or("")
+                        );
+                        if seen.contains(&key) {
+                            diags.push(Diagnostic::error(
+                                "E-MATCH-DUPLICATE",
+                                &format!("duplicate match arm `{key}`"),
+                                FILE,
+                                0,
+                                0,
+                                "duplicate pattern never runs",
+                                &["remove the duplicate arm"],
+                                "match/duplicate",
+                            ));
+                        } else {
+                            seen.push(key);
                         }
                     }
                 }
@@ -1804,4 +2122,115 @@ fn expr_span_hint(e: &Expr) -> (usize, usize) {
         Expr::Spawn { call, .. } => expr_span_hint(call),
         _ => (0, 0),
     }
+}
+
+/// Order-independent match-arm unification: identical types stay,
+/// Int/Float mix to Float either way, Unknown/Param are wildcards.
+/// Returns None when arms disagree (diagnostic at call site).
+fn unify_match_arms(a: &Ty, b: &Ty) -> Option<Ty> {
+    if a == b {
+        return Some(a.clone());
+    }
+    if matches!(a, Ty::Unknown | Ty::Param(_)) {
+        return Some(b.clone());
+    }
+    if matches!(b, Ty::Unknown | Ty::Param(_)) {
+        return Some(a.clone());
+    }
+    match (a, b) {
+        (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => Some(Ty::Float),
+        _ => {
+            if assignable(b, a) || assignable(a, b) {
+                Some(a.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// `await` with no enclosing `task_group`.
+fn await_outside_group() -> Diagnostic {
+    Diagnostic::error(
+        "E-AWAIT-OUTSIDE-GROUP",
+        "await outside of any task_group",
+        FILE,
+        0,
+        0,
+        "await joins a child task tied to the enclosing task_group",
+        &["wrap the await in a task_group block"],
+        "structured-concurrency/scope",
+    )
+}
+
+/// True when `e` contains an `await` anywhere (for outside-group checks).
+fn expr_contains_await(e: &Expr) -> bool {
+    match e {
+        Expr::Await { .. } => true,
+        Expr::Add { left, right, .. }
+        | Expr::Sub { left, right, .. }
+        | Expr::Mul { left, right, .. }
+        | Expr::Div { left, right, .. }
+        | Expr::Mod { left, right, .. }
+        | Expr::Eq { left, right, .. }
+        | Expr::NotEq { left, right, .. }
+        | Expr::Lt { left, right, .. }
+        | Expr::LtEq { left, right, .. }
+        | Expr::Gt { left, right, .. }
+        | Expr::GtEq { left, right, .. }
+        | Expr::And { left, right, .. }
+        | Expr::Or { left, right, .. } => expr_contains_await(left) || expr_contains_await(right),
+        Expr::Not { inner, .. } | Expr::Neg { inner, .. } => expr_contains_await(inner),
+        Expr::Call { args, .. } => args.iter().any(expr_contains_await),
+        Expr::ArrayLit { elems, .. } => elems.iter().any(expr_contains_await),
+        Expr::MapLit { entries, .. } => entries.iter().any(|(_, v)| expr_contains_await(v)),
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_await(v)),
+        Expr::EnumCtor { args, .. } => args.iter().any(expr_contains_await),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_contains_await(scrutinee) || arms.iter().any(|a| expr_contains_await(&a.body))
+        }
+        Expr::Index { base, index, .. } => {
+            expr_contains_await(base) || expr_contains_await(index)
+        }
+        Expr::Field { base, .. } => expr_contains_await(base),
+        Expr::MethodCall { base, args, .. } => {
+            expr_contains_await(base) || args.iter().any(expr_contains_await)
+        }
+        Expr::Spawn { call, .. } => expr_contains_await(call),
+        _ => false,
+    }
+}
+
+fn stmt_uses_tasks(s: &crate::ast::Stmt) -> bool {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::TaskGroup(_) => true,
+        Stmt::Let(l) => expr_contains_await(&l.value) || expr_has_spawn(&l.value),
+        Stmt::Assign(a) => expr_contains_await(&a.value),
+        Stmt::Return(r) => expr_contains_await(&r.value),
+        Stmt::Print(p) => expr_contains_await(&p.value),
+        Stmt::Expr(e) => expr_contains_await(e) || expr_has_spawn(e),
+        Stmt::If(i) => {
+            expr_contains_await(&i.cond)
+                || i.then_block.stmts.iter().any(stmt_uses_tasks)
+                || i.else_block
+                    .as_ref()
+                    .map(|b| b.stmts.iter().any(stmt_uses_tasks))
+                    .unwrap_or(false)
+        }
+        Stmt::While(w) => {
+            expr_contains_await(&w.cond) || w.body.stmts.iter().any(stmt_uses_tasks)
+        }
+        Stmt::ForRange(fr) => fr.body.stmts.iter().any(stmt_uses_tasks),
+        Stmt::ForIn(fi) => {
+            expr_contains_await(&fi.iter) || fi.body.stmts.iter().any(stmt_uses_tasks)
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => false,
+    }
+}
+
+fn fn_uses_tasks(f: &FunctionDecl) -> bool {
+    f.body.stmts.iter().any(stmt_uses_tasks)
 }

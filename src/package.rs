@@ -23,14 +23,17 @@ pub struct Manifest {
 
 impl Manifest {
     /// Minimal `key = "value"` parser (no external TOML dep yet).
+    /// Strips inline `#` comments outside quotes so
+    /// `entry = "main" # comment` parses as `main`, not `main" # comment`.
+    /// Unknown keys are ignored (forward-compat); missing fields default.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut name: Option<String> = None;
         let mut version: Option<String> = None;
         let mut entry: Option<String> = None;
         let mut deps: Vec<(String, String)> = Vec::new();
         let mut section = String::new();
-        for line in text.lines() {
-            let line = line.trim();
+        for raw in text.lines() {
+            let line = strip_inline_comment(raw).trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -39,7 +42,7 @@ impl Manifest {
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {
-                let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                let val = parse_toml_value(v.trim());
                 if section == "dependencies" {
                     deps.push((k.trim().to_string(), val));
                 } else {
@@ -58,6 +61,36 @@ impl Manifest {
             entry: entry.unwrap_or_else(|| "combine".to_string()),
             deps,
         })
+    }
+}
+
+/// Strip an inline `#` comment, respecting single/double quotes.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return line[..i].trim_end(),
+            _ => {}
+        }
+    }
+    line
+}
+
+/// Parse a TOML value: quoted strings (single/double) unwrap, bare values
+/// trim. `entry = "main" # x` -> `main` (comment already stripped).
+fn parse_toml_value(v: &str) -> String {
+    let v = v.trim();
+    if v.len() >= 2
+        && ((v.starts_with('"') && v.ends_with('"'))
+            || (v.starts_with('\'') && v.ends_with('\'')))
+    {
+        v[1..v.len() - 1].to_string()
+    } else {
+        // Bare or malformed: strip trailing quotes if any, trim.
+        v.trim_matches('"').trim_matches('\'').trim().to_string()
     }
 }
 
@@ -118,6 +151,10 @@ pub fn parse_lock(text: &str) -> Vec<LockEntry> {
 }
 
 /// Verify current file contents match the lock. `Err` lists every mismatch.
+/// Also reports unlocked (extra) files: previously `verify_lock` ignored
+/// files not listed in the lock, so new malicious files passed silently.
+/// FNV-1a is change-detection, not collision-resistant: do not rely on it
+/// alone for adversarial integrity (use out-of-band signatures for that).
 pub fn verify_lock(files: &[(String, String)], locks: &[LockEntry]) -> Result<(), String> {
     let mut problems = Vec::new();
     for lock in locks {
@@ -132,6 +169,11 @@ pub fn verify_lock(files: &[(String, String)], locks: &[LockEntry]) -> Result<()
                     ));
                 }
             }
+        }
+    }
+    for (name, _) in files {
+        if !locks.iter().any(|l| &l.file == name) {
+            problems.push(format!("unlocked file `{name}` not in lockfile"));
         }
     }
     if problems.is_empty() {

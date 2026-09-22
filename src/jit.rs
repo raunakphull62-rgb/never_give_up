@@ -277,9 +277,22 @@ fn compile_func(
     let mut vars: HashMap<String, Variable> = HashMap::new();
     let mut defined: HashSet<String> = HashSet::new();
     let mut next: u32 = 0;
-    // `last` mirrors the interpreter's fall-off-the-end value; declared
-    // before the macros below so their bodies can resolve it.
-    let mut last: Option<cranelift_codegen::ir::Value> = None;
+    // `last` mirrors the interpreter's fall-off-the-end value (documented
+    // default 0). The Rust-side `Option<Value>` alone does NOT dominate the
+    // `end` block when the final value comes from a conditionally-executed
+    // block (invalid Cranelift IR). Track it in a Cranelift `Variable`
+    // (`last_var`) so reads in `end` are SSA-safe via phi insertion; the
+    // Option is kept only for the empty-function fast path below.
+    // `__last` cannot collide with user bindings (`__` is reserved).
+    let last_var = {
+        let v = Variable::from_u32(next);
+        next += 1;
+        fb.declare_var(v, types::I64);
+        // Null byte is unrepresentable in Klang identifiers, so this key
+        // can never collide with a user binding (even `__last`).
+        vars.insert("\0last".to_string(), v);
+        v
+    };
 
     // Reads a binding, planting an explicit 0 the first time a name is
     // read before any definition (mirrors `unwrap_or(Int(0))`).
@@ -301,14 +314,16 @@ fn compile_func(
         }};
     }
     // Operands bind before `ins()` so no `&mut fb` borrow from `use_v!`
-    // is live across the builder call.
+    // is live across the builder call. Every defining op also updates
+    // `last_var` so the `end` block reads a dominating Variable, never a
+    // conditionally-defined SSA value.
     macro_rules! arith_v {
         ($into:expr, $left:expr, $right:expr, $op:ident) => {{
             let l = use_v!($left);
             let r = use_v!($right);
             let v = fb.ins().$op(l, r);
             def_v!($into, v);
-            last = Some(v);
+            fb.def_var(last_var, v);
         }};
     }
     macro_rules! cmp_v {
@@ -320,7 +335,7 @@ fn compile_func(
             let c = fb.ins().icmp($cc, l, r);
             let v = fb.ins().uextend(types::I64, c);
             def_v!($into, v);
-            last = Some(v);
+            fb.def_var(last_var, v);
         }};
     }
 
@@ -345,31 +360,41 @@ fn compile_func(
     }
     let end = fb.create_block();
 
-    // Params live in block 0.
+    // Params live in block 0. Declare block params up front; the actual
+    // `def_var` seeding happens after switching to block 0 inside the loop
+    // below (emitting any instruction before the first switch would leave
+    // block 0 non-empty yet unterminated, tripping "fill before switching").
     fb.append_block_params_for_function_params(blocks[0]);
-    fb.switch_to_block(blocks[0]);
-    let mut param_vals = Vec::new();
-    for i in 0..f.params.len() {
-        param_vals.push(fb.block_params(blocks[0])[i]);
-    }
-    for (name, val) in f.params.iter().zip(param_vals) {
-        let v = declare_var(&mut vars, &mut next, &mut fb, name);
-        defined.insert(name.clone());
-        fb.def_var(v, val);
-    }
 
-    // `last` was declared above (before the macros) so macro bodies resolve it.
     // Jump targets may equal `n` (past-the-end = halt, e.g. `if` without
-    // `else`); those map to the `end` block returning `last`.
+    // `else`); those map to the `end` block returning `last_var`.
     let target_block = |t: usize| -> Block { if t < n { blocks[t] } else { end } };
     for (i, ins) in f.instrs.iter().enumerate() {
         fb.switch_to_block(blocks[i]);
+        if i == 0 {
+            let mut pv = Vec::new();
+            for k in 0..f.params.len() {
+                pv.push(fb.block_params(blocks[0])[k]);
+            }
+            for (name, val) in f.params.iter().zip(pv) {
+                let v = declare_var(&mut vars, &mut next, &mut fb, name);
+                defined.insert(name.clone());
+                fb.def_var(v, val);
+            }
+            // Fall-off-the-end yields 0 (documented interpreter rule); seed
+            // the `last` variable so `end` always reads a dominating
+            // definition.
+            {
+                let z = fb.ins().iconst(types::I64, 0);
+                fb.def_var(last_var, z);
+            }
+        }
         let fallthrough = if i + 1 < n { blocks[i + 1] } else { end };
         match &ins.op {
             MirOp::Const { into, value } => {
                 let c = fb.ins().iconst(types::I64, *value);
                 def_v!(into, c);
-                last = Some(c);
+                fb.def_var(last_var, c);
             }
             MirOp::ConstFloat { .. } | MirOp::ConstStr { .. } => {
                 return Err(format!(
@@ -381,7 +406,7 @@ fn compile_func(
             MirOp::Copy { into, from } => {
                 let v = use_v!(from);
                 def_v!(into, v);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::Add { into, left, right } => arith_v!(into, left, right, iadd),
             MirOp::Sub { into, left, right } => arith_v!(into, left, right, isub),
@@ -412,7 +437,7 @@ fn compile_func(
                 let b = fb.ins().band(bl, br);
                 let v = fb.ins().uextend(types::I64, b);
                 def_v!(into, v);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::Or { into, left, right } => {
                 let l = use_v!(left);
@@ -423,13 +448,13 @@ fn compile_func(
                 let b = fb.ins().bor(bl, br);
                 let v = fb.ins().uextend(types::I64, b);
                 def_v!(into, v);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::Neg { into, inner } => {
                 let x = use_v!(inner);
                 let v = fb.ins().ineg(x);
                 def_v!(into, v);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::Not { into, inner } => {
                 let x = use_v!(inner);
@@ -437,7 +462,7 @@ fn compile_func(
                 let c = fb.ins().icmp(IntCC::Equal, x, zero);
                 let v = fb.ins().uextend(types::I64, c);
                 def_v!(into, v);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::Call { into, func, args } => {
                 if crate::hir::is_builtin(func) {
@@ -465,13 +490,13 @@ fn compile_func(
                 let call = fb.ins().call(func_ref, &call_args);
                 let v = fb.inst_results(call)[0];
                 def_v!(into, v);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::Print { value } => {
                 let v = use_v!(value);
                 let func_ref = module.declare_func_in_func(print_id, fb.func);
                 fb.ins().call(func_ref, &[v]);
-                last = Some(v);
+                fb.def_var(last_var, v);
             }
             MirOp::JumpIfFalse { cond, target } => {
                 let c = use_v!(cond);
@@ -506,14 +531,11 @@ fn compile_func(
     }
 
     fb.switch_to_block(end);
-    match last {
-        Some(v) => {
-            fb.ins().return_(&[v]);
-        }
-        None => {
-            let z = fb.ins().iconst(types::I64, 0);
-            fb.ins().return_(&[z]);
-        }
+    // SSA-safe: read the dominating `last` variable (phi-inserted across
+    // conditional predecessors), never a conditionally-defined value.
+    {
+        let v = fb.use_var(last_var);
+        fb.ins().return_(&[v]);
     }
 
     for b in blocks.iter().chain(std::iter::once(&end)) {

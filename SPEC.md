@@ -94,6 +94,17 @@ Methods: strings (`upper/lower/trim/split/contains/starts_with/
 ends_with/replace/chars/len`), arrays (`len/push/pop/contains/join`),
 maps (`len/keys/contains`). Unknown receivers skip checking.
 
+`len()` contract (pinned): `len(s: str)` and `s.len()` return **byte
+length** (Rust `String::len` convention), not char count:
+`len("klang") == 5`, `len("é") == 2`, `len("—") == 3`.
+`len(array)` is element count, `len(map)` is entry
+count. `write_file` likewise returns byte count. Note the deliberate
+asymmetry: `s[i]` and `s.chars()` are char-based (Unicode scalar values),
+so `for i in 0..len(s)` is only valid for ASCII; non-ASCII code must map
+char indices to byte offsets (e.g. via `s.chars()` plus `len()` of each
+single-char string). Token `start`/`end` spans in `parser.rs` are byte
+offsets (`source.as_bytes()`, `n = bytes.len()`).
+
 ## 5. Toolchain
 
 ```sh
