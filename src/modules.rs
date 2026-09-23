@@ -206,10 +206,19 @@ pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
         ctx.mods.insert(m.name.as_str(), info);
     }
 
+    // NOTE: `structs`/`enums` start empty on purpose. The top-level loops
+    // below (lines ~222-239) are the single source of truth for both
+    // top-level and module-member declarations. Initializing these from
+    // `program.structs.clone()` / `program.enums.clone()` AND pushing the
+    // (rewritten) top-level items again double-counted every top-level
+    // struct/enum whenever the file also contained a `mod` block, which
+    // surfaced as spurious `E-DUPLICATE` diagnostics for valid code
+    // (`enum Opt { ... }` + `mod util { ... }` in one file). The early
+    // return above (`mods.is_empty()`) masked this in module-free files.
     let mut flat = Program {
         mods: Vec::new(),
-        enums: program.enums.clone(),
-        structs: program.structs.clone(),
+        enums: Vec::new(),
+        structs: Vec::new(),
         imports: program.imports.clone(),
         functions: Vec::with_capacity(program.functions.len()),
     };

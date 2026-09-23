@@ -158,3 +158,58 @@ fn module_decls_survive_fmt_roundtrip() {
     assert!(prog2.mods[0].structs[0].is_pub);
     assert!(klang::hir::TypedHIR::check(prog2).is_ok());
 }
+
+// ---------------------------------------------------------------------
+// Phase 0 audit regression: top-level struct/enum + `mod` in one file.
+//
+// Found by the adversarial dogfooding pass: `modules::resolve` seeded its
+// flattened program with clones of the top-level structs/enums AND then
+// pushed the same items again in the top-level rewrite loops, so any file
+// containing BOTH a `mod` block and a top-level `enum`/`struct` got
+// spurious `E-DUPLICATE` diagnostics and could not be checked or run at
+// all. `resolve`'s early return for module-free programs masked it, and no
+// existing gate combined the two constructs.
+//
+// This test would have caught it: it asserts clean checking, correct
+// declaration counts after flattening, AND successful execution.
+// ---------------------------------------------------------------------
+#[test]
+fn module_with_top_level_enum_no_spurious_duplicates() {
+    // enum + mod + a qualified call through the module: valid program.
+    let (v, _) = run_src(
+        "enum Opt { Some(x: i32), None } mod util { pub fn wrap(x: i32) -> i32 { return x + 1 } } fn main() -> i32 { return util::wrap(41) }",
+        "main",
+    );
+    assert_eq!(v, 42);
+    // And the enum is still usable alongside the module.
+    let (v, _) = run_src(
+        "enum Opt { Some(x: i32), None } mod util { pub fn id(x: i32) -> i32 { return x } } fn pick(v: Opt) -> i32 { return match v { Opt::Some(n) => n, Opt::None => 0 } } fn main() -> i32 { return pick(Opt::Some(util::id(42))) }",
+        "main",
+    );
+    assert_eq!(v, 42);
+    // Flattening must not double-count declarations.
+    let mut p = Parser::new(
+        "enum Opt { Some(x: i32), None } struct Box { v: i32 } mod util { pub fn wrap(x: i32) -> i32 { return x } } fn main() -> i32 { return util::wrap(1) }",
+    );
+    let prog = p.parse_program().expect("parses");
+    let (flat, diags) = klang::modules::resolve(&prog);
+    assert!(diags.is_empty(), "no diagnostics for valid code, got {diags:?}");
+    assert_eq!(flat.enums.len(), 1, "top-level enum counted once");
+    assert_eq!(flat.structs.len(), 1, "top-level struct counted once");
+    assert!(klang::hir::TypedHIR::check(prog).is_ok(), "must check clean");
+}
+
+#[test]
+fn module_with_top_level_struct_no_spurious_duplicates() {
+    // struct + mod: same bug class as the enum case above.
+    let (v, _) = run_src(
+        "struct Box { v: i32 } mod util { pub fn wrap(x: i32) -> i32 { return x + 1 } } fn main() -> i32 { let b = Box { v: 41 } return util::wrap(b.v) }",
+        "main",
+    );
+    assert_eq!(v, 42);
+    let (v, _) = run_src(
+        "struct Box<T> { value: T } mod util { pub fn id(x: i32) -> i32 { return x } } fn main() -> i32 { let b = Box { value: util::id(42) } return b.value }",
+        "main",
+    );
+    assert_eq!(v, 42);
+}

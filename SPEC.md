@@ -25,6 +25,38 @@ fn main() -> i32 {
   `async`, `cancel`. Calling a `throws` function requires `throws`
   on the caller (`E-EFFECT-MISMATCH`).
 
+## 2b. Enums + match (checked)
+
+```klang
+enum Shape { Circle(r: i32), Rect(w: i32), Point }
+enum Opt { Some(x: i32), None }
+
+fn area(s: Shape) -> i32 {
+    return match s { Shape::Circle(r) => r * 3, Shape::Rect(w) => w * 2, Shape::Point => 0 }
+}
+```
+
+- Declared `enum Name { Variant, Other(x: i32), ... }` (tuple-style
+  payloads `Variant(x: i32)`; bare `Variant` for no payload).
+  Construction: `Shape::Circle(10)` (bare variants still take `()`
+  at construction: `Shape::Point()`).
+- `match scrutinee { Enum::Variant(bindings...) => expr, ... }`,
+  arms comma-separated, `_ => ...` wildcard. Bodies are comma
+  expressions; use a block `{ ... }` for multi-statement arms.
+- Exhaustiveness is a compile error: missing variants without a
+  wildcard is `E-MATCH-EXHAUSTIVE`, naming every missing variant
+  (`non-exhaustive match on \`Opt\`: missing Opt::None`) with fixes
+  suggesting the missing arms or a wildcard.
+- Duplicate variant arm: `E-MATCH-DUPLICATE`. Arm after a `_`
+  wildcard: `E-MATCH-UNREACHABLE`. Wrong binding count for the
+  payload: `E-ARITY`. Unknown variant: `E-UNDEFINED`.
+  Cross-enum arm or non-enum scrutinee: `E-TYPE` (names the actual
+  type). Variant payload types flow into arm bodies and are checked.
+- Structural-identity, fmt, MIR lowering, and runtime dispatch all
+  cover enums (tag dispatch over the existing struct value); see
+  `tests/enum_gates.rs` (incl. a `klang repair` end-to-end that adds
+  a missing arm with no repair-module changes).
+
 ## 2. Types (checked, `E-TYPE`)
 
 | Annotation | Type |
@@ -112,11 +144,43 @@ cargo run -- check <file>        # parse + type-check (JSON diagnostics)
 cargo run -- fmt <file> [--write]# canonical format (idempotent)
 cargo run -- run <file> [entry]  # parse + check + run (entry default main)
 cargo run -- build <file>        # parse + check + MIR listing
+cargo run -- repair <file> [entry] [--max-iters N] [--model URL] [--scope function|file] [--dry-run] [--write] [--verbose]
+                                 # bounded LLM repair guided by diagnostics (see below)
 ```
 
 `fmt` rules: 4-space indent, one statement per line, binary ops fully
 parenthesized. `fmt(fmt(x)) == fmt(x)`; formatted code re-parses and
 runs identically (tested in `tests/toolchain_gates.rs`).
+
+`repair` loop: parse + `TypedHIR::check` the target file; on failure send
+the failing scope's source plus `Diagnostic::to_json()` output to an
+OpenAI-compatible `/v1/chat/completions` endpoint (`--model`,
+`klang.toml [repair] endpoint`, or `$KLANG_MODEL_ENDPOINT`; no network
+without explicit config), splice the returned `fn` block(s) back,
+re-check the full program, repeat up to `--max-iters` (default 5, hard
+max 10) via `contracts::repair_loop`. Default scope is `function`
+(falls back to whole-file when diagnostics span >2 functions);
+default output is `<file>.repaired.klang`, `--write` edits in place,
+`--dry-run` prints the planned prompt with zero model calls, `--verbose`
+prints every attempt and writes `.klang-repair-log.json` next to the
+target (failures always log). Tested in `tests/repair_gates.rs` (mock
+backend, no network).
+
+`repair` scope boundaries (Phase 1 decision, pinned by tests):
+- `--scope function` never claims declaration-level diagnostics: rules
+  `names/duplicate`, `modules/visibility`, and `ownership/mode` always
+  repair at whole-file scope (`scope::DECLARATION_RULES` /
+  `is_declaration_level`), because a declaration edit is not expressible
+  by function-scoped splicing and name-keyed splicing is ambiguous
+  exactly when names collide.
+- A model response containing declaration text (`enum`/`struct`/`mod`/
+  `import`) is accepted only as a complete file (every original function
+  AND declaration present, per `splice::response_declarations`);
+  otherwise the attempt fails loudly rather than silently dropping the
+  declaration edit. Declaration-free responses still splice per function
+  and leave declarations byte-identical.
+- `match/*` diagnostics scope to the function whose body contains the
+  `match`, not to every function that merely mentions the enum.
 
 ## 6. Packages
 
@@ -128,16 +192,54 @@ version = "0.1.0"
 entry = "main"
 [dependencies]
 mylib = "./mylib.klang"
+[repair]
+endpoint = "http://127.0.0.1:8000"  # base URL or full .../v1/chat/completions
+model = "deepseek-chat"
+# api_key = "..."  # or $KLANG_MODEL_KEY; omit for local no-auth endpoints
+# max_iters = 5
+# scope = "function"  # or "file"
+# timeout = 60
 ```
 
 Lockfile: `write_lock` / `parse_lock` one `"<file> <hex>"` line per
 file (FNV-1a of bytes). `verify_lock` reports hash mismatches and
 missing files. Tested in `tests/package_gates.rs`.
 
-## 7. What is still NOT here (honest list)
+## 7. What is here from v0.2 (audited, code-verified)
+
+- Enums + `match` with exhaustiveness (`E-MATCH-EXHAUSTIVE`), wildcards,
+  duplicate/unreachable arms, binding arity, non-enum scrutinee — see §2b.
+- Generics: type parameters on `struct`, `enum`, and `fn` with per-site
+  inference and conflicting-instantiation `E-TYPE`
+  (`tests/generic_gates.rs`). No trait bounds/typeclasses.
+- Multi-file modules: `mod name { ... }` blocks, `pub`/private
+  visibility (`E-PRIVATE`), qualified `m::item` paths, plus cross-file
+  `import` merging (`tests/module_gates.rs`).
+- `examples/full.klang` and `examples/simple.klang` still run; the whole
+  suite is 177 tests (`cargo test`), including the Phase 3 offline
+  benchmark baseline (`tests/benchmark_gates.rs`: 8-task corpus across
+  simple/moderate/complex tiers, 100% oracle-repair convergence in 1
+  median iter; live two-model rates still require real endpoints via
+  `bench/run_live.sh` and are NOT claimed here).
+
+## 7b. Robustness (Phase 2 hardening)
+
+The CLI runs its work on a deep-stack worker
+(`klang::with_deep_stack`, 256 MiB — `src/lib.rs`), because the front end
+and checker recurse over the AST: a flat `1+1+...` chain of a few hundred
+operands used to overflow the default 8 MiB stack and abort the process
+instead of reporting. Pathological input (empty files, truncated `fn`,
+unterminated strings/comments, garbage bytes, hundreds of nested blocks,
+tens of thousands of operands) now always produces either `check: OK` or a
+structured diagnostic — never a crash. Pinned by
+`tests/robustness_gates.rs`.
+
+## 8. What is still NOT here (honest list)
 
 No full-value machine-code backend (int-only Cranelift JIT behind
-`--backend-jit`; interpreter is the default), no generics,
-no closures, no real borrow checker (Managed mode only), no async I/O
-runtime, no registry/network packages, no LSP server (only a JSON
-renderer), no debugger/profiler. See `roadmap.md` for sequencing.
+`--backend-jit`; interpreter is the default), no closures, no real borrow
+checker (Managed mode only), no async I/O runtime, no registry/network
+packages, no LSP server (only a JSON renderer), no debugger/profiler, no
+recursive/nested enum payloads needing indirection, no match guards, no
+tuple-variant syntax or partial destructuring. See `roadmap.md` for
+sequencing and `AUDIT.md` for the Phase 0 evidence table.
