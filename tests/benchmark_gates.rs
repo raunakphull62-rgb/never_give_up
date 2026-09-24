@@ -1,15 +1,15 @@
 //! Phase 3 — AI-benchmark harness (offline baseline + live-model procedure).
 //!
-//! PRD 6.1/6.2: task corpus across difficulty tiers, each run zero-shot
-//! (check only) and repair-assisted (repair loop, <=5 iters), across two
-//! models. This file is the checked-in corpus + the offline-runnable
-//! runner: `MockBackend` stands in for a model with a queued oracle fix,
-//! so every metric below is computed through the real pipeline
+//! Task corpus across difficulty tiers, each run zero-shot (check only)
+//! and repair-assisted (repair loop, <=5 iters). This file is the
+//! checked-in corpus + the offline-runnable runner: `MockBackend`
+//! stands in for the harness-owned model with a queued oracle fix, so
+//! every metric below is computed through the real pipeline
 //! (`check_candidate` for syntax/semantics, `run_repair` +
 //! `RepairOutcome::iters_used` for convergence, diagnostic codes for the
-//! "almost-right" category). Live-model rates require endpoints this
-//! container does not have; `bench/run_live.sh` (companion) fills the
-//! same table against two real URLs.
+//! "almost-right" category). Live-model convergence is measured inside
+//! harnesses via `klang mcp`; `bench/run_live.sh` (companion) checks the
+//! harness signal per task with zero model calls.
 //!
 //! Tiers: simple (single fn, no advanced features), moderate (one
 //! advanced feature), complex (generics + enums + modules together).
@@ -34,17 +34,14 @@ struct Task {
 }
 
 fn cfg() -> RepairConfig {
-    RepairConfig::resolve_with(
+    RepairConfig::resolve(
         &RepairCliOverrides {
-            endpoint: Some("http://mock/v1".into()),
             scope: Some(Scope::Function),
             max_iters: Some(5),
             ..Default::default()
         },
         &RepairFileConfig::default(),
-        &[],
     )
-    .expect("cfg")
 }
 
 fn corpus() -> Vec<Task> {

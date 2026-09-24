@@ -549,6 +549,10 @@ pub enum Expr {
     Call {
         id: NodeId,
         func: String,
+        /// Explicit `<T, ...>` type arguments at the call site (`f<T>(x)`).
+        /// Empty for implicit-inference calls (`f(x)`); checked in HIR
+        /// against the callee's `type_params` when present.
+        type_args: Vec<String>,
         args: Vec<Expr>,
     },
     Var {

@@ -75,11 +75,10 @@ fn real_main() {
     //   fmt <file> [--write] print canonical source (or rewrite in place)
     //   run <file> [entry]  parse + check + lower + run (default entry `main`)
     //   build <file>        parse + check + print MIR listing
-    //   repair <file> [entry] [--max-iters N] [--model URL] [--model-name N]
-    //     [--api-key K] [--scope function|file] [--timeout S] [--dry-run]
-    //     [--write] [--verbose]
-    //     bounded LLM repair guided by compiler diagnostics (see repair.rs).
-    //     Default writes `<file>.repaired.klang`; `--write` edits in place.
+    //   repair <file> [--max-iters N] [--scope function|file] [--dry-run]
+    //     repair-mechanism inspector: --dry-run prints the planned prompt.
+    //     Live model-calling was removed in Phase 4; harnesses drive the
+    //     loop via `klang mcp` (klang_check, klang_scope_plan).
     // Backcompat: `cargo run -- <file.klang> [entry]` == `run`.
     // No args = full gate demo below.
     let args: Vec<String> = std::env::args().collect();
@@ -444,13 +443,17 @@ fn run_file_mode(args: &[String]) {
     // Split leading subcommand from file args. Backcompat: a bare `<file>`
     // first arg means `run <file> [entry]`.
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
-        Some("check") | Some("fmt") | Some("run") | Some("build") | Some("repair") => {
+        Some("check") | Some("fmt") | Some("run") | Some("build") | Some("repair") | Some("mcp") => {
             (args[0].as_str(), &args[1..])
         }
         _ => ("run", args),
     };
+    if cmd == "mcp" {
+        run_mcp_mode();
+        return;
+    }
     if rest.is_empty() {
-        eprintln!("usage: <check|fmt|run|build|repair> <file.klang> [entry] [--backend-jit|--write]");
+        eprintln!("usage: <check|fmt|run|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -509,7 +512,7 @@ fn run_file_mode(args: &[String]) {
             std::process::exit(1);
         }
     };
-    match TypedHIR::check(prog.clone()) {
+    match TypedHIR::check_with_file(prog.clone(), path) {
         Ok(_) => println!("check: OK (0 diagnostics)"),
         Err(diags) => {
             println!("check: FAIL ({} diagnostics)", diags.len());
@@ -584,8 +587,17 @@ fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
         if !seen.insert(canon) {
             continue;
         }
-        let src = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        println!("file: {path} ({} bytes)", src.len());
+        let src = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "cannot read {}: {e}",
+                klang::diagnostics::sanitize_for_terminal(&path)
+            )
+        })?;
+        println!(
+            "file: {} ({} bytes)",
+            klang::diagnostics::sanitize_for_terminal(&path),
+            src.len()
+        );
         let mut p = Parser::new_with_file(&src, &path);
         let prog = p.parse_program().map_err(|d| d.to_json())?;
         let dir = std::path::Path::new(&path)
@@ -596,14 +608,13 @@ fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
             // Root confinement: reject absolute imports and `..` escapes so
             // untrusted `.klang` files cannot pull in `../../…` or absolute
             // paths. Plain relative imports (`mylib.klang`, `./x.klang`)
-            // keep working.
-            let imp_path = std::path::Path::new(imp);
-            if imp_path.is_absolute()
-                || imp.contains("..")
-                || imp.starts_with("~")
-                || imp.contains('\0')
-            {
-                return Err(format!("unsafe import `{imp}` from `{path}`"));
+            // keep working. Single predicate shared with the repair
+            // model-output screen (`repair::is_unsafe_import_path`).
+            if klang::repair::is_unsafe_import_path(imp) {
+                return Err(format!(
+                    "unsafe import `{}` from `{path}`",
+                    klang::diagnostics::sanitize_for_terminal(imp)
+                ));
             }
             queue.push_back(dir.join(imp).to_string_lossy().to_string());
         }
@@ -622,22 +633,17 @@ fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
     Ok(merged)
 }
 
-/// `klang repair <file> [entry] [--max-iters N] [--model URL] ...`
+/// `klang repair <file.klang> [--max-iters N] [--scope function|file] [--dry-run]`
 ///
-/// Bounded diagnostic-guided LLM repair (PRD v1): parse + check the target
-/// file; if failing, loop prompt -> model -> splice -> re-check via
-/// `repair::run_repair` (which itself drives `contracts::repair_loop`).
-/// Entry arg is accepted for CLI symmetry and validated to exist on
-/// success; it does not change the repair itself (repair is check-level).
+/// Phase 4: Klang no longer calls a model directly — the repair *loop*
+/// (parse -> check -> prompt -> splice -> re-check) is driven by the
+/// harness, which owns the model connection. What remains here is the
+/// mechanism's observable surface: `--dry-run` prints the exact planned
+/// first prompt (scope + diagnostics JSON) a harness would send, and a
+/// clean file still exits 0. Anything else errors with a pointer to
+/// `klang mcp`, which exposes the same mechanism as tools.
 fn run_repair_mode(path: &str, rest: &[String]) {
-    use klang::repair::{
-        OpenAiCurlBackend, RepairCliOverrides, RepairConfig, RepairFileConfig, Scope,
-    };
-    let entry = rest
-        .first()
-        .filter(|s| !s.starts_with("--"))
-        .cloned()
-        .unwrap_or_else(|| "main".to_string());
+    use klang::repair::{RepairCliOverrides, RepairConfig, RepairFileConfig, Scope};
     let flag_val = |names: &[&str]| -> Option<String> {
         let mut it = rest.iter().peekable();
         while let Some(a) = it.next() {
@@ -663,13 +669,12 @@ fn run_repair_mode(path: &str, rest: &[String]) {
     };
     let has = |n: &str| rest.iter().any(|a| a == n);
     if has("--help") || has("-h") {
-        println!("usage: repair <file.klang> [entry] [--max-iters N] [--model <endpoint>] [--model-name <name>] [--api-key <key>] [--scope function|file] [--timeout S] [--dry-run] [--write] [--verbose]");
+        println!("usage: repair <file.klang> [--max-iters N] [--scope function|file] [--dry-run]");
         println!("  --max-iters N   attempt budget 1..10 (default 5)");
-        println!("  --model URL     OpenAI-compatible base URL or full /v1/chat/completions URL (or $KLANG_MODEL_ENDPOINT / klang.toml [repair] endpoint)");
         println!("  --scope s       function (default) or file");
         println!("  --dry-run       print the planned first prompt, make no model calls");
-        println!("  --write         overwrite the input file on success (default: write <file>.repaired.klang)");
-        println!("  --verbose       print every attempt's diagnostics + response summary");
+        println!("Klang no longer calls a model directly (Phase 4): the repair loop is");
+        println!("driven by your harness via `klang mcp` (klang_check, klang_scope_plan).");
         return;
     }
     let max_iters = flag_val(&["--max-iters"]).map(|v| {
@@ -684,50 +689,20 @@ fn run_repair_mode(path: &str, rest: &[String]) {
             std::process::exit(2);
         })
     });
-    let timeout_secs = flag_val(&["--timeout"]).map(|v| {
-        v.parse::<u64>().unwrap_or_else(|_| {
-            eprintln!("repair: bad --timeout `{v}`");
-            std::process::exit(2);
-        })
-    });
     let dry_run = has("--dry-run");
-    let write_in_place = has("--write");
-    let verbose = has("--verbose");
-    let overrides = RepairCliOverrides {
-        max_iters,
-        scope,
-        endpoint: flag_val(&["--model", "--endpoint"]),
-        model: flag_val(&["--model-name", "--model_name"]),
-        api_key: flag_val(&["--api-key", "--api_key"]),
-        timeout_secs,
-    };
+    let overrides = RepairCliOverrides { max_iters, scope };
     let toml_path = target_dir(path).join("klang.toml");
     let toml_text = std::fs::read_to_string(&toml_path).unwrap_or_default();
     let file_cfg = RepairFileConfig::parse_toml(&toml_text);
-    let cfg = match RepairConfig::resolve(&overrides, &file_cfg, &RepairConfig::live_env()) {
-        Ok(c) => c,
-        Err(e) => {
-            if dry_run {
-                RepairConfig {
-                    max_iters: overrides.max_iters.unwrap_or(RepairConfig::DEFAULT_ITERS),
-                    scope: overrides.scope.unwrap_or(Scope::Function),
-                    endpoint: String::new(),
-                    model: RepairConfig::DEFAULT_MODEL.to_string(),
-                    api_key: String::new(),
-                    timeout_secs: RepairConfig::DEFAULT_TIMEOUT_SECS,
-                }
-            } else {
-                eprintln!("{e}");
-                std::process::exit(2);
-            }
-        }
-    };
+    let cfg = RepairConfig::resolve(&overrides, &file_cfg);
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
         std::process::exit(1);
     });
-    let backend = OpenAiCurlBackend::new(&cfg.endpoint, &cfg.model, &cfg.api_key, cfg.timeout_secs);
-    let outcome = klang::repair::run_repair(&src, path, &cfg, &backend, dry_run);
+    // No backend exists in-tree: the only model-free operation is the
+    // dry-run plan. MockBackend is test-only on purpose.
+    let backend = klang::repair::MockBackend::new(vec![]);
+    let outcome = klang::repair::run_repair(&src, path, &cfg, &backend, true);
     if outcome.attempts.is_empty() {
         println!("check: OK (0 diagnostics), nothing to repair");
         return;
@@ -738,83 +713,50 @@ fn run_repair_mode(path: &str, rest: &[String]) {
         println!("scope: {}", a.target);
         println!("--- system prompt ---\n{}", a.prompt_system);
         println!("--- user prompt ---\n{}", a.prompt_user);
-        if verbose {
-            for d in &outcome.final_diagnostics {
-                println!("{}", d.to_json());
-            }
-        }
-        return;
-    }
-    for a in &outcome.attempts {
-        if verbose {
-            println!("--- attempt {} [{}] {} ---", a.iter + 1, a.scope, a.target);
-            for d in &a.diagnostics_in {
-                println!("in: {}", d.to_json());
-            }
-            println!("note: {}", a.note);
-            for d in &a.diagnostics_out {
-                println!("out: {}", d.to_json());
-            }
-        } else {
-            println!("attempt {} [{}]: {}", a.iter + 1, a.scope, a.note);
-        }
-    }
-    if outcome.success {
-        if !klang::repair::scope::function_spans(&outcome.source).iter().any(|(n, _, _)| n == &entry) && entry != "main" {
-            eprintln!("repair: warning: entry `{entry}` not found in repaired output");
-        }
-        if write_in_place {
-            std::fs::write(path, &outcome.source).unwrap_or_else(|e| {
-                eprintln!("cannot write {path}: {e}");
-                std::process::exit(1);
-            });
-            println!("repair: OK in {} attempt(s), wrote {path}", outcome.iters_used);
-        } else {
-            let sib = if let Some(stem) = path.strip_suffix(".klang") {
-                format!("{stem}.repaired.klang")
-            } else {
-                format!("{path}.repaired.klang")
-            };
-            std::fs::write(&sib, &outcome.source).unwrap_or_else(|e| {
-                eprintln!("cannot write {sib}: {e}");
-                std::process::exit(1);
-            });
-            println!("repair: OK in {} attempt(s), wrote {sib} (use --write to edit in place)", outcome.iters_used);
-        }
-        if verbose {
-            let log_path = log_path_for(path);
-            match klang::repair::write_log(&log_path, path, true, &outcome.attempts, &outcome.final_diagnostics) {
-                Ok(p) => println!("repair: log {p}"),
-                Err(e) => eprintln!("repair: {e}"),
-            }
-        }
-    } else {
-        println!("repair: FAIL after {} attempt(s) ({} diagnostic(s) remain)", outcome.iters_used, outcome.final_diagnostics.len());
         for d in &outcome.final_diagnostics {
             println!("{}", d.to_json());
         }
-        let log_path = log_path_for(path);
-        match klang::repair::write_log(&log_path, path, false, &outcome.attempts, &outcome.final_diagnostics) {
-            Ok(p) => println!("repair: log {p}"),
-            Err(e) => eprintln!("repair: {e}"),
+        return;
+    }
+    eprintln!("repair: Klang no longer calls a model directly (Phase 4).");
+    eprintln!("repair: drive the loop from your harness via `klang mcp`, or inspect the planned prompt with `klang repair {path} --dry-run`.");
+    std::process::exit(2);
+}
+
+/// `klang mcp`: serve the verification engine as MCP tools on stdio.
+///
+/// One JSON-RPC message per line in, one per line out (responses only;
+/// notifications get silence). Each request is panic-isolated so a
+/// hostile input yields an error, never a dead server. Runs inside the
+/// CLI's deep-stack worker (see `main`), like every other subcommand.
+fn run_mcp_mode() {
+    use std::io::{BufRead, Write};
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.trim().is_empty() {
+            continue;
         }
-        std::process::exit(1);
+        let resp = std::panic::catch_unwind(|| klang::mcp::handle_request(&line))
+            .unwrap_or_else(|_| Some(klang::mcp::internal_error()));
+        if let Some(r) = resp {
+            if writeln!(stdout, "{r}").is_err() {
+                break;
+            }
+            if stdout.flush().is_err() {
+                break;
+            }
+        }
     }
 }
 
 /// Directory containing `path` (for `klang.toml` lookup).
-fn target_dir(path: &str) -> std::path::PathBuf {
-    std::path::Path::new(path)
+fn target_dir(path: &str) -> std::path::PathBuf {    std::path::Path::new(path)
         .parent()
         .map(|d| d.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-}
-
-/// `.klang-repair-log.json` next to the target file.
-fn log_path_for(path: &str) -> String {
-    let p = std::path::Path::new(path);
-    match p.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => format!("{}/.klang-repair-log.json", dir.to_string_lossy()),
-        _ => ".klang-repair-log.json".to_string(),
-    }
 }

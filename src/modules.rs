@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{AssignTarget, Block, Expr, FunctionDecl, MatchArm, Program, Stmt};
 use crate::diagnostics::Diagnostic;
-use crate::hir::FILE;
 
 /// What the head `m` of a qualified `m::item` path turned out to be.
 enum Qualified {
@@ -45,11 +44,11 @@ enum MemberKind {
     Enum,
 }
 
-fn duplicate(message: &str) -> Diagnostic {
+fn duplicate(file: &str, message: &str) -> Diagnostic {
     Diagnostic::error(
         "E-DUPLICATE",
         message,
-        FILE,
+        file,
         0,
         0,
         "two items share one name",
@@ -58,11 +57,11 @@ fn duplicate(message: &str) -> Diagnostic {
     )
 }
 
-fn undefined(name: &str) -> Diagnostic {
+fn undefined(file: &str, name: &str) -> Diagnostic {
     Diagnostic::error(
         "E-UNDEFINED",
         &format!("undefined `{name}`"),
-        FILE,
+        file,
         0,
         0,
         "name is not visible at this path",
@@ -71,11 +70,11 @@ fn undefined(name: &str) -> Diagnostic {
     )
 }
 
-fn not_a_value(path: &str, what: &str, use_instead: &str) -> Diagnostic {
+fn not_a_value(file: &str, path: &str, what: &str, use_instead: &str) -> Diagnostic {
     Diagnostic::error(
         "E-TYPE",
         &format!("`{path}` is {what}, not a value ({use_instead})"),
-        FILE,
+        file,
         0,
         0,
         "only enum variants construct values with `()`; functions need a call",
@@ -92,6 +91,7 @@ struct ModInfo {
 }
 
 struct Ctx<'a> {
+    file: String,
     mods: HashMap<&'a str, ModInfo>,
     top_structs: HashSet<&'a str>,
     top_enums: HashSet<&'a str>,
@@ -136,8 +136,9 @@ impl<'a> Ctx<'a> {
     /// inside their own module. `cur` is the module of the use site.
     fn gate(&mut self, module: &str, is_pub: bool, cur: Option<&str>, full: &str) {
         if !is_pub && cur != Some(module) {
+            let file = self.file.clone();
             self.diags
-                .push(Diagnostic::private_access(FILE, 0, 0, full));
+                .push(Diagnostic::private_access(&file, 0, 0, full));
         }
     }
 }
@@ -156,10 +157,16 @@ fn head_item(rest: &str) -> &str {
 /// enforcing visibility. Total: never panics; problems come back as
 /// diagnostics alongside a best-effort program.
 pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
+    resolve_with_file(program, crate::hir::FILE)
+}
+
+/// Same as [`resolve`] but labels emitted diagnostics with `file`.
+pub fn resolve_with_file(program: &Program, file: &str) -> (Program, Vec<Diagnostic>) {
     if program.mods.is_empty() {
         return (program.clone(), Vec::new());
     }
     let mut ctx = Ctx {
+        file: file.to_string(),
         mods: HashMap::new(),
         top_structs: program.structs.iter().map(|s| s.name.as_str()).collect(),
         top_enums: program.enums.iter().map(|e| e.name.as_str()).collect(),
@@ -167,8 +174,9 @@ pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
     };
     for m in &program.mods {
         if ctx.mods.contains_key(m.name.as_str()) {
+            let f = ctx.file.clone();
             ctx.diags
-                .push(duplicate(&format!("duplicate module `{}`", m.name)));
+                .push(duplicate(&f, &format!("duplicate module `{}`", m.name)));
             continue;
         }
         let mut info = ModInfo {
@@ -178,7 +186,8 @@ pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
         };
         for f in &m.functions {
             if info.fns.contains_key(&f.name) {
-                ctx.diags.push(duplicate(&format!(
+                let f0 = ctx.file.clone();
+                ctx.diags.push(duplicate(&f0, &format!(
                     "duplicate function `{}` in module `{}`",
                     f.name, m.name
                 )));
@@ -187,7 +196,8 @@ pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
         }
         for s in &m.structs {
             if info.structs.contains_key(&s.name) {
-                ctx.diags.push(duplicate(&format!(
+                let f0 = ctx.file.clone();
+                ctx.diags.push(duplicate(&f0, &format!(
                     "duplicate struct `{}` in module `{}`",
                     s.name, m.name
                 )));
@@ -196,7 +206,8 @@ pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
         }
         for e in &m.enums {
             if info.enums.contains_key(&e.name) {
-                ctx.diags.push(duplicate(&format!(
+                let f0 = ctx.file.clone();
+                ctx.diags.push(duplicate(&f0, &format!(
                     "duplicate enum `{}` in module `{}`",
                     e.name, m.name
                 )));
@@ -280,9 +291,26 @@ pub fn resolve(program: &Program) -> (Program, Vec<Diagnostic>) {
     (flat, diags)
 }
 
+/// Base nominal name of a possibly-generic annotation (`Opt<i32>` -> `Opt`).
+fn base_ty_name(s: &str) -> &str {
+    match s.find('<') {
+        Some(i) => &s[..i],
+        None => s,
+    }
+}
+
+/// Generic suffix including brackets (`Opt<i32>` -> `<i32>`, `Opt` -> ``).
+fn generic_suffix(s: &str) -> &str {
+    match s.find('<') {
+        Some(i) => &s[i..],
+        None => "",
+    }
+}
+
 /// Rewrite one type annotation. Type parameters pass through; qualified
 /// paths are validated; bare names gain their module qualifier when they
-/// name a member type of the enclosing module.
+/// name a member type of the enclosing module. Explicit generic arguments
+/// (`Opt<i32>`) are preserved verbatim; lookups key on the base name.
 fn rewrite_ty(ty: &str, type_params: &[String], cur: Option<&str>, ctx: &mut Ctx) -> String {
     if type_params.iter().any(|t| t == ty) {
         return ty.to_string();
@@ -292,9 +320,10 @@ fn rewrite_ty(ty: &str, type_params: &[String], cur: Option<&str>, ctx: &mut Ctx
         return ty.to_string();
     }
     if let Some(cur) = cur {
+        let base = base_ty_name(ty);
         if let Some(info) = ctx.mods.get(cur) {
-            if info.structs.contains_key(ty) || info.enums.contains_key(ty) {
-                return format!("{cur}::{ty}");
+            if info.structs.contains_key(base) || info.enums.contains_key(base) {
+                return format!("{cur}::{base}{}", generic_suffix(ty));
             }
         }
     }
@@ -306,21 +335,27 @@ fn rewrite_ty(ty: &str, type_params: &[String], cur: Option<&str>, ctx: &mut Ctx
 /// genuine privacy violations, kind errors, and malformed paths report.
 fn validate_type_ref(m: &str, rest: &str, cur: Option<&str>, ctx: &mut Ctx, full: &str) {
     if rest.contains("::") {
+        let f = ctx.file.clone();
         ctx.diags.push(not_a_value(
+            &f,
             full,
             "a qualified path with more segments",
             "use a plain `module::Type` path",
         ));
         return;
     }
-    match ctx.classify(m, rest) {
+    // Strip explicit generic arguments for member lookup (`S<i32>` -> `S`).
+    let item = base_ty_name(head_item(rest));
+    match ctx.classify(m, item) {
         Qualified::TopType | Qualified::Unknown | Qualified::NoSuchItem => {}
         Qualified::Member { kind, is_pub } => match kind {
             MemberKind::Struct | MemberKind::Enum => {
                 ctx.gate(m, is_pub, cur, full);
             }
             MemberKind::Fn => {
+                let f = ctx.file.clone();
                 ctx.diags.push(not_a_value(
+                    &f,
                     full,
                     &format!("the function `{full}`"),
                     &format!("call it as `{full}(...)`"),
@@ -526,12 +561,15 @@ fn rewrite_ctor(slot: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
         match ctx.classify(&shape.head, &shape.item) {
             Qualified::TopType | Qualified::Unknown => {}
             Qualified::NoSuchItem => {
-                ctx.diags.push(undefined(&shape.path));
+                let f = ctx.file.clone();
+                ctx.diags.push(undefined(&f, &shape.path));
             }
             Qualified::Member { kind, is_pub } => {
                 ctx.gate(&shape.head, is_pub, cur, &shape.path);
                 if kind != MemberKind::Enum {
+                    let f = ctx.file.clone();
                     ctx.diags.push(not_a_value(
+                        &f,
                         &shape.path,
                         "not an enum",
                         "match only on enum variants",
@@ -578,6 +616,7 @@ fn rewrite_ctor(slot: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
             *slot = Expr::Call {
                 id: oid,
                 func: full,
+                type_args: Vec::new(),
                 args: otaken,
             };
         }
@@ -586,7 +625,9 @@ fn rewrite_ctor(slot: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
             is_pub,
         } => {
             ctx.gate(&shape.head, is_pub, cur, &full);
+            let f = ctx.file.clone();
             ctx.diags.push(not_a_value(
+                &f,
                 &full,
                 &format!("the enum `{full}`"),
                 &format!("use a variant such as `{full}::Variant`"),
@@ -597,14 +638,17 @@ fn rewrite_ctor(slot: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
             is_pub,
         } => {
             ctx.gate(&shape.head, is_pub, cur, &full);
+            let f = ctx.file.clone();
             ctx.diags.push(not_a_value(
+                &f,
                 &full,
                 &format!("the struct `{full}`"),
                 &format!("construct it as `{full} {{ ... }}`"),
             ));
         }
         Qualified::NoSuchItem => {
-            ctx.diags.push(undefined(&full));
+            let f = ctx.file.clone();
+            ctx.diags.push(undefined(&f, &full));
         }
         Qualified::TopType | Qualified::Unknown => {}
     }
@@ -632,12 +676,15 @@ fn rewrite_arm(arm: &mut MatchArm, cur: Option<&str>, ctx: &mut Ctx) {
     match ctx.classify(m, head_item(rest)) {
         Qualified::TopType | Qualified::Unknown => {}
         Qualified::NoSuchItem => {
-            ctx.diags.push(undefined(&n));
+            let f = ctx.file.clone();
+            ctx.diags.push(undefined(&f, &n));
         }
         Qualified::Member { kind, is_pub } => {
             ctx.gate(m, is_pub, cur, &n);
             if kind != MemberKind::Enum {
+                let f = ctx.file.clone();
                 ctx.diags.push(not_a_value(
+                    &f,
                     &n,
                     "a function or struct path",
                     "match only on enum variants",
@@ -655,7 +702,9 @@ fn validate_struct_lit(name: &str, cur: Option<&str>, ctx: &mut Ctx) {
         Qualified::Member { kind, is_pub } => {
             ctx.gate(m, is_pub, cur, name);
             if kind != MemberKind::Struct {
+                let f = ctx.file.clone();
                 ctx.diags.push(not_a_value(
+                    &f,
                     name,
                     "not a struct",
                     "construct the enum variant or call the function instead",
@@ -673,7 +722,9 @@ fn validate_call_ref(m: &str, item: &str, cur: Option<&str>, ctx: &mut Ctx, full
         Qualified::Member { kind, is_pub } => {
             ctx.gate(m, is_pub, cur, full);
             if kind != MemberKind::Fn {
+                let f = ctx.file.clone();
                 ctx.diags.push(not_a_value(
+                    &f,
                     full,
                     "not a function",
                     "call a function path instead",

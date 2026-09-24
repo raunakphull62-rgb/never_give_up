@@ -52,3 +52,18 @@ fn valid_operators_still_parse() {
     }
     println!("valid ops OK");
 }
+
+#[test]
+fn match_block_arm_is_clean_parse_error() {
+    // F19: match arm bodies are single expressions; a `{ ... }` block
+    // parses as a map literal and fails. Must be E-PARSE, never a panic,
+    // and SPEC must not claim otherwise.
+    for src in [
+        "enum Opt { Some(x: i32), None } fn f(v: Opt) -> i32 { return match v { Opt::Some(n) => { return n }, Opt::None => 0 } }",
+        "enum Opt { Some(x: i32), None } fn f(v: Opt) -> i32 { return match v { _ => { return 1 } } }",
+    ] {
+        let r = parse_code(src);
+        assert_eq!(r, "E:E-PARSE", "block arm must be clean E-PARSE, got {r} for {src}");
+        println!("block-arm reject OK: {r}");
+    }
+}

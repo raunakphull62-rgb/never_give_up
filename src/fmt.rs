@@ -309,9 +309,14 @@ fn fmt_expr(e: &Expr) -> String {
         }
         Expr::Spawn { call, .. } => format!("spawn {}", fmt_expr(call)),
         Expr::Await { name, .. } => format!("await {name}"),
-        Expr::Call { func, args, .. } => {
+        Expr::Call { func, type_args, args, .. } => {
+            let targs = if type_args.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", type_args.join(", "))
+            };
             format!(
-                "{func}({})",
+                "{func}{targs}({})",
                 args.iter().map(fmt_expr).collect::<Vec<_>>().join(", ")
             )
         }

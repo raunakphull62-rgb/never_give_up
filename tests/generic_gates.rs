@@ -101,3 +101,95 @@ fn generic_decls_survive_fmt_roundtrip() {
     assert_eq!(prog2.functions[0].type_params, vec!["T".to_string()]);
     assert!(klang::hir::TypedHIR::check(prog2).is_ok());
 }
+
+#[test]
+fn generic_mismatch_names_param_and_inference_site() {
+    // F13: `same(1, "two")` must not read as a hardcoded "want i32".
+    // T was inferred from arg 0; the message must say so for repair.
+    let src =
+        "fn same<T>(a: T, b: T) -> T { return a } fn main() -> i32 { return same(1, \"two\") }";
+    let mut p = Parser::new(src);
+    let prog = p.parse_program().expect("parses");
+    let err = klang::hir::TypedHIR::check(prog).expect_err("must fail");
+    let diag = err
+        .iter()
+        .find(|d| d.code == "E-TYPE")
+        .expect("want E-TYPE");
+    assert!(
+        diag.message.contains('T'),
+        "message must name the type parameter, got: {}",
+        diag.message
+    );
+    assert!(
+        diag.message.to_lowercase().contains("infer"),
+        "message must reference inference, got: {}",
+        diag.message
+    );
+    assert!(
+        diag.message.contains("arg 0"),
+        "message must name where T was bound, got: {}",
+        diag.message
+    );
+    println!("generic-mismatch OK: {}", diag.message);
+}
+
+#[test]
+fn explicit_generic_type_annotation_parses_and_checks() {
+    // F15 case 1: `Opt<i32>` as a parameter type annotation. Previously
+    // `expected ')'` at the `<`; now parses and resolves to the nominal
+    // enum for checking and execution.
+    let (v, _) = run_src(
+        "enum Opt<T> { Some(v: T), None } fn unwrap_or(o: Opt<i32>, default: i32) -> i32 { return match o { Opt::Some(v) => v, Opt::None => default } } fn main() -> i32 { return unwrap_or(Opt::Some(40), 0) + unwrap_or(Opt::None(), 2) }",
+        "main",
+    );
+    assert_eq!(v, 42);
+}
+
+#[test]
+fn explicit_generic_call_site_parses_without_comparison_diagnostics() {
+    // F15 case 2: `count<T>(...)` / `count<i32>(...)` must parse as generic
+    // calls, not as `count < T` comparisons (which produced 8 cascading
+    // `undefined T` / `comparison operands` diagnostics with no hint of
+    // the real ambiguity).
+    let src = "fn count<T>(n: i32) -> i32 { if n <= 0 { return 0 } return 1 + count<T>(n - 1) } fn main() -> i32 { return count<i32>(5) }";
+    let mut p = Parser::new(src);
+    let prog = p.parse_program().expect("explicit generic calls must parse");
+    match klang::hir::TypedHIR::check(prog.clone()) {
+        Ok(_) => {}
+        Err(ds) => {
+            for d in &ds {
+                assert!(
+                    !d.message.contains("comparison operands"),
+                    "must not misparse as comparison: {}",
+                    d.to_json()
+                );
+                assert!(
+                    !(d.code == "E-UNDEFINED" && d.message.contains("`T`")),
+                    "T must not leak as undefined variable: {}",
+                    d.to_json()
+                );
+            }
+            panic!("explicit generic calls must check clean, got: {:?}", ds.iter().map(|d| d.to_json()).collect::<Vec<_>>());
+        }
+    }
+    let mir = klang::mir::lower(&prog);
+    let (v, _) =
+        klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new()).expect("runs");
+    assert_eq!(v, 5);
+}
+
+#[test]
+fn plain_comparison_still_parses_as_comparison() {
+    // F15 guard: fixing the ambiguity must not break genuine `a < b`.
+    // `a < b` with two variables must remain a comparison (checks clean,
+    // runs correctly), never a generic instantiation.
+    let (v, _) = run_src(
+        "fn main() -> i32 { let a = 1 let b = 2 if a < b { return 1 } return 0 }",
+        "main",
+    );
+    assert_eq!(v, 1);
+    // `f < 123` without `> (` must also stay a comparison, not a generic.
+    let mut p = Parser::new("fn main() -> i32 { let f = 1 if f < 123 { return 1 } return 0 }");
+    let prog = p.parse_program().expect("parses");
+    assert!(klang::hir::TypedHIR::check(prog).is_ok());
+}

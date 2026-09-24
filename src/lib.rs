@@ -10,6 +10,7 @@ pub mod fmt;
 pub mod hir;
 pub mod jit;
 pub mod lsp;
+pub mod mcp;
 pub mod mir;
 pub mod modules;
 pub mod ownership;

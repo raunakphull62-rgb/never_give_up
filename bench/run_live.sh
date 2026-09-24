@@ -1,39 +1,36 @@
 #!/usr/bin/env bash
-# Phase 3 live-model runner (PRD 6.1/6.2).
-# Usage: bench/run_live.sh <endpoint-A> <endpoint-B>
-# For each corpus task (mirrored from tests/benchmark_gates.rs) this runs:
-#   1. `klang check`  (zero-shot verdict: clean vs diagnostic code)
-#   2. `klang repair --model <ep> --max-iters 5` per endpoint (repair-assisted)
-# and appends one CSV row per (task, endpoint) to bench/results_live.csv:
-#   task,tier,endpoint,check_clean,repair_success,iters,notes
-# `iters` is read from the emitted .klang-repair-log.json ("iter" count).
-# Cross-model variance is flagged, not gated (PRD 6.2).
+# Phase 4 harness-signal check (replaces the Phase 3 live-model runner).
+#
+# `klang repair` no longer dials a model (Phase 4 correction), so
+# repair-assisted convergence is measured inside harnesses, not here.
+# This script verifies the signal those harnesses consume: for each
+# corpus task (mirrored from tests/benchmark_gates.rs) it drives
+# `klang mcp` exactly as a harness would — klang_check for diagnostics,
+# klang_scope_plan for the edit scope — with zero model calls, and
+# records one CSV row per task:
+#   task,tier,check_clean,diag_code,scope
+# Usage: bench/run_live.sh
+# Needs: python3 (JSON-RPC framing), KLANG_BIN or ./target/debug/klang.
 set -u
-if [ $# -ne 2 ]; then
-  echo "usage: bench/run_live.sh <endpoint-A> <endpoint-B>" >&2
+BIN=""
+# NOTE: `[ -x ]` is unreliable for root on noexec mounts (it reports true
+# for target/debug/klang and exec still fails), so every candidate is
+# probe-executed, not just permission-checked.
+for cand in "$CARGO_TARGET_DIR/debug/klang" "${KLANG_BIN:-}" ./target/debug/klang; do
+  [ -n "$cand" ] || continue
+  if [ -x "$cand" ] && printf '' | "$cand" mcp >/dev/null 2>&1; then
+    BIN="$cand"
+    break
+  fi
+done
+if [ -z "$BIN" ]; then
+  echo "bench/run_live.sh: no working klang binary (set KLANG_BIN or CARGO_TARGET_DIR)" >&2
   exit 2
 fi
-EPA="$1"; EPB="$2"
-BIN="${KLANG_BIN:-./target/debug/klang}"
-if [ ! -x "$BIN" ] && [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "$CARGO_TARGET_DIR/debug/klang" ]; then
-  BIN="$CARGO_TARGET_DIR/debug/klang"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "bench/run_live.sh needs python3 for MCP framing" >&2
+  exit 2
 fi
-OUT="bench/results_live.csv"
-echo "task,tier,endpoint,check_clean,repair_success,iters,notes" > "$OUT"
-run_one() { # id tier endpoint broken_file
-  id="$1"; tier="$2"; ep="$3"; f="$4"
-  if "$BIN" check "$f" >/dev/null 2>&1; then clean="true"; else clean="false"; fi
-  rm -f "$f.repaired.klang" "$f.klang-repair-log.json" .klang-repair-log.json "$(dirname "$f")/.klang-repair-log.json" 2>/dev/null
-  if "$BIN" repair "$f" --model "$ep" --max-iters 5 >/dev/null 2>&1; then ok="true"; else ok="false"; fi
-  log=""
-  for cand in "$f.klang-repair-log.json" "$(dirname "$f")/.klang-repair-log.json" .klang-repair-log.json; do
-    [ -f "$cand" ] && log="$cand" && break
-  done
-  iters=""
-  [ -n "$log" ] && iters="$(grep -o '"iter": [0-9]*' "$log" | wc -l | tr -d ' ')"
-  echo "$id,$tier,$ep,$clean,$ok,$iters," >> "$OUT"
-  rm -f "$f.repaired.klang" "$log" 2>/dev/null
-}
 TMP="$(mktemp -d)"
 write_tasks() { # writes the 8 corpus broken sources into $TMP
   cat > "$TMP/S1.klang" <<'EOF'
@@ -124,16 +121,67 @@ fn main() -> i32 {
 EOF
 }
 write_tasks
-for ep in "$EPA" "$EPB"; do
-  run_one S1-arity simple "$ep" "$TMP/S1.klang"
-  run_one S2-undefined simple "$ep" "$TMP/S2.klang"
-  run_one S3-type simple "$ep" "$TMP/S3.klang"
-  run_one M1-exhaustive moderate "$ep" "$TMP/M1.klang"
-  run_one M2-generic moderate "$ep" "$TMP/M2.klang"
-  run_one M3-effect moderate "$ep" "$TMP/M3.klang"
-  run_one C1-full-stack complex "$ep" "$TMP/C1.klang"
-  run_one C2-multi-target complex "$ep" "$TMP/C2.klang"
-done
+OUT="bench/results_live.csv"
+KLANG_BIN_PATH="$BIN" TASK_DIR="$TMP" OUT_PATH="$OUT" python3 - <<'PYEOF'
+import json, os, subprocess
+
+binary = os.environ["KLANG_BIN_PATH"]
+task_dir = os.environ["TASK_DIR"]
+tasks = [
+    ("S1-arity", "simple", "S1.klang"),
+    ("S2-undefined", "simple", "S2.klang"),
+    ("S3-type", "simple", "S3.klang"),
+    ("M1-exhaustive", "moderate", "M1.klang"),
+    ("M2-generic", "moderate", "M2.klang"),
+    ("M3-effect", "moderate", "M3.klang"),
+    ("C1-full-stack", "complex", "C1.klang"),
+    ("C2-multi-target", "complex", "C2.klang"),
+]
+
+proc = subprocess.Popen(
+    [binary, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
+)
+
+def rpc(method, params, rid):
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\n")
+    proc.stdin.flush()
+    return json.loads(proc.stdout.readline())
+
+rid = 1
+rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "bench", "version": "0"}}, rid)
+rid += 1
+rows = []
+for tid, tier, fname in tasks:
+    with open(os.path.join(task_dir, fname)) as f:
+        src = f.read()
+    check = rpc("tools/call", {"name": "klang_check", "arguments": {"source": src}}, rid)
+    rid += 1
+    diags = json.loads(check["result"]["content"][0]["text"])["diagnostics"]
+    if not diags:
+        rows.append((tid, tier, "true", "", ""))
+        continue
+    code = diags[0]["code"]
+    scope = rpc(
+        "tools/call",
+        {"name": "klang_scope_plan", "arguments": {"source": src, "diagnostics": diags}},
+        rid,
+    )
+    rid += 1
+    plan = json.loads(scope["result"]["content"][0]["text"])
+    if plan.get("scope") == "function":
+        scope_txt = "function:" + ",".join(plan.get("functions", []))
+    else:
+        scope_txt = "file"
+    rows.append((tid, tier, "false", code, scope_txt))
+
+proc.stdin.close()
+proc.wait(timeout=60)
+
+with open(os.environ["OUT_PATH"], "w") as f:
+    f.write("task,tier,check_clean,diag_code,scope\n")
+    for r in rows:
+        f.write(",".join(r) + "\n")
+PYEOF
 rm -rf "$TMP"
 echo "wrote $OUT"
 cat "$OUT"

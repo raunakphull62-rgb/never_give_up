@@ -126,3 +126,60 @@ fn malformed_input_is_a_diagnostic_never_a_panic() {
     // The two unambiguously broken-but-parseable shapes must be diagnosed.
     assert!(results[5].starts_with("E:"), "garbage bytes: {}", results[5]);
 }
+
+#[test]
+fn call_depth_limit_is_loud_never_a_crash() {
+    // F20: the interpreter caps call depth at 64 frames. Depth 63 runs;
+    // deeper recursion fails with E-RUNTIME "call depth exceeded", never
+    // a native stack overflow. Pinned because the limit is low enough to
+    // matter for realistic recursion and must stay loud, not silent.
+    let ok_src = "fn countdown(n: i32) -> i32 { if n <= 0 { return 0 } return countdown(n - 1) + 1 } fn main() -> i32 { return countdown(63) }";
+    let mut p = Parser::new(ok_src);
+    let prog = p.parse_program().expect("parses");
+    assert!(klang::hir::TypedHIR::check(prog.clone()).is_ok());
+    let mir = klang::mir::lower(&prog);
+    // Deep-stack worker: the interpreter recurses natively per call, so
+    // even the allowed 63 frames need headroom on a default test thread.
+    let (v, _) = klang::with_deep_stack(move || {
+        klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new()).expect("depth 63 runs")
+    });
+    assert_eq!(v, 63);
+    let deep_src = "fn countdown(n: i32) -> i32 { if n <= 0 { return 0 } return countdown(n - 1) + 1 } fn main() -> i32 { return countdown(600) }";
+    let mut q = Parser::new(deep_src);
+    let prog2 = q.parse_program().expect("parses");
+    assert!(klang::hir::TypedHIR::check(prog2.clone()).is_ok());
+    let mir2 = klang::mir::lower(&prog2);
+    let err = klang::with_deep_stack(move || {
+        klang::runtime::run_with_output(&mir2, "main", &[], &HashMap::new()).expect_err("depth 600 must fail loudly")
+    });
+    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+    println!("depth-limit OK: {}", err.message);
+}
+
+#[test]
+fn call_depth_exceeded_cause_is_not_concurrency() {
+    // F14 (live heavy-testing): plain single-threaded unbounded recursion
+    // reported cause "runtime failure during concurrent execution" — wrong,
+    // no concurrency is involved. The depth guard gets its own accurate
+    // cause; the concurrency string stays reserved for real task failures.
+    let deep_src = "fn countdown(n: i32) -> i32 { if n <= 0 { return 0 } return countdown(n - 1) + 1 } fn main() -> i32 { return countdown(600) }";
+    let mut q = Parser::new(deep_src);
+    let prog2 = q.parse_program().expect("parses");
+    assert!(klang::hir::TypedHIR::check(prog2.clone()).is_ok());
+    let mir2 = klang::mir::lower(&prog2);
+    let err = klang::with_deep_stack(move || {
+        klang::runtime::run_with_output(&mir2, "main", &[], &HashMap::new()).expect_err("depth 600 must fail loudly")
+    });
+    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+    assert!(
+        !err.cause.to_lowercase().contains("concurrent")
+            && !err.cause.to_lowercase().contains("concurrency"),
+        "depth-exceeded cause must not mention concurrency, got: {}",
+        err.cause
+    );
+    assert!(
+        err.cause.contains("depth") || err.cause.contains("stack"),
+        "depth-exceeded cause should name the depth limit, got: {}",
+        err.cause
+    );
+}

@@ -171,3 +171,38 @@ fn type_int_literals_checked_against_i32() {
     check_clean("fn main() -> i32 { let x = 5 return -x }");
     println!("int-range OK");
 }
+
+#[test]
+fn semantic_diagnostic_carries_real_file_path() {
+    // F12: checker-stage diagnostics must report the real input path, not
+    // the "input.warden" placeholder. Parser E-PARSE already did; every
+    // semantic code must too. The path below is deliberately not the
+    // placeholder so the test cannot pass by accident.
+    let path = "/tmp/f12_semantic_file_path.klang";
+    let src = "fn add(a: i32, b: i32) -> i32 { return a + b } fn main() -> i32 { return add(\"hi\", 1) }";
+    let mut p = Parser::new_with_file(src, path);
+    let prog = p.parse_program().expect("parses");
+    let err = klang::hir::TypedHIR::check_with_file(prog, path).expect_err("must fail");
+    assert!(
+        err.iter().any(|d| d.code == "E-TYPE"),
+        "want E-TYPE, got {:?}",
+        err.iter().map(|d| &d.code).collect::<Vec<_>>()
+    );
+    for d in &err {
+        assert_eq!(
+            d.primary_span.file, path,
+            "diagnostic file must be the real path, got {} ({})",
+            d.primary_span.file, d.to_json()
+        );
+        assert_ne!(d.primary_span.file, "input.warden");
+    }
+    // Same for E-ARITY.
+    let asrc = "fn add(a: i32, b: i32) -> i32 { return a + b } fn main() -> i32 { return add(1) }";
+    let mut q = Parser::new_with_file(asrc, path);
+    let prog2 = q.parse_program().expect("parses");
+    let err2 = klang::hir::TypedHIR::check_with_file(prog2, path).expect_err("must fail");
+    assert!(err2.iter().any(|d| d.code == "E-ARITY"));
+    for d in &err2 {
+        assert_eq!(d.primary_span.file, path, "{}", d.to_json());
+    }
+}

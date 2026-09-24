@@ -1,6 +1,8 @@
 //! Scope planner: smallest enclosing function(s) per diagnostic (PRD 5.2.b-d).
 //!
-//! v1 reality: most HIR diagnostics carry `input.warden,0,0` spans today,
+//! v1 reality: most HIR diagnostics carry `0,0` spans today (F12 second
+//! series threaded the real `file` into every checker diagnostic, so the
+//! file field is accurate; byte offsets remain unthreaded),
 //! so byte-offset mapping alone cannot locate them. The planner therefore
 //! layers: (1) real-span slice mapping when spans are non-degenerate,
 //! (2) name-based attribution from diagnostic messages (caller/callee in
@@ -83,8 +85,20 @@ pub fn function_spans(src: &str) -> Vec<(String, usize, usize)> {
             let mut opened = false;
             let mut in_str = false;
             let mut in_line_comment = false;
+            let mut in_block_comment = false;
             while k < bytes.len() {
                 let c = bytes[k];
+                if in_block_comment {
+                    // Non-nesting, mirroring the lexer: the first `*/`
+                    // closes. Braces inside never affect depth.
+                    if c == b'*' && k + 1 < bytes.len() && bytes[k + 1] == b'/' {
+                        in_block_comment = false;
+                        k += 2;
+                        continue;
+                    }
+                    k += 1;
+                    continue;
+                }
                 if in_line_comment {
                     if c == b'\n' {
                         in_line_comment = false;
@@ -106,6 +120,10 @@ pub fn function_spans(src: &str) -> Vec<(String, usize, usize)> {
                 match c {
                     b'"' => in_str = true,
                     b'/' if k + 1 < bytes.len() && bytes[k + 1] == b'/' => in_line_comment = true,
+                    b'/' if k + 1 < bytes.len() && bytes[k + 1] == b'*' => {
+                        in_block_comment = true;
+                        k += 1;
+                    }
                     b'{' => {
                         depth += 1;
                         opened = true;

@@ -48,8 +48,9 @@ fn parse_file(db: &dyn KlangDb, file: SourceFile) -> Result<Program, Diagnostic>
 #[salsa::tracked(returns(clone))]
 fn check_file(db: &dyn KlangDb, file: SourceFile) -> Result<(), Vec<Diagnostic>> {
     db.check_count().fetch_add(1, Ordering::SeqCst);
+    let name = file.name(db).clone();
     match parse_file(db, file) {
-        Ok(prog) => match TypedHIR::check(prog) {
+        Ok(prog) => match TypedHIR::check_with_file(prog, &name) {
             Ok(_) => Ok(()),
             Err(diags) => Err(diags),
         },

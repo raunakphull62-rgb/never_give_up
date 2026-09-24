@@ -216,12 +216,10 @@ fn enum_nonexhaustive_repair_end_to_end() {
     let missing = diags.iter().find(|d| d.code == "E-MATCH-EXHAUSTIVE").unwrap();
     assert!(missing.message.contains("Opt::None"), "{}", missing.to_json());
     assert_eq!(plan_scope(&diags, src, false), RepairScope::Functions(vec!["pick".into()]));
-    let cfg = RepairConfig::resolve_with(
-        &RepairCliOverrides { endpoint: Some("http://mock/v1".into()), scope: Some(Scope::Function), max_iters: Some(2), ..Default::default() },
+    let cfg = RepairConfig::resolve(
+        &RepairCliOverrides { scope: Some(Scope::Function), max_iters: Some(2), ..Default::default() },
         &RepairFileConfig::default(),
-        &[],
-    )
-    .expect("cfg");
+    );
     // NOTE: the mock returns the WHOLE FILE (enum decl + fixed fn): the
     // splicer treats a response containing every original function name as
     // whole-file output, but a file whose only `fn` is the target would

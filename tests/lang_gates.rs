@@ -173,3 +173,26 @@ fn lang_node_identity_holds_for_new_nodes() {
     }
     println!("lang identity OK");
 }
+
+#[test]
+fn args_pass_by_value_no_caller_mutation() {
+    // F18: struct/array/map arguments are pass-by-value. Mutating a
+    // parameter inside the callee must not affect the caller's binding.
+    // Pinned because the silent non-persistence is a real footgun.
+    let (v, _) = run_src(
+        "struct Account { owner: str, balance: i32 } fn deposit(a: Account, amount: i32) -> i32 { a.balance = a.balance + amount return a.balance } fn main() -> i32 { let alice = Account { owner: \"alice\", balance: 1000 } print(deposit(alice, 200)) return alice.balance }",
+        "main",
+    );
+    assert_eq!(v, 1000);
+    let (v, _) = run_src(
+        "fn add_one(xs: array) -> i32 { push(xs, 99) return len(xs) } fn main() -> i32 { let a = [1, 2] print(add_one(a)) return len(a) }",
+        "main",
+    );
+    assert_eq!(v, 2);
+    let (v, _) = run_src(
+        "fn set_k(m: map) -> i32 { m[\"k\"] = 1 return len(m) } fn main() -> i32 { let m = {\"a\": 0} print(set_k(m)) return len(m) }",
+        "main",
+    );
+    assert_eq!(v, 1);
+    println!("value-semantics OK");
+}

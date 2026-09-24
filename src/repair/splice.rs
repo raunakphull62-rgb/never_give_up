@@ -21,25 +21,41 @@ pub struct CheckResult {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Single source of truth for "this import path must never be followed":
+/// absolute paths, `..` anywhere, leading `~`, NUL bytes. Used by the
+/// CLI loader and by the model-output screen alike, so the two can never
+/// drift apart again. (The runtime file builtins additionally allow
+/// absolute paths under the temp dir; imports never need that carve-out.)
+pub fn is_unsafe_import_path(imp: &str) -> bool {
+    let p = std::path::Path::new(imp);
+    p.is_absolute() || imp.contains("..") || imp.starts_with('~') || imp.contains('\0')
+}
+
 /// Reject unsafe model-generated imports (same rule as load_with_imports).
 pub fn has_unsafe_import(src: &str) -> Option<String> {
     for line in src.lines() {
         let t = line.trim();
-        if !t.starts_with("import ") {
-            continue;
-        }
+        // Accept every separator the parser accepts between the keyword
+        // and the path: runs of whitespace, tabs, or none at all
+        // (`import"..."` lexes identically). A bare `import` prefix with
+        // any other continuation (`important ...`) is not an import.
+        let rest = match t.strip_prefix("import") {
+            Some(r) if r.starts_with('"') => r,
+            Some(r) if r.starts_with(|c: char| c.is_whitespace()) => r.trim_start(),
+            _ => continue,
+        };
         // import "path"
-        let q1 = match t.find('"') {
+        let q1 = match rest.find('"') {
             Some(i) => i,
             None => return Some(t.to_string()),
         };
-        let rest = &t[q1 + 1..];
-        let q2 = match rest.find('"') {
+        let after = &rest[q1 + 1..];
+        let q2 = match after.find('"') {
             Some(i) => i,
             None => return Some(t.to_string()),
         };
-        let imp = &rest[..q2];
-        if imp.starts_with('/') || imp.contains("..") || imp.starts_with('~') || imp.contains('\0') {
+        let imp = &after[..q2];
+        if is_unsafe_import_path(imp) {
             return Some(imp.to_string());
         }
     }

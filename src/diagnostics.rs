@@ -250,3 +250,24 @@ impl fmt::Display for Diagnostic {
         )
     }
 }
+
+/// Render a user- or file-derived string safe for raw terminal output.
+///
+/// Diagnostic JSON already escapes control characters, but the CLI also
+/// prints some file-derived values (import paths, OS errors) as plain
+/// text. A malicious `.klang` file can smuggle raw ESC bytes into those
+/// paths (`import "<ESC>[2J"`), turning a routine error into terminal
+/// escape injection on the victim's screen. This renders control
+/// characters as visible `\u{...}` escapes while leaving normal text
+/// (including non-ASCII) untouched.
+pub fn sanitize_for_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}

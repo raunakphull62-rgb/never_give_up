@@ -690,8 +690,13 @@ impl Parser {
     }
 
     /// A type annotation: one identifier with optional `::` segments
-    /// (`i32`, `T`, `lexer::Token`). Joined as written; resolution happens
-    /// in HIR/modules.
+    /// (`i32`, `T`, `lexer::Token`) plus optional explicit generic
+    /// arguments (`Opt<i32>`, `m::Box<T>`, nested `Opt<Opt<i32>>`).
+    /// Joined as written (e.g. `"Opt<i32>"`); resolution in HIR/modules
+    /// strips the `<...>` suffix to find the base nominal type. `<` here
+    /// is unambiguous (no comparison operator exists in type position),
+    /// so this parses greedily with no backtracking — unlike call-site
+    /// generics, which need speculative disambiguation.
     fn parse_ty_name(&mut self, what: &str) -> Result<String, Diagnostic> {
         let (mut name, _, _) = self.expect_ident(what)?;
         while self.peek().kind == TokenKind::ColonColon {
@@ -700,7 +705,28 @@ impl Parser {
             name.push_str("::");
             name.push_str(&seg);
         }
-        Ok(name)
+        if self.peek().kind != TokenKind::Lt {
+            return Ok(name);
+        }
+        // Explicit generic arguments: `<` Type (, Type)* `>`, recursive
+        // for nesting. At least one argument is required (`Opt<>` is a
+        // parse error, not an empty instantiation).
+        self.bump();
+        if self.peek().kind == TokenKind::Gt {
+            let p = self.peek().clone();
+            return Err(self.err(p.start, p.end, "expected a type argument"));
+        }
+        let mut args = Vec::new();
+        loop {
+            args.push(self.parse_ty_name("type argument")?);
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TokenKind::Gt, "`>`")?;
+        Ok(format!("{name}<{}>", args.join(", ")))
     }
 
     /// Optional `<T, U, ...>` type-parameter list after a declaration name.
@@ -1118,6 +1144,55 @@ impl Parser {
         self.consume_semi_opt();
         let id = self.next_id();
         Ok(Some(AssignStmt { id, target, value }))
+    }
+
+    /// Speculative explicit-generic call parse (`<T, ...> (` after a bare
+    /// function name). Returns `Ok(Some(args))` with the `<...>` consumed
+    /// and `(` still pending when the full generic shape is present;
+    /// `Ok(None)` (position restored) otherwise, letting the caller fall
+    /// back to a plain variable so `<` parses as comparison. Type-argument
+    /// failures inside the brackets also fall back rather than erroring,
+    /// matching the Rust/C++ backtracking discipline: only a complete
+    /// `< Type (, Type)* > (` commits to the generic reading.
+    fn try_parse_generic_call_args(&mut self) -> Result<Option<Vec<String>>, Diagnostic> {
+        let saved = self.pos;
+        let scopes_next: Vec<u32> = self.scopes.iter().map(|s| s.next).collect();
+        let restore = |me: &mut Self| {
+            me.pos = saved;
+            restore_scope_next(&mut me.scopes, &scopes_next);
+        };
+        // Caller checked `peek == Lt`.
+        self.bump();
+        // Empty `<>` is not a generic instantiation.
+        if self.peek().kind == TokenKind::Gt {
+            restore(self);
+            return Ok(None);
+        }
+        let mut args = Vec::new();
+        loop {
+            match self.parse_ty_name("type argument") {
+                Ok(t) => args.push(t),
+                Err(_) => {
+                    restore(self);
+                    return Ok(None);
+                }
+            }
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        if self.peek().kind != TokenKind::Gt {
+            restore(self);
+            return Ok(None);
+        }
+        self.bump();
+        if self.peek().kind != TokenKind::LParen {
+            restore(self);
+            return Ok(None);
+        }
+        Ok(Some(args))
     }
 
     fn parse_assign_target(&mut self) -> Result<AssignTarget, Diagnostic> {
@@ -1842,8 +1917,45 @@ impl Parser {
                     Ok(Expr::Call {
                         id,
                         func: name,
+                        type_args: Vec::new(),
                         args,
                     })
+                } else if self.peek().kind == TokenKind::Lt {
+                    // Explicit generic instantiation (`count<T>(...)`,
+                    // `count<i32>(...)`): ambiguous with `<` comparison, so
+                    // speculative with backtracking. Commit only when the
+                    // full `< Type (, Type)* > (` shape is present;
+                    // otherwise fall back to a plain variable and let the
+                    // comparison layer handle `<` (preserving `a < b`).
+                    match self.try_parse_generic_call_args()? {
+                        Some(type_args) => {
+                            self.bump();
+                            let mut args = Vec::new();
+                            if self.peek().kind != TokenKind::RParen {
+                                loop {
+                                    args.push(self.parse_expr()?);
+                                    if self.peek().kind == TokenKind::Comma {
+                                        self.bump();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                            self.expect(&TokenKind::RParen, "`)`")?;
+                            let id = self.next_id();
+                            let _ = (s, e);
+                            Ok(Expr::Call {
+                                id,
+                                func: name,
+                                type_args,
+                                args,
+                            })
+                        }
+                        None => {
+                            let id = self.next_id();
+                            Ok(Expr::Var { id, name })
+                        }
+                    }
                 } else if self.peek().kind == TokenKind::LBrace
                     && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                 {

@@ -146,7 +146,37 @@ fn runtime_err(msg: &str) -> Diagnostic {
         "runtime",
         0,
         0,
+        "runtime execution failed",
+        &[],
+        "runtime/execution",
+    )
+}
+
+/// Concurrency-specific runtime failure (task panics, task limits): the
+/// only path that keeps the historical concurrent-execution cause.
+fn concurrent_err(msg: &str) -> Diagnostic {
+    Diagnostic::error(
+        "E-RUNTIME",
+        msg,
+        "runtime",
+        0,
+        0,
         "runtime failure during concurrent execution",
+        &[],
+        "runtime/execution",
+    )
+}
+
+/// Call-depth guard: single-threaded recursion exceeding the frame limit,
+/// unrelated to concurrency.
+fn depth_limit_err() -> Diagnostic {
+    Diagnostic::error(
+        "E-RUNTIME",
+        "call depth exceeded (possible recursion)",
+        "runtime",
+        0,
+        0,
+        "call stack depth limit reached",
         &[],
         "runtime/execution",
     )
@@ -265,7 +295,7 @@ fn fail_group(
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) if e.is_cancelled() => {}
                 Ok(Err(e)) => failures.push(e),
-                Err(_) => failures.push(runtime_err("task panicked")),
+                Err(_) => failures.push(concurrent_err("task panicked")),
             }
         }
     }
@@ -285,7 +315,7 @@ fn exec_function(
     parent: &CancelToken,
 ) -> Result<Value, Diagnostic> {
     if depth > 64 {
-        return Err(runtime_err("call depth exceeded (possible recursion)"));
+        return Err(depth_limit_err());
     }
     // No task-entry checkpoint on purpose: a spawned-but-unscheduled task
     // still runs its body once scheduled, so multi-failure groups are
@@ -372,7 +402,7 @@ fn exec_function(
                     return Err(Diagnostic::spawn_outside_group("runtime", 0, 0));
                 }
                 if pending.len() >= MAX_CONCURRENT_TASKS {
-                    return Err(runtime_err("too many concurrent tasks (limit 256)"));
+                    return Err(concurrent_err("too many concurrent tasks (limit 256)"));
                 }
                 // Re-binding a live handle (`for i in 0..3 { let a = spawn
                 // f() }`) would previously overwrite the JoinHandle and
@@ -388,7 +418,7 @@ fn exec_function(
                             return fail_group(
                                 &current(&groups, parent),
                                 &mut pending,
-                                runtime_err("task panicked"),
+                                concurrent_err("task panicked"),
                             );
                         }
                     }
@@ -424,7 +454,7 @@ fn exec_function(
                             return fail_group(
                                 &current(&groups, parent),
                                 &mut pending,
-                                runtime_err("task panicked"),
+                                concurrent_err("task panicked"),
                             );
                         }
                     }

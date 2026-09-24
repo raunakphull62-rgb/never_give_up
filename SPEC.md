@@ -24,6 +24,9 @@ fn main() -> i32 {
 - `fn name(params) -> type [effects] { ... }`. Effects: `throws`,
   `async`, `cancel`. Calling a `throws` function requires `throws`
   on the caller (`E-EFFECT-MISMATCH`).
+- Arguments are pass-by-value: mutating a struct, array, or map
+  parameter inside the callee never affects the caller's binding.
+  Return the updated value (or a status code) instead.
 
 ## 2b. Enums + match (checked)
 
@@ -41,8 +44,10 @@ fn area(s: Shape) -> i32 {
   Construction: `Shape::Circle(10)` (bare variants still take `()`
   at construction: `Shape::Point()`).
 - `match scrutinee { Enum::Variant(bindings...) => expr, ... }`,
-  arms comma-separated, `_ => ...` wildcard. Bodies are comma
-  expressions; use a block `{ ... }` for multi-statement arms.
+  arms comma-separated, `_ => ...` wildcard. Arm bodies are single
+  expressions — a `{ ... }` block after `=>` parses as a map literal
+  and fails with `E-PARSE`, so multi-statement arm logic goes in a
+  helper function called from the arm.
 - Exhaustiveness is a compile error: missing variants without a
   wildcard is `E-MATCH-EXHAUSTIVE`, naming every missing variant
   (`non-exhaustive match on \`Opt\`: missing Opt::None`) with fixes
@@ -144,27 +149,30 @@ cargo run -- check <file>        # parse + type-check (JSON diagnostics)
 cargo run -- fmt <file> [--write]# canonical format (idempotent)
 cargo run -- run <file> [entry]  # parse + check + run (entry default main)
 cargo run -- build <file>        # parse + check + MIR listing
-cargo run -- repair <file> [entry] [--max-iters N] [--model URL] [--scope function|file] [--dry-run] [--write] [--verbose]
-                                 # bounded LLM repair guided by diagnostics (see below)
+cargo run -- repair <file> [--max-iters N] [--scope function|file] [--dry-run]
+                                 # repair-prompt inspector (see below)
+cargo run -- mcp                 # MCP server on stdio: klang_check,
+                                 # klang_run, klang_fmt, klang_scope_plan
 ```
 
 `fmt` rules: 4-space indent, one statement per line, binary ops fully
 parenthesized. `fmt(fmt(x)) == fmt(x)`; formatted code re-parses and
 runs identically (tested in `tests/toolchain_gates.rs`).
 
-`repair` loop: parse + `TypedHIR::check` the target file; on failure send
-the failing scope's source plus `Diagnostic::to_json()` output to an
-OpenAI-compatible `/v1/chat/completions` endpoint (`--model`,
-`klang.toml [repair] endpoint`, or `$KLANG_MODEL_ENDPOINT`; no network
-without explicit config), splice the returned `fn` block(s) back,
-re-check the full program, repeat up to `--max-iters` (default 5, hard
-max 10) via `contracts::repair_loop`. Default scope is `function`
-(falls back to whole-file when diagnostics span >2 functions);
-default output is `<file>.repaired.klang`, `--write` edits in place,
-`--dry-run` prints the planned prompt with zero model calls, `--verbose`
-prints every attempt and writes `.klang-repair-log.json` next to the
-target (failures always log). Tested in `tests/repair_gates.rs` (mock
-backend, no network).
+`repair` mechanism (Phase 4: Klang no longer calls a model — the
+harness owns the model connection and drives the loop via `klang mcp`):
+parse + `TypedHIR::check` the target file; the failing scope's source
+plus `Diagnostic::to_json()` output is exactly what `--dry-run` prints
+and what `klang_scope_plan` returns, for the harness to send to its own
+model. A harness-side response is spliced back as `fn` block(s) and the
+full program is re-checked, repeating up to `--max-iters` (default 5,
+hard max 10) via `contracts::repair_loop`. Default scope is `function`
+(falls back to whole-file when diagnostics span >2 functions).
+`--dry-run` prints the planned prompt with zero model calls. Tested in
+`tests/repair_gates.rs` (mock backend: the mock stands in for the
+harness-owned model) and end-to-end through the MCP surface in
+`tests/mcp_gates.rs` (scripted fake harness: check -> scope -> fix ->
+check clean).
 
 `repair` scope boundaries (Phase 1 decision, pinned by tests):
 - `--scope function` never claims declaration-level diagnostics: rules
@@ -193,12 +201,9 @@ entry = "main"
 [dependencies]
 mylib = "./mylib.klang"
 [repair]
-endpoint = "http://127.0.0.1:8000"  # base URL or full .../v1/chat/completions
-model = "deepseek-chat"
-# api_key = "..."  # or $KLANG_MODEL_KEY; omit for local no-auth endpoints
 # max_iters = 5
 # scope = "function"  # or "file"
-# timeout = 60
+# (retired keys endpoint/model/api_key/timeout are ignored)
 ```
 
 Lockfile: `write_lock` / `parse_lock` one `"<file> <hex>"` line per
@@ -216,11 +221,19 @@ missing files. Tested in `tests/package_gates.rs`.
   visibility (`E-PRIVATE`), qualified `m::item` paths, plus cross-file
   `import` merging (`tests/module_gates.rs`).
 - `examples/full.klang` and `examples/simple.klang` still run; the whole
-  suite is 177 tests (`cargo test`), including the Phase 3 offline
+  suite is 218 tests (`cargo test`), including the Phase 4 MCP gates
+  (`tests/mcp_gates.rs`: scripted fake harness proving identical
+  diagnostics and scope verdicts through the MCP surface), the Phase 2 adversarial
+  gates (`tests/type_adversarial_gates.rs`: missing struct fields,
+  nominal struct signatures) and the multi-feature dogfood
+  (`examples/eval.klang`: lexer/parser/eval modules over a generic
+  `Res<T>` + `Expr` enum with `throws` propagated to `main`, pinned by
+  `tests/eval_gates.rs`), plus the Phase 3 offline
   benchmark baseline (`tests/benchmark_gates.rs`: 8-task corpus across
   simple/moderate/complex tiers, 100% oracle-repair convergence in 1
-  median iter; live two-model rates still require real endpoints via
-  `bench/run_live.sh` and are NOT claimed here).
+  median iter; live-model convergence is measured inside harnesses via
+  `klang mcp`, and `bench/run_live.sh` now checks the harness signal —
+  diagnostic family + planned scope per task — with zero model calls).
 
 ## 7b. Robustness (Phase 2 hardening)
 
@@ -234,6 +247,14 @@ tens of thousands of operands) now always produces either `check: OK` or a
 structured diagnostic — never a crash. Pinned by
 `tests/robustness_gates.rs`.
 
+Call depth is capped separately at the interpreter level: nested
+calls deeper than 64 frames fail at run time with `E-RUNTIME` ("call
+depth exceeded"), never a native stack overflow. Depth 63 and below
+runs normally. The cap is deliberately conservative (it guards the
+interpreter's own native recursion); realistic deep recursion past it
+is a known constraint, not a crash bug. Pinned by
+`call_depth_limit_is_loud_never_a_crash`.
+
 ## 8. What is still NOT here (honest list)
 
 No full-value machine-code backend (int-only Cranelift JIT behind
@@ -241,5 +262,6 @@ No full-value machine-code backend (int-only Cranelift JIT behind
 checker (Managed mode only), no async I/O runtime, no registry/network
 packages, no LSP server (only a JSON renderer), no debugger/profiler, no
 recursive/nested enum payloads needing indirection, no match guards, no
-tuple-variant syntax or partial destructuring. See `roadmap.md` for
+multi-statement match arms (single-expression bodies; use helper
+functions), no tuple-variant syntax or partial destructuring. See `roadmap.md` for
 sequencing and `AUDIT.md` for the Phase 0 evidence table.

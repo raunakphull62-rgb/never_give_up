@@ -1,8 +1,9 @@
 //! `klang repair` gates: bounded diagnostic-guided regeneration (PRD v1).
 //!
-//! All tests use `MockBackend` (no network). Live-endpoint validation is
-//! manual (Phase 1): point `KLANG_MODEL_ENDPOINT` at the Kaggle/ngrok URL
-//! and run the binary.
+//! All tests use `MockBackend` (no network): the mock stands in for the
+//! harness-owned model, so every test below exercises the mechanism
+//! (scope -> prompt -> splice -> re-check), never a connector. Live-model
+//! validation happens in the harness, against `klang mcp` tools.
 
 use klang::repair::{
     MockBackend, ModelBackend, RepairCliOverrides, RepairConfig, RepairFileConfig, Scope,
@@ -11,17 +12,14 @@ use klang::repair::{
 use klang::repair::scope::RepairScope;
 
 fn cfg_with(scope: Scope, iters: u32) -> RepairConfig {
-    RepairConfig::resolve_with(
+    RepairConfig::resolve(
         &RepairCliOverrides {
-            endpoint: Some("http://mock/v1".into()),
             scope: Some(scope),
             max_iters: Some(iters),
             ..Default::default()
         },
         &RepairFileConfig::default(),
-        &[],
     )
-    .expect("cfg")
 }
 
 #[test]

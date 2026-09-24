@@ -246,7 +246,7 @@ fn initial_check(src: &str, file_label: &str) -> Vec<Diagnostic> {
         Ok(prog) => prog,
         Err(d) => return vec![d],
     };
-    match TypedHIR::check(prog) {
+    match TypedHIR::check_with_file(prog, file_label) {
         Ok(_) => vec![],
         Err(ds) => ds,
     }
@@ -258,12 +258,10 @@ mod tests {
     use crate::repair::{MockBackend, RepairCliOverrides, RepairFileConfig};
 
     fn cfg(scope: &str) -> RepairConfig {
-        RepairConfig::resolve_with(
-            &RepairCliOverrides { endpoint: Some("http://x/v1".into()), scope: super::super::config::Scope::parse(scope), ..Default::default() },
+        RepairConfig::resolve(
+            &RepairCliOverrides { scope: super::super::config::Scope::parse(scope), ..Default::default() },
             &RepairFileConfig::default(),
-            &[],
         )
-        .expect("cfg")
     }
 
     #[test]
@@ -307,9 +305,9 @@ mod tests {
     #[test]
     fn exhaustion_returns_final_diags() {
         let b = MockBackend::new(vec!["fn main() -> i32 { return x }\n".into()]);
-        let mut flags = RepairCliOverrides { endpoint: Some("http://x/v1".into()), max_iters: Some(2), ..Default::default() };
+        let mut flags = RepairCliOverrides { max_iters: Some(2), ..Default::default() };
         flags.scope = super::super::config::Scope::parse("file");
-        let c = RepairConfig::resolve_with(&flags, &RepairFileConfig::default(), &[]).expect("cfg");
+        let c = RepairConfig::resolve(&flags, &RepairFileConfig::default());
         let o = run_repair("fn main() -> i32 { return x }\n", "t.klang", &c, &b, false);
         assert!(!o.success);
         assert_eq!(o.iters_used, 2);
