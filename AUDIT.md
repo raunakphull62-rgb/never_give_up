@@ -1283,3 +1283,638 @@ v1/infra = 232. Prior round reported 291 because the 2
 
 V1 regression spot check (`/tmp/v1_test.klang`, `add(20,22)`):
 `print: 42`, `run main() = 42` — same behavior/output/exit as before.
+
+---
+
+# STDLIB-OSIO-1 — Phase 1: File I/O (code-verified)
+
+PRD: KLANG STDLIB PRD — OS Interop, Phase 1 (`file::read/write/append/exists`).
+
+## Pre-work reads (per ground rule 6)
+
+Read in full before writing code: `src/stdlib/mod.rs` (17 lines:
+`verify` + `net` only — no file/process/regex surface existed),
+`src/stdlib/net.rs` (`MockTransport`/`when()`/`when_fail()` wired into
+the echo system via `PendingEcho::fulfill`), `src/stdlib/verify.rs`
+(`tune`/`verify` minting Harmonic proofs). Registration pattern
+followed: new surface is `pub mod file;` in `src/stdlib/mod.rs`,
+no parallel scheme invented.
+
+## Naming decision (PRD allows implementer choice)
+
+PRD sketches `file::read(...)` etc. Klang's `::` call syntax only
+resolves through declared `mod` blocks: `file::read("x")` parses as an
+`EnumCtor` (`src/parser/mod.rs:1869-1910`) and `modules::rewrite_ctor`
+converts `m::f(args)` into a `Call` only when `m` is a program module
+(`src/modules.rs:605-623`). A builtin `file::read` with no `mod file`
+in the program would therefore fail type checking. Existing
+convention is flat builtins (`read_file`, `write_file`, `exists`,
+`env` — `src/hir.rs:is_builtin`, `src/runtime/mod.rs:exec_builtin`).
+Phase 1 keeps flat names and adds the missing one: `append_file`.
+MIR passes `Call.func` through generically (`src/mir/mod.rs:580-596`)
+so no lowering change was needed; JIT rejects all builtins as
+int-only-unsupported (`src/jit.rs:469`), unchanged.
+
+## Error-code decision
+
+Previously every file failure was generic `E-RUNTIME`
+(`runtime_err("read_file({path}) failed: {e}")`). Phase 1 maps
+`std::io::ErrorKind` in `stdlib::file::map_io_error`: `NotFound` →
+`E-IO-NOT-FOUND`, `PermissionDenied` → `E-IO-PERMISSION`, anything else
+→ `E-IO-FAILED` carrying the real OS string as both message fragment
+and cause (never a shared generic string — cf. F14). Each constructor
+has its own cause/fix/rule (`io/not-found`, `io/permission`,
+`io/failure`). Non-zero process exits are NOT errors (decided in the
+PRD for Phase 2, not this phase). The pre-existing capability guard
+`reject_unsafe_path` (absolute paths outside temp dir, `..` escapes)
+stays `E-RUNTIME` deliberately: it is a policy rejection, not an OS
+I/O failure, and narrowing it to `E-IO-*` would blur the audit trail
+(F14 residual documents the same guard). Paths are taken literally —
+no globbing, no `~`/env expansion (PRD security section).
+
+## Files created/changed
+
+- CREATED `src/stdlib/file.rs` — `read`/`write`/`append`/`exists` +
+  `map_io_error` + three `E-IO-*` constructors.
+- MODIFIED `src/stdlib/mod.rs` — added `pub mod file;`.
+- MODIFIED `src/runtime/mod.rs` — `read_file`/`write_file` delegate to
+  `stdlib::file`; new `append_file` builtin (create-when-absent,
+  returns bytes appended); `is_builtin` extended.
+- MODIFIED `src/hir.rs` — `append_file` arity 2 + per-arg `str`
+  checking in `check_builtin_call`; `is_builtin` extended.
+- CREATED `tests/osio_file_gates.rs` — 9 tests (see below).
+- MODIFIED `tests/stdlib_gates.rs` — `stdlib_missing_file_is_runtime_error`
+  now uses a temp-dir missing path and asserts `E-IO-NOT-FOUND`. Rationale:
+  the old `/no/such/...` absolute path never reached the filesystem —
+  it hit the unsafe-path guard (`E-RUNTIME`) — so the test passed for
+  the wrong reason. Guard behavior is now pinned explicitly by
+  `osio_file_unsafe_absolute_path_stays_runtime_error`.
+- MODIFIED `docs/reference.md` + `SPEC.md` §4 — one stale cell each
+  (`E-RUNTIME if missing` → `E-IO-NOT-FOUND`; added `append_file` row).
+  Full OS-interop docs with examples remain Phase 5; these two cells
+  were fixed now to avoid F4/F19-class doc drift.
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+Baseline before work: `SUM passed=297 failed=0`, `GREP sum=297`
+(agrees with the F-V2-1 follow-up count).
+
+Targeted (after work):
+
+```
+Running tests/osio_file_gates.rs (.../osio_file_gates-a550b31d1db36da5)
+running 9 tests
+test osio_file_append_arg_types_checked ... ok
+test osio_file_append_creates_when_absent ... ok
+test osio_file_error_codes_are_specific ... ok
+test osio_file_append_twice_both_land ... ok
+test osio_file_exists_true_and_false ... ok
+test osio_file_read_missing_is_not_found ... ok
+test osio_file_unsafe_absolute_path_stays_runtime_error ... ok
+test osio_file_read_present ... ok
+test osio_file_write_then_read_roundtrip ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+Running tests/stdlib_gates.rs (.../stdlib_gates-895798afa115c6dc)
+running 4 tests
+test stdlib_arg_types_checked ... ok
+test stdlib_env_reads_process_env ... ok
+test stdlib_file_roundtrip ... ok
+test stdlib_missing_file_is_runtime_error ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Full regression (after work): `SUM passed=306 failed=0`
+(297 baseline + 9 new), `GREP sum=306` — both numbers from the same
+session, matching. `scripts/verify_docs.py`: `verified 38 samples`,
+`all docs samples verified, 0 UNVERIFIED markers`.
+
+Live program probes (`/tmp/klang-target/debug/klang`, excerpt — real
+`klang run` also prints `file:`/`parse:`/MIR lines; only the
+`check:`/`print:`/`run main()`/diagnostic lines are shown here):
+
+```
+=== klang run /tmp/klang_osio_p1.klang main ===
+check: OK (0 diagnostics)
+print: hello world!
+run main() = 42
+(EXIT=0)
+```
+
+(write "hello" + append " world" + append "!" then read back —
+a placeholder could not produce `hello world!`.)
+
+```
+=== klang run /tmp/klang_osio_p1_missing.klang main ===
+run: FAIL
+{
+  "code": "E-IO-NOT-FOUND",
+  "message": "read_file(/tmp/klang_osio_p1_missing_xyz.txt) failed: file does not exist",
+  "cause": "No such file or directory (os error 2)",
+  "rule": "io/not-found",
+  ...
+}
+(EXIT=1)
+```
+
+## Phase 1 acceptance (against PRD §8)
+
+- AC1: met — read-present, read-missing (`E-IO-NOT-FOUND`),
+  write-then-read roundtrip (byte count 7 for `"abc 123"`), double
+  append (`"a"+"b"+"c" == "abc"`), `exists` true/false; all live-run.
+- AC5 (file slice): met — `NotFound`/`PermissionDenied`/`StorageFull`
+  mapped to three distinct codes with real cause strings asserted in
+  `osio_file_error_codes_are_specific` (cause text `denied xyz` /
+  `no space abc123` visible in JSON, not generic).
+- AC7 (regression): met — 306 ≥ 297, sums match, docs 38/38.
+- AC8: this entry.
+- AC2/AC3/AC4/AC6: not this phase — no process/regex/env code was
+  added or claimed here. `process::run_shell`-style APIs do not exist
+  anywhere in the tree (only `std::process` use is none; verified by
+  inspection, no shell-out path added by this phase).
+
+## Re-verification (2026-09-25, independent session)
+
+Environment had no `cargo` on PATH, so `rustup` minimal/stable was
+installed fresh (`cargo 1.98.1`, `rustc 1.98.1` — same as the prior
+toolchain). Baseline was re-measured by stashing Phase 1 tracked
+changes and moving the two untracked files aside, then running the
+full suite at HEAD: `SUM passed=297 failed=0`, `GREP sum=297`
+(44 `test result:` lines). After restoring the stash + untracked
+files: `SUM passed=306 failed=0`, `GREP sum=306` (45 `test result:`
+lines; `tests/osio_file_gates.rs:9` is the only delta).
+`CARGO_TARGET_DIR=/tmp/klang-target cargo test --test osio_file_gates
+--test stdlib_gates` → 9 + 4 pass (test order varies run to run
+under parallelism; same 13 names as above).
+`scripts/verify_docs.py` → `verified 38 samples`,
+`all docs samples verified, 0 UNVERIFIED markers`.
+Live re-probes via `/tmp/klang-target/debug/klang run` on temp-dir
+programs (write `"hello"` + append `" world"` + append `"!"` then
+read back) → `print: hello world!`, `run main() = 42`, `EXIT=0`;
+missing-file probe → `E-IO-NOT-FOUND` with
+`cause: No such file or directory (os error 2)` and
+`rule: io/not-found`, `EXIT=1`. `grep -rn "std::process\|run_shell"
+src/stdlib/ src/runtime/mod.rs` → no hits (no shell-out path).
+
+---
+
+# STDLIB-OSIO-2 — Phase 2: Process execution (code-verified)
+
+PRD: KLANG STDLIB PRD — OS Interop, Phase 2 (`process::run`).
+
+## Pre-work reads (per ground rule 6)
+
+Re-read in full before writing code: `src/stdlib/mod.rs`,
+`src/stdlib/net.rs` (`MockTransport`/`when()`/`when_fail()` wired via
+`PendingEcho::fulfill`), `src/stdlib/verify.rs` (`tune`/`verify`
+minting Harmonic proofs), plus the Phase 1 surface
+`src/stdlib/file.rs` as the registration precedent. Registration
+pattern followed: new surface is `pub mod process;` in
+`src/stdlib/mod.rs`, no parallel scheme invented.
+
+## Naming decision (PRD allows implementer choice)
+
+PRD sketches `process::run(cmd, args) -> ProcessResult`. Klang's `::`
+call syntax only resolves through declared `mod` blocks
+(`modules::rewrite_ctor` converts `m::f(args)` into a `Call` only when
+`m` is a program module), so a namespaced `process::run(...)` spelling
+would parse as an enum constructor and fail type checking — same reason
+Phase 1 kept flat file-builtin names. Existing convention is flat
+builtins (`read_file`, `write_file`, `append_file`, `exists`, `env` —
+`src/hir.rs:is_builtin`, `src/runtime/mod.rs:exec_builtin`). Phase 2
+keeps the flat name `run_process(cmd, args)`, returning a map with
+`stdout: str`, `stderr: str`, `exit_code: i32` (map indexing `r["stdout"]`
+is already idiomatic: `Ty::Map` → `Unknown` element, equality with
+`Unknown` allowed — `tests/type_gates.rs:80`, `tests/lang3_gates.rs:81`).
+MIR passes `Call.func` through generically so no lowering change was
+needed; JIT rejects all builtins as int-only-unsupported
+(`src/jit.rs:469` keys on `hir::is_builtin`), unchanged.
+
+## Error-code / exit-code decision (stated explicitly per PRD §4)
+
+A non-zero exit is a NORMAL, catchable result: it populates
+`exit_code` in the returned map and does NOT raise. Only a failure to
+spawn at all is a diagnostic, mapped in
+`stdlib::process::map_spawn_error`: `NotFound`/`PermissionDenied`
+(missing binary / not executable) → `E-PROCESS-NOT-FOUND`;
+any other spawn `io::Error` → `E-PROCESS-FAILED` carrying the real OS
+string as both message fragment and cause (never a shared generic
+string — cf. F14). Each constructor has its own cause/fix/rule
+(`process/not-found`, `process/spawn`). There is deliberately no
+`run_shell`-style API anywhere in the tree: the unsafe thing is not
+the easy/default thing (PRD security section). Execution is
+`std::process::Command` with `.args(argv)` — never a shell string.
+
+## Files created/changed
+
+- CREATED `src/stdlib/process.rs` — `ProcessOutput`
+  (`stdout`/`stderr`/`exit_code`) + `run(cmd, args)` via
+  `Command::new(cmd).args(args).output()` + two `E-PROCESS-*`
+  constructors + `map_spawn_error`.
+- MODIFIED `src/stdlib/mod.rs` — added `pub mod process;`.
+- MODIFIED `src/hir.rs` — `run_process` arity 2, `cmd: str` +
+  `args: array` checking in `check_builtin_call` (returns `Ty::Map`);
+  `is_builtin` extended.
+- MODIFIED `src/runtime/mod.rs` — new `run_process` builtin: renders
+  cmd + array items via `Value::render` (no join/shell), delegates to
+  `stdlib::process::run`, returns
+  `Map([stdout, stderr, exit_code])`; `is_builtin` extended.
+- CREATED `tests/osio_process_gates.rs` — 7 tests (see below).
+- MODIFIED `SPEC.md` §4 + `docs/reference.md` — one row each for
+  `run_process` (argv-array, map shape, non-zero-is-result,
+  `E-PROCESS-NOT-FOUND`). Full OS-interop docs with examples remain
+  Phase 5; these rows were added now to avoid F4/F19-class doc drift.
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+Baseline before work (Phase 1 close): `SUM passed=306 failed=0`
+(45 `test result:` lines), `GREP sum=306`.
+
+Targeted (after work):
+
+```
+Running tests/osio_process_gates.rs (.../osio_process_gates-b7cb14aa842af276)
+running 7 tests
+test osio_process_arg_types_checked ... ok
+test osio_process_error_codes_are_specific ... ok
+test osio_process_argv_array_not_shell ... ok
+test osio_process_missing_command_is_not_found ... ok
+test osio_process_run_success_captures_stdout ... ok
+test osio_process_nonzero_exit_is_result_not_error ... ok
+test osio_process_stderr_captured_with_nonzero_exit ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+```
+
+Full regression (after work): `SUM passed=313 failed=0`
+(306 baseline + 7 new, 46 `test result:` lines), `GREP sum=313` —
+both numbers from the same session, matching.
+`scripts/verify_docs.py`: `verified 38 samples`,
+`all docs samples verified, 0 UNVERIFIED markers` (SPEC/docs edits add
+no new `@run` samples, count unchanged).
+
+Live program probes (`/tmp/klang-target/debug/klang`, excerpt — real
+`klang run` also prints `file:`/`parse:`/MIR lines; only the
+`check:`/`print:`/`run main()`/diagnostic lines are shown here):
+
+```
+=== klang run /tmp/klang_osio_p2_success.klang main ===
+check: OK (0 diagnostics)
+print: hello process
+run main() = 0
+(EXIT=0)
+```
+
+(`let r = run_process("echo", ["hello process"])` then print
+`r["stdout"]` — a placeholder could not produce `hello process`.)
+
+```
+=== klang run /tmp/klang_osio_p2_nonzero.klang main ===
+check: OK (0 diagnostics)
+print: 1
+run main() = 1
+(EXIT=0)
+```
+
+(`false` exits 1 yet the call is `Ok` and the CLI exits 0 — proves the
+non-zero-is-result decision is real, not prose.)
+
+```
+=== klang run /tmp/klang_osio_p2_argv.klang main ===
+check: OK (0 diagnostics)
+print: <hello world><a;b|c$d>
+run main() = 0
+(EXIT=0)
+```
+
+(`printf` with `["<%s>", "hello world", "a;b|c$d"]`: the space stays
+inside one argv entry and `;`, `|`, `$` stay literal — a shell
+string-join would have split/expanded them.)
+
+```
+=== klang run /tmp/klang_osio_p2_missing.klang main ===
+run: FAIL
+{
+  "code": "E-PROCESS-NOT-FOUND",
+  "message": "run_process(klang-osio-nonexistent-xyz-12345) failed: command not found or not executable",
+  "cause": "No such file or directory (os error 2)",
+  "rule": "process/not-found",
+  ...
+}
+(EXIT=1)
+```
+
+## Phase 2 acceptance (against PRD §8)
+
+- AC2: met — success stdout asserted (`echo` → `hello\n`, exit 0),
+  non-zero exit asserted as `Ok` value (`false` → 1, CLI still 0),
+  missing command → `E-PROCESS-NOT-FOUND` with real OS cause;
+  argv-array fidelity proven by `printf '<%s>'` with
+  `"hello world"` + `"a;b|c$d"` rendering exactly
+  `<hello world><a;b|c$d>`; all live-run as programs, not just unit
+  tests.
+- AC5 (process slice): met — `NotFound`/`PermissionDenied` →
+  `E-PROCESS-NOT-FOUND`, other spawn errors → `E-PROCESS-FAILED`,
+  each with its real cause string asserted in
+  `osio_process_error_codes_are_specific` (cause text
+  `denied exec abc` / `no space proc987` visible in JSON, not generic;
+  codes and causes pairwise distinct).
+- AC6: met — no shell-string execution path exists anywhere:
+  `grep -rn "run_shell" src/stdlib/ src/runtime/mod.rs src/hir.rs`
+  hits only the doc comment in `src/stdlib/process.rs` that names its
+  deliberate absence; the only spawn call in the tree is
+  `Command::new(cmd).args(args)` in `src/stdlib/process.rs:92`
+  (no `sh -c`, no `/bin/sh`, no string join).
+
+---
+
+# STDLIB-OSIO-3 — Phase 3: Regex (code-verified)
+
+PRD: KLANG STDLIB PRD — OS Interop, Phase 3 (`regex::is_match`/`find`).
+
+## Pre-work reads (per ground rule 6)
+
+Re-read in full before writing code: `src/stdlib/mod.rs`,
+`src/stdlib/net.rs` (`MockTransport`/`when()`/`when_fail()` wired via
+`PendingEcho::fulfill`), `src/stdlib/verify.rs` (`tune`/`verify`
+minting Harmonic proofs), plus the Phase 1–2 surfaces
+`src/stdlib/file.rs` / `src/stdlib/process.rs` as the registration
+precedent. Registration pattern followed: new surface is
+`pub mod regex;` in `src/stdlib/mod.rs`, no parallel scheme invented.
+
+## Naming decision (PRD allows implementer choice)
+
+PRD sketches `regex::is_match(pattern, text)` /
+`regex::find(pattern, text) -> Option<Match>`. Klang's `::` call syntax
+only resolves through declared `mod` blocks, so a namespaced spelling
+would parse as an enum constructor and fail type checking — same reason
+Phases 1–2 kept flat names. Klang also has no `Option` type, so `find`
+returns a map in both cases: `{"matched": 0/1, "match": full-text,
+"groups": [indexed 1..n], "named": {name: captured}}`. Flat names are
+`regex_is_match(pattern, text) -> bool` and
+`regex_find(pattern, text) -> map` (prefix rather than suffix keeps the
+two grouped and avoids a bare `find` colliding with user functions).
+MIR passes `Call.func` through generically so no lowering change was
+needed; JIT rejects all builtins as int-only-unsupported
+(`src/jit.rs:469` keys on `hir::is_builtin`), unchanged.
+
+## Error-code decision (stated explicitly)
+
+A non-match is a NORMAL result (`is_match` → false,
+`find` → `matched == 0` map), NOT an error — parallel to Phase 2's
+non-zero-exit decision. Only a malformed pattern raises
+`E-REGEX-INVALID-PATTERN`, carrying the real `regex`-crate parse error
+verbatim as both message fragment and cause (never a generic message —
+cf. F14). One constructor with its own cause/fix/rule
+(`regex/pattern`).
+
+## Files created/changed
+
+- MODIFIED `Cargo.toml`/`Cargo.lock` — added `regex = "1"` (new
+  dependency; user authorized installs).
+- CREATED `src/stdlib/regex.rs` — `is_match` / `find` (per-call
+  `Regex::new`, no cache) + `FindResult`
+  (`matched`/`text`/`groups`/`named`) + `map_regex_error`.
+- MODIFIED `src/stdlib/mod.rs` — added `pub mod regex;`.
+- MODIFIED `src/hir.rs` — `regex_is_match`/`regex_find` arity 2, both
+  args `str` checking (`Bool` / `Map` returns); `is_builtin` extended.
+- MODIFIED `src/runtime/mod.rs` — `regex_is_match` returns
+  `Int(0/1)`; `regex_find` returns
+  `Map([matched, match, groups: Array, named: Map])`; `is_builtin`
+  extended.
+- CREATED `tests/osio_regex_gates.rs` — 8 tests (see below).
+- MODIFIED `SPEC.md` §4 + `docs/reference.md` — one row each for the
+  two builtins (map shape, no-match-is-result,
+  `E-REGEX-INVALID-PATTERN`). Full OS-interop docs with examples
+  remain Phase 5; these rows were added now to avoid F4/F19-class doc
+  drift.
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+Baseline before work (Phase 2 close): `SUM passed=313 failed=0`
+(46 `test result:` lines), `GREP sum=313`.
+
+Targeted (after work):
+
+```
+Running tests/osio_regex_gates.rs (.../osio_regex_gates-124ff369454329f1)
+running 8 tests
+test osio_regex_arg_types_checked ... ok
+test osio_regex_error_carries_real_cause ... ok
+test osio_regex_find_indexed_groups ... ok
+test osio_regex_invalid_pattern_find_errors ... ok
+test osio_regex_invalid_pattern_is_match_errors ... ok
+test osio_regex_non_match_is_false_not_error ... ok
+test osio_regex_simple_match ... ok
+test osio_regex_find_named_groups ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+```
+
+Full regression (after work): `SUM passed=321 failed=0`
+(313 baseline + 8 new, 47 `test result:` lines), `GREP sum=321` —
+both numbers from the same session, matching.
+`scripts/verify_docs.py`: `verified 38 samples`,
+`all docs samples verified, 0 UNVERIFIED markers` (SPEC/docs edits add
+no new `@run` samples, count unchanged).
+
+Live program probes (`/tmp/klang-target/debug/klang`, excerpt — real
+`klang run` also prints `file:`/`parse:`/MIR lines; only the
+`check:`/`print:`/`run main()`/diagnostic lines are shown here):
+
+```
+=== klang run /tmp/klang_osio_p3_match.klang main ===
+check: OK (0 diagnostics)
+print: user@example
+print: user
+print: example
+print: 1
+run main() = 1
+(EXIT=0)
+```
+
+(`regex_find("(\\w+)@(\\w+)", "user@example")` — full match plus both
+indexed groups asserted as printed substrings, not just match/no-match.)
+
+```
+=== klang run /tmp/klang_osio_p3_named.klang main ===
+check: OK (0 diagnostics)
+print: user
+print: example
+run main() = 1
+(EXIT=0)
+```
+
+(`(?P<user>\\w+)@(?P<host>\\w+)` — named groups via `m["named"]["user"]`.)
+
+```
+=== klang run /tmp/klang_osio_p3_bad.klang main ===
+run: FAIL
+{
+  "code": "E-REGEX-INVALID-PATTERN",
+  "message": "regex_is_match(([) failed: invalid regex pattern: regex parse error:\n    ([\n     ^\nerror: unclosed character class",
+  "cause": "regex parse error:\n    ([\n     ^\nerror: unclosed character class",
+  "rule": "regex/pattern",
+  ...
+}
+(EXIT=1)
+```
+
+## Phase 3 acceptance (against PRD §8)
+
+- AC3: met — simple match (`hello` in `say hello world` → 42),
+  non-match (false / `matched == 0`, still `Ok`), indexed groups
+  (`user`/`example` substrings printed), named groups
+  (`user`/`example` via `named` map); all live-run as programs.
+- AC5 (regex slice): met — `([` and `(?P<bad>` map to
+  `E-REGEX-INVALID-PATTERN` with distinct real causes asserted in
+  `osio_regex_error_carries_real_cause` (underlying
+  `unclosed character class` text visible in JSON, not generic).
+- AC7 (regression): met — 321 ≥ 313, sums match, docs 38/38.
+- AC8: this entry.
+- AC1/AC2/AC4: not this phase — no file/process/env code was added or
+  claimed here.
+
+---
+
+# STDLIB-OSIO-4 — Phase 4: Env vars + integration test (code-verified)
+
+PRD: KLANG STDLIB PRD — OS Interop, Phase 4 (`env::get` + multi-phase
+program via `klang run`).
+
+## Env decision (no new code — stated explicitly)
+
+`env(name)` already existed as a flat builtin before this PRD
+(`src/hir.rs:is_builtin`, `src/runtime/mod.rs:exec_builtin` returning
+`std::env::var(&name).unwrap_or_default()`). It IS the flat spelling
+of PRD `env::get(name)` under the same `::`-vs-flat rationale as
+Phases 1–3 (a namespaced `env::get(...)` would parse as an enum
+constructor). Klang has no `Option` type, so unset is `""`, never an
+error — parallel to Phase 3's no-match decision. No new diagnostic
+codes (the PRD defines none for env). Phase 4 therefore pins the
+behavior with tests rather than new implementation.
+
+## Files created/changed
+
+- CREATED `tests/osio_env_gates.rs` — 3 tests: set var returns value,
+  unset var returns `""` (still `Ok`), arity/type checking
+  (`E-TYPE`/`E-ARITY`).
+- CREATED `examples/osio_integration.klang` — the PRD's
+  multi-capability program: writes `/tmp/klang_osio_integration.txt`,
+  reads it back, echoes the content through `run_process` argv (a
+  dynamic file-content value, not a literal), regex-extracts the
+  contact address with capture groups, returns 42.
+- No `src/` changes (env implementation untouched since before Phase 1;
+  file/process/regex surfaces untouched since STDLIB-OSIO-1/2/3).
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+Baseline before work (Phase 3 close): `SUM passed=321 failed=0`
+(47 `test result:` lines), `GREP sum=321`.
+
+Targeted (after work):
+
+```
+Running tests/osio_env_gates.rs (.../osio_env_gates-b4bb021fb1d92a14)
+running 3 tests
+test osio_env_arg_checked ... ok
+test osio_env_set_var_returns_value ... ok
+test osio_env_unset_var_returns_empty_not_error ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Full regression (after work): `SUM passed=324 failed=0`
+(321 baseline + 3 new, 48 `test result:` lines), `GREP sum=324` —
+both numbers from the same session, matching.
+`scripts/verify_docs.py`: `verified 38 samples`,
+`all docs samples verified, 0 UNVERIFIED markers`.
+
+Integration program — real `klang run`, not a unit test
+(`/tmp/klang-target/debug/klang`, excerpt — real output also prints
+`file:`/`parse:`/MIR lines):
+
+```
+=== klang run examples/osio_integration.klang main ===
+check: OK (0 diagnostics)
+print: contact: ada@example.com
+print: contact: ada@example.com
+print: ada@example.com
+print: ada
+print: example.com
+run main() = 42
+(EXIT=0)
+```
+
+(On-disk `/tmp/klang_osio_integration.txt` confirmed to contain
+`contact: ada@example.com` — the first print is the file read, the
+second is the process stdout echoed through argv, the last three are
+the regex full match + both capture groups. A stubbed phase could not
+produce this chain: each stage's output is the next stage's input.)
+
+## Phase 4 acceptance (against PRD §8)
+
+- AC4: met — `env` (flat `env::get`) pinned set/unset; one real
+  multi-capability `.klang` program combining file + process + regex
+  live-run successfully via `klang run` with pasted output above.
+- AC7 (regression): met — 324 ≥ 321, sums match, docs 38/38.
+- AC8: this entry.
+- AC1/AC2/AC3/AC5/AC6: unchanged since STDLIB-OSIO-1/2/3 — no new
+  diagnostics or process surface in this phase.
+
+---
+
+# STDLIB-OSIO-5 — Phase 5: Docs (code-verified)
+
+PRD: KLANG STDLIB PRD — OS Interop, Phase 5 (usage examples for all of
+the above, scoped to OS-interop only — no claim about any unrelated
+v2 acceptance items).
+
+## Convention (checked before writing)
+
+`docs/README.md` index + `scripts/verify_docs.py`: every ` ```klang `
+block in `docs/*.md` carries a machine-checked first-line directive
+(`// @run prints: … ; return: N`, `// @run-fail E-CODE`,
+`// @check-fail E-CODE`, `// @check-ok`) and the script runs each
+block against the real binary (this session: `KLANG_BIN` default
+`/tmp/klang-target/debug/klang`). No existing docs samples covered
+file/process/regex/env builtins, so this phase is a new page rather
+than edits to the tour flow.
+
+## Files created/changed
+
+- CREATED `docs/os-interop.md` — 11 verified samples: files
+  (write+read, append+exists, missing-file `E-IO-NOT-FOUND`),
+  processes (echo stdout, `false` non-zero-is-result, missing-binary
+  `E-PROCESS-NOT-FOUND`), regex (indexed groups, named groups,
+  malformed-pattern `E-REGEX-INVALID-PATTERN`), env
+  (missing-var default), plus a file→process→regex chain mirroring
+  `examples/osio_integration.klang`.
+- MODIFIED `docs/README.md` — index bullet for the new page.
+- No `src/`/`tests/` changes in this phase.
+
+## Test results (real output)
+
+`scripts/verify_docs.py` (after work):
+
+```
+verified 49 samples: {'check-ok': 0, 'run': 25, 'check-fail': 19, 'run-fail': 5}
+all docs samples verified, 0 UNVERIFIED markers
+```
+
+(38 before + 11 new: 8 `@run`, 3 `@run-fail`; verified first try, no
+fix-ups. Each file sample uses its own `/tmp/klang_docs_*.txt` path
+and overwrites before appending, so re-runs are idempotent.)
+
+Full regression (after work, unchanged code): `SUM passed=324
+failed=0` (48 `test result:` lines), `GREP sum=324` — same as the
+Phase 4 close, matching.
+
+## Phase 5 acceptance (against PRD §8)
+
+- Scoped doc addition for OS-interop only: met — one new page plus an
+  index link; no edits to unrelated guides; no claim about any v2
+  acceptance items.
+- AC7 (regression): met — 324 = 324, sums match, docs 49/49
+  (up from 38/38, all verified).
+- AC8: this entry.
+- AC7 (regression): met — 313 ≥ 306, sums match, docs 38/38.
+- AC8: this entry.
+- AC1/AC3/AC4: not this phase — no file/regex/env code was added or
+  claimed here (file surface untouched since STDLIB-OSIO-1).

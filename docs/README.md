@@ -11,6 +11,8 @@ not invented syntax.
 - [Language tour](tour.md) — guided walkthrough with runnable examples.
 - [Language reference](reference.md) — precise per-construct rules and
   every diagnostic code with a minimal triggering example.
+- [OS interop](os-interop.md) — files, processes, regex, and env with
+  runnable examples.
 - [`klang repair` guide](repair.md) — the repair loop harnesses drive:
   `klang mcp` tools, `--dry-run` prompt inspector, scope model.
 - [Known limitations](limitations.md) — what Klang does not do yet,

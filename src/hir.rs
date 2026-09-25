@@ -2495,10 +2495,11 @@ fn equality_ok(l: &Ty, r: &Ty) -> bool {
 fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagnostic>) -> Ty {
     let arity = match func {
         "len" | "pop" | "keys" => 1,
-        "push" | "range" | "write_file" => 2,
+        "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
         "str" | "int" | "float" => 1,
         "assert" => 1,
         "read_file" | "exists" | "env" => 1,
+        "regex_is_match" | "regex_find" => 2,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -2580,6 +2581,19 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Int
         }
+        "append_file" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`append_file()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
         "exists" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`exists()` path", "str", &args[0]));
@@ -2591,6 +2605,46 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
                 diags.push(type_mismatch(file, "`env()` name", "str", &args[0]));
             }
             Ty::Str
+        }
+        "run_process" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`run_process()` cmd", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(
+                    file,
+                    "`run_process()` args",
+                    "array",
+                    &args[1],
+                ));
+            }
+            Ty::Map
+        }
+        "regex_is_match" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`regex_is_match()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Bool
+        }
+        "regex_find" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`regex_find()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Map
         }
         _ => Ty::Unknown,
     }
@@ -2707,8 +2761,12 @@ pub fn is_builtin(name: &str) -> bool {
             | "assert"
             | "read_file"
             | "write_file"
+            | "append_file"
             | "exists"
             | "env"
+            | "run_process"
+            | "regex_is_match"
+            | "regex_find"
     )
 }
 

@@ -41,15 +41,25 @@ fn stdlib_env_reads_process_env() {
 
 #[test]
 fn stdlib_missing_file_is_runtime_error() {
-    let mut p = Parser::new(
-        "fn main() -> i32 { print(read_file(\"/no/such/klang-file-xyz\")) return 0 }",
-    );
+    // STDLIB-OSIO-1: a genuinely missing file (inside the temp dir, so
+    // the unsafe-path guard does not fire) now reports the specific
+    // `E-IO-NOT-FOUND` diagnostic instead of generic `E-RUNTIME`.
+    // Guard behavior (absolute paths outside tmp) is pinned by
+    // `osio_file_gates::osio_file_unsafe_absolute_path_stays_runtime_error`.
+    let dir = std::env::temp_dir().join("klang-stdlib-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("missing-xyz-12345.txt");
+    let _ = std::fs::remove_file(&path);
+    let path_s = path.to_string_lossy().replace('\\', "/");
+    let mut p = Parser::new(&format!(
+        "fn main() -> i32 {{ print(read_file(\"{path_s}\")) return 0 }}"
+    ));
     let prog = p.parse_program().expect("parses");
     assert!(klang::hir::TypedHIR::check(prog.clone()).is_ok());
     let mir = klang::mir::lower(&prog);
     let err =
         klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new()).expect_err("must fail");
-    assert_eq!(err.code, "E-RUNTIME");
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
 
 #[test]

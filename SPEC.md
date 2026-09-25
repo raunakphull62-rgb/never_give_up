@@ -122,10 +122,14 @@ Free: `len`, `push`, `pop`, `range`, `str`, `int`, `float`, `keys`,
 
 | Fn | Types | Meaning |
 |---|---|---|
-| `read_file(p: str) -> str` | checked | file contents, `E-RUNTIME` if missing |
+| `read_file(p: str) -> str` | checked | file contents, `E-IO-NOT-FOUND` if missing |
 | `write_file(p: str, c: str) -> i32` | checked | writes, returns byte count |
+| `append_file(p: str, c: str) -> i32` | checked | appends (creating when absent), returns byte count appended |
 | `exists(p: str) -> bool` | checked | path exists |
 | `env(name: str) -> str` | checked | env var or `""` |
+| `run_process(cmd: str, args: array) -> map` | checked | argv-array spawn (no shell); map has `stdout: str`, `stderr: str`, `exit_code: i32`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
+| `regex_is_match(pat: str, text: str) -> bool` | checked | true when the pattern matches; bad pattern is `E-REGEX-INVALID-PATTERN` |
+| `regex_find(pat: str, text: str) -> map` | checked | map has `matched: bool`, `match: str`, `groups: array` (indexed 1..n), `named: map`; no match is `matched == 0`, not an error |
 
 Methods: strings (`upper/lower/trim/split/contains/starts_with/
 ends_with/replace/chars/len`), arrays (`len/push/pop/contains/join`),
@@ -135,7 +139,7 @@ maps (`len/keys/contains`). Unknown receivers skip checking.
 length** (Rust `String::len` convention), not char count:
 `len("klang") == 5`, `len("é") == 2`, `len("—") == 3`.
 `len(array)` is element count, `len(map)` is entry
-count. `write_file` likewise returns byte count. Note the deliberate
+count. `write_file`/`append_file` likewise return byte counts. Note the deliberate
 asymmetry: `s[i]` and `s.chars()` are char-based (Unicode scalar values),
 so `for i in 0..len(s)` is only valid for ASCII; non-ASCII code must map
 char indices to byte offsets (e.g. via `s.chars()` plus `len()` of each

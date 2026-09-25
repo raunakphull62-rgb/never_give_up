@@ -840,8 +840,12 @@ fn is_builtin(name: &str) -> bool {
             | "assert"
             | "read_file"
             | "write_file"
+            | "append_file"
             | "exists"
             | "env"
+            | "run_process"
+            | "regex_is_match"
+            | "regex_find"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -975,9 +979,7 @@ fn exec_builtin(
             }
             let path = get(&args[0]).render();
             reject_unsafe_path(&path)?;
-            std::fs::read_to_string(&path)
-                .map(Value::Str)
-                .map_err(|e| runtime_err(&format!("read_file({path}) failed: {e}")))
+            crate::stdlib::file::read(&path).map(Value::Str)
         }
         "write_file" => {
             if args.len() != 2 {
@@ -986,9 +988,16 @@ fn exec_builtin(
             let path = get(&args[0]).render();
             let content = get(&args[1]).render();
             reject_unsafe_path(&path)?;
-            std::fs::write(&path, &content)
-                .map(|_| Value::Int(content.len() as i64))
-                .map_err(|e| runtime_err(&format!("write_file({path}) failed: {e}")))
+            crate::stdlib::file::write(&path, &content).map(|n| Value::Int(n as i64))
+        }
+        "append_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("append_file() takes 2 arguments"));
+            }
+            let path = get(&args[0]).render();
+            let content = get(&args[1]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::file::append(&path, &content).map(|n| Value::Int(n as i64))
         }
         "exists" => {
             if args.len() != 1 {
@@ -1004,6 +1013,62 @@ fn exec_builtin(
             }
             let name = get(&args[0]).render();
             Ok(Value::Str(std::env::var(&name).unwrap_or_default()))
+        }
+        "run_process" => {
+            if args.len() != 2 {
+                return Err(runtime_err("run_process() takes 2 arguments"));
+            }
+            let cmd = get(&args[0]).render();
+            let argv = match get(&args[1]) {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        out.push(v.render());
+                    }
+                    out
+                }
+                _ => return Err(runtime_err("run_process() needs an array of strings second")),
+            };
+            let o = crate::stdlib::process::run(&cmd, &argv)?;
+            Ok(Value::Map(vec![
+                ("stdout".to_string(), Value::Str(o.stdout)),
+                ("stderr".to_string(), Value::Str(o.stderr)),
+                ("exit_code".to_string(), Value::Int(i64::from(o.exit_code))),
+            ]))
+        }
+        "regex_is_match" => {
+            if args.len() != 2 {
+                return Err(runtime_err("regex_is_match() takes 2 arguments"));
+            }
+            let pattern = get(&args[0]).render();
+            let text = get(&args[1]).render();
+            crate::stdlib::regex::is_match(&pattern, &text)
+                .map(|b| Value::Int(i64::from(b)))
+        }
+        "regex_find" => {
+            if args.len() != 2 {
+                return Err(runtime_err("regex_find() takes 2 arguments"));
+            }
+            let pattern = get(&args[0]).render();
+            let text = get(&args[1]).render();
+            let f = crate::stdlib::regex::find(&pattern, &text)?;
+            Ok(Value::Map(vec![
+                ("matched".to_string(), Value::Int(i64::from(f.matched))),
+                ("match".to_string(), Value::Str(f.text)),
+                (
+                    "groups".to_string(),
+                    Value::Array(f.groups.into_iter().map(Value::Str).collect()),
+                ),
+                (
+                    "named".to_string(),
+                    Value::Map(
+                        f.named
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::Str(v)))
+                            .collect(),
+                    ),
+                ),
+            ]))
         }
         "__echo_create" => {
             if args.len() != 1 {

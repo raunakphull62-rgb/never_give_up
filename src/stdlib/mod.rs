@@ -9,6 +9,23 @@ pub mod verify;
 /// Network boundary: `net::echo_get` behind a mockable transport.
 pub mod net;
 
+/// OS-interop file boundary: `read`/`write`/`append`/`exists` with
+/// `E-IO-*` diagnostics (STDLIB-OSIO-1). Wired into the interpreter as
+/// the flat builtins `read_file`/`write_file`/`append_file`/`exists`.
+pub mod file;
+
+/// OS-interop process boundary: `run(cmd, args)` with `E-PROCESS-*`
+/// diagnostics (STDLIB-OSIO-2). Wired into the interpreter as the flat
+/// builtin `run_process(cmd, args)` returning a map with
+/// `stdout`/`stderr`/`exit_code`.
+pub mod process;
+
+/// OS-interop regex boundary: `is_match`/`find` with
+/// `E-REGEX-INVALID-PATTERN` diagnostics (STDLIB-OSIO-3). Wired into
+/// the interpreter as the flat builtins
+/// `regex_is_match(pattern, text)` / `regex_find(pattern, text)`.
+pub mod regex;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {

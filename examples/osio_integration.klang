@@ -1,0 +1,26 @@
+// examples/osio_integration.klang — STDLIB-OSIO Phase 4 integration.
+//
+// Combines three OS-interop phases in one program: file I/O (write +
+// read), process execution (echo the file content back via argv), and
+// regex (extract the contact address from the process output).
+//
+// Run: cargo run -- run examples/osio_integration.klang main
+// Expected: prints the address three ways (file content, process
+// stdout, regex match + groups) and returns 42.
+
+fn main() -> i32 {
+    let path = "/tmp/klang_osio_integration.txt"
+    write_file(path, "contact: ada@example.com")
+    let content = read_file(path)
+    print(content)
+    let r = run_process("echo", [content])
+    print(r["stdout"])
+    let m = regex_find("([\\w.]+)@([\\w.]+)", r["stdout"])
+    print(m["match"])
+    print(m["groups"][0])
+    print(m["groups"][1])
+    if m["matched"] == 1 {
+        return 42
+    }
+    return 0
+}
