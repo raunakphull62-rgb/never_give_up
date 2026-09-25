@@ -6,6 +6,8 @@
 
 //! v2 Flow lowering (explicit environments) lives in [`flow_lowering`];
 //! v2 Echo state machines arrive in Phase 9.
+//! v2 full program lowering (schemas, echoes, flows, functions).
+pub mod v2_lowering;
 
 /// v2 Echo lowering (explicit state machines).
 pub mod echo_lowering;

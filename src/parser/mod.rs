@@ -13,6 +13,8 @@
 pub mod echo;
 /// v2 Flow parsing (explicit `dep=` environment).
 pub mod flow;
+/// v2 full program parsing (schemas, echo fns, functions with resonance types).
+pub mod v2;
 
 use crate::ast::{
     AssignStmt, AssignTarget, Block, BreakStmt, ContinueStmt, Effect, EnumDecl, EnumVariant, Expr,

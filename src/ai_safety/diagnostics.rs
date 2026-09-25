@@ -213,3 +213,17 @@ pub fn parse_echo(file: &str, start: usize, end: usize, message: &str) -> Diagno
         "syntax/echo",
     )
 }
+
+/// `E-PARSE-V2`: input does not match the v2 grammar.
+pub fn parse_v2(file: &str, start: usize, end: usize, message: &str) -> Diagnostic {
+    Diagnostic::error(
+        "E-PARSE-V2",
+        message,
+        file,
+        start,
+        end,
+        "input does not match the v2 grammar",
+        &["check schema echo flow tune listen spelling"],
+        "syntax/v2",
+    )
+}

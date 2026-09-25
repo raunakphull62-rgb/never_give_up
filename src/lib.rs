@@ -24,9 +24,11 @@ pub mod sema;
 pub mod stdlib;
 
 pub use ast::{Block, Effect, Expr, FunctionDecl, NodeId, Param, Program, Stmt};
+pub use ast::v2::{SchemaDecl, V2FunctionDecl, V2Program, V2Block, V2Stmt, V2Expr, V2Param};
 pub use diagnostics::{Diagnostic, Fix, Span};
 pub use hir::TypedHIR;
 pub use parser::Parser;
+pub use parser::v2::parse_v2_program;
 
 /// Stack size for the deep-recursion worker (see [`with_deep_stack`]).
 ///

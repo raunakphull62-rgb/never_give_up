@@ -447,7 +447,7 @@ fn run_file_mode(args: &[String]) {
     // Split leading subcommand from file args. Backcompat: a bare `<file>`
     // first arg means `run <file> [entry]`.
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
-        Some("check") | Some("check-v2") | Some("fmt") | Some("run") | Some("build")
+        Some("check") | Some("check-v2") | Some("fmt") | Some("run") | Some("run-v2") | Some("build")
         | Some("repair") | Some("mcp") => (args[0].as_str(), &args[1..]),
         _ => ("run", args),
     };
@@ -466,6 +466,34 @@ fn run_file_mode(args: &[String]) {
         run_v2_check_mode(&rest[0]);
         return;
     }
+    if cmd == "run-v2" {
+        if rest.is_empty() {
+            eprintln!("usage: run-v2 <file.v2> [entry]");
+            std::process::exit(2);
+        }
+        run_v2_mode(&rest[0], rest.get(1).cloned().unwrap_or_else(|| "main".to_string()));
+        return;
+    }
+    // Plain `run` on v2 files: `klang run <file.v2>` and
+    // `klang run --lang v2 <file.v2> [entry]` route to the v2 interpreter.
+    // This is explicit (extension or flag), never silent: v1 `.klang` files
+    // without the flag keep the v1 path below untouched.
+    if cmd == "run" {
+        let (is_v2_flag, run_files) = split_run_lang(rest);
+        if is_v2_flag || run_files.first().map(|p| p.ends_with(".v2")).unwrap_or(false) {
+            if run_files.is_empty() {
+                eprintln!("usage: run --lang v2 <file.v2> [entry]");
+                std::process::exit(2);
+            }
+            let entry = run_files
+                .get(1)
+                .filter(|s| !s.starts_with("--"))
+                .cloned()
+                .unwrap_or_else(|| "main".to_string());
+            run_v2_mode(&run_files[0], entry);
+            return;
+        }
+    }
     if cmd == "check" {
         let (is_v2, files) = split_check_lang(rest);
         if is_v2 {
@@ -481,7 +509,7 @@ fn run_file_mode(args: &[String]) {
             // plain check on the file. Recurse once on flag-free args.
             if files.is_empty() {
                 eprintln!(
-                    "usage: <check|fmt|run|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
+                    "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
                 );
                 std::process::exit(2);
             }
@@ -493,7 +521,7 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
+            "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
         );
         eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
         std::process::exit(2);
@@ -831,6 +859,32 @@ fn split_check_lang(rest: &[String]) -> (bool, Vec<String>) {
     (lang.as_deref() == Some("v2"), files)
 }
 
+/// `run --lang v2 <file>`: split `(is_v2, files)` out of `rest`.
+/// Same convention as `check --lang v2`; `--backend-jit` etc. pass through
+/// as positional entries for the v1 path and are ignored for v2 routing
+/// (v2 has no JIT backend).
+fn split_run_lang(rest: &[String]) -> (bool, Vec<String>) {
+    let mut lang: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--lang" {
+            match it.next() {
+                Some(v) => lang = Some(v.clone()),
+                None => {
+                    eprintln!("run: --lang needs a value (want v1|v2)");
+                    std::process::exit(2);
+                }
+            }
+        } else if let Some(v) = a.strip_prefix("--lang=") {
+            lang = Some(v.to_string());
+        } else {
+            files.push(a.clone());
+        }
+    }
+    (lang.as_deref() == Some("v2"), files)
+}
+
 /// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
 /// shared [`klang::mcp::v2_check_source`] front end and print the same
 /// `Diagnostic::to_json()` objects the MCP tool embeds.
@@ -846,6 +900,73 @@ fn run_v2_check_mode(path: &str) {
             for d in &diags {
                 println!("{}", d.to_json());
             }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `klang run-v2 <file.v2> [entry]` (and `klang run <file.v2>` /
+/// `klang run --lang v2 <file.v2>`): parse, lower through MIR (pillar 1),
+/// then execute with the real v2 interpreter (pillars 2-5).
+fn run_v2_mode(path: &str, entry: String) {
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    // Parse v2 program
+    let prog = match klang::with_deep_stack(move || klang::parser::v2::parse_v2_program(&src)) {
+        Ok(prog) => prog,
+        Err(d) => {
+            println!("parse: FAIL");
+            println!("{}", d.to_json());
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "parse: OK ({} schemas, {} echo fns, {} flows, {} functions)",
+        prog.schemas.len(),
+        prog.echo_fns.len(),
+        prog.flows.len(),
+        prog.functions.len()
+    );
+    // Lower v2 program through MIR, invoking echo_lowering (pillar 1).
+    // The listing below proves the lowering ran; execution itself uses the
+    // real v2 interpreter so dep=/echo/tune semantics are genuine.
+    let mir = klang::with_deep_stack({
+        let (schemas, echo_fns, echo_bodies, flows, functions) = (
+            prog.schemas.clone(),
+            prog.echo_fns.clone(),
+            prog.echo_bodies.clone(),
+            prog.flows.clone(),
+            prog.functions.clone(),
+        );
+        move || {
+            klang::mir::v2_lowering::lower_v2_program(
+                &schemas,
+                &echo_fns,
+                &echo_bodies,
+                &flows,
+                &functions,
+            )
+        }
+    });
+    println!("mir: OK ({} functions)", mir.functions.len());
+    for f in &mir.functions {
+        println!("  fn {} ({} params, {} instrs)", f.name, f.params.len(), f.instrs.len());
+    }
+    // Real execution (pillars 2-5, no stubs).
+    let prog2 = prog.clone();
+    let entry2 = entry.clone();
+    match klang::with_deep_stack(move || klang::runtime::v2::run_v2_program(&prog2, &entry2)) {
+        Ok((v, out)) => {
+            for line in &out {
+                println!("print: {line}");
+            }
+            println!("run {entry}() = {v}");
+        }
+        Err(d) => {
+            println!("run: FAIL");
+            println!("{}", d.to_json());
             std::process::exit(1);
         }
     }

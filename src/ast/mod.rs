@@ -10,6 +10,8 @@ pub mod echo;
 pub mod flow;
 /// v2 resonance qualifiers (`?T` / `T` / `!T`).
 pub mod resonance;
+/// v2 full program AST (schemas, echo fns, functions with resonance types).
+pub mod v2;
 
 use std::fmt;
 

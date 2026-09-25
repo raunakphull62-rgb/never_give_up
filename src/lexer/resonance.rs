@@ -21,6 +21,8 @@ pub enum TokenKind {
     PipeGt,
     /// A lone `|` (kept explicit so the parser reports it).
     Pipe,
+    /// `||` logical or.
+    OrOr,
     /// `flow` keyword.
     Flow,
     /// `echo` keyword.
@@ -33,10 +35,57 @@ pub enum TokenKind {
     Verify,
     /// `dep` keyword (pairs with `Eq` to form `dep=`).
     Dep,
+    /// `schema` keyword.
+    Schema,
+    /// `let` keyword.
+    Let,
+    /// `return` keyword.
+    Return,
+    /// `if` keyword.
+    If,
+    /// `else` keyword.
+    Else,
+    /// `print` keyword.
+    Print,
+    /// `true` keyword.
+    True,
+    /// `false` keyword.
+    False,
+    /// `while` keyword.
+    While,
+    /// `for` keyword.
+    For,
+    /// `in` keyword.
+    In,
+    /// `struct` keyword.
+    Struct,
+    /// `enum` keyword.
+    Enum,
+    /// `match` keyword.
+    Match,
+    /// `mod` keyword.
+    Mod,
+    /// `pub` keyword.
+    Pub,
+    /// `import` keyword.
+    Import,
+    /// `break` keyword.
+    Break,
+    /// `continue` keyword.
+    Continue,
+    
     /// `=` (also the second half of `dep=`).
     Eq,
+    /// `==` equality.
+    EqEq,
     /// `->` — return-type arrow (flows, echo fns).
     Arrow,
+    /// `=>` fat arrow (match arms).
+    FatArrow,
+    /// `::` path separator.
+    ColonColon,
+    /// `..` range operator.
+    DotDot,
     /// `>` (bodies; kept so Flow bodies lex without a second pass).
     Gt,
     /// `>=`.
@@ -53,6 +102,8 @@ pub enum TokenKind {
     Star,
     /// `/` (line comments `//...` still skip before this).
     Slash,
+    /// `%`.
+    Percent,
     /// `;`.
     Semi,
     /// `.`.
@@ -65,18 +116,30 @@ pub enum TokenKind {
     LBrace,
     /// `}`.
     RBrace,
+    /// `[`.
+    LBracket,
+    /// `]`.
+    RBracket,
     /// `,`.
     Comma,
     /// `:`.
     Colon,
+    /// `&&`.
+    AndAnd,
+    /// `&`.
+    Amp,
     /// Bare identifier (keywords above take precedence).
     Ident(String),
     /// Decimal integer literal.
     IntLit(i64),
+    /// Float literal (stored as bits).
+    FloatLit(u64),
     /// String literal (escape-decoded value).
     StrLit(String),
     /// End of input (zero-width at `source.len()`).
     Eof,
+    /// Invalid token (lexer error).
+    Invalid,
 }
 
 /// One v2 token with its exact byte span.
@@ -164,6 +227,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                         end: i + 2,
                     });
                     i += 2;
+                } else if i + 1 < n && bytes[i + 1] == b'|' {
+                    toks.push(Token {
+                        kind: TokenKind::OrOr,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
                 } else {
                     toks.push(Token {
                         kind: TokenKind::Pipe,
@@ -173,13 +243,46 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     i += 1;
                 }
             }
+            '&' => {
+                if i + 1 < n && bytes[i + 1] == b'&' {
+                    toks.push(Token {
+                        kind: TokenKind::AndAnd,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Token {
+                        kind: TokenKind::Amp,
+                        start,
+                        end: i + 1,
+                    });
+                    i += 1;
+                }
+            }
             '=' => {
-                toks.push(Token {
-                    kind: TokenKind::Eq,
-                    start,
-                    end: i + 1,
-                });
-                i += 1;
+                if i + 1 < n && bytes[i + 1] == b'=' {
+                    toks.push(Token {
+                        kind: TokenKind::EqEq,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else if i + 1 < n && bytes[i + 1] == b'>' {
+                    toks.push(Token {
+                        kind: TokenKind::FatArrow,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Token {
+                        kind: TokenKind::Eq,
+                        start,
+                        end: i + 1,
+                    });
+                    i += 1;
+                }
             }
             '-' => {
                 if i + 1 < n && bytes[i + 1] == b'>' {
@@ -256,6 +359,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 });
                 i += 1;
             }
+            '%' => {
+                toks.push(Token {
+                    kind: TokenKind::Percent,
+                    start,
+                    end: i + 1,
+                });
+                i += 1;
+            }
             ';' => {
                 toks.push(Token {
                     kind: TokenKind::Semi,
@@ -265,12 +376,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             '.' => {
-                toks.push(Token {
-                    kind: TokenKind::Dot,
-                    start,
-                    end: i + 1,
-                });
-                i += 1;
+                if i + 1 < n && bytes[i + 1] == b'.' {
+                    toks.push(Token {
+                        kind: TokenKind::DotDot,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Token {
+                        kind: TokenKind::Dot,
+                        start,
+                        end: i + 1,
+                    });
+                    i += 1;
+                }
             }
             '(' => {
                 toks.push(Token {
@@ -304,6 +424,22 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 });
                 i += 1;
             }
+            '[' => {
+                toks.push(Token {
+                    kind: TokenKind::LBracket,
+                    start,
+                    end: i + 1,
+                });
+                i += 1;
+            }
+            ']' => {
+                toks.push(Token {
+                    kind: TokenKind::RBracket,
+                    start,
+                    end: i + 1,
+                });
+                i += 1;
+            }
             ',' => {
                 toks.push(Token {
                     kind: TokenKind::Comma,
@@ -313,12 +449,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
             ':' => {
-                toks.push(Token {
-                    kind: TokenKind::Colon,
-                    start,
-                    end: i + 1,
-                });
-                i += 1;
+                if i + 1 < n && bytes[i + 1] == b':' {
+                    toks.push(Token {
+                        kind: TokenKind::ColonColon,
+                        start,
+                        end: i + 2,
+                    });
+                    i += 2;
+                } else {
+                    toks.push(Token {
+                        kind: TokenKind::Colon,
+                        start,
+                        end: i + 1,
+                    });
+                    i += 1;
+                }
             }
             '"' => {
                 let mut j = i + 1;
@@ -362,15 +507,35 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 while j < n && (bytes[j] as char).is_ascii_digit() {
                     j += 1;
                 }
-                match source[i..j].parse::<i64>() {
-                    Ok(num) => toks.push(Token {
-                        kind: TokenKind::IntLit(num),
-                        start,
-                        end: j,
-                    }),
-                    Err(_) => return Err(err(start, "integer literal out of range")),
+                // Float when `digits.digits` (but not `0..10`: dot must be
+                // followed by a digit).
+                if j + 1 < n && bytes[j] == b'.' && (bytes[j + 1] as char).is_ascii_digit() {
+                    let mut k = j + 1;
+                    while k < n && (bytes[k] as char).is_ascii_digit() {
+                        k += 1;
+                    }
+                    match source[i..k].parse::<f64>() {
+                        Ok(num) => toks.push(Token {
+                            kind: TokenKind::FloatLit(num.to_bits()),
+                            start,
+                            end: k,
+                        }),
+                        Err(_) => {
+                            return Err(err(start, "invalid float literal"));
+                        }
+                    }
+                    i = k;
+                } else {
+                    match source[i..j].parse::<i64>() {
+                        Ok(num) => toks.push(Token {
+                            kind: TokenKind::IntLit(num),
+                            start,
+                            end: j,
+                        }),
+                        Err(_) => return Err(err(start, "integer literal out of range")),
+                    }
+                    i = j;
                 }
-                i = j;
             }
             _ if is_ident_start(c) => {
                 let mut j = i;
@@ -385,6 +550,25 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     "tune" => TokenKind::Tune,
                     "verify" => TokenKind::Verify,
                     "dep" => TokenKind::Dep,
+                    "schema" => TokenKind::Schema,
+                    "let" => TokenKind::Let,
+                    "return" => TokenKind::Return,
+                    "if" => TokenKind::If,
+                    "else" => TokenKind::Else,
+                    "print" => TokenKind::Print,
+                    "true" => TokenKind::True,
+                    "false" => TokenKind::False,
+                    "while" => TokenKind::While,
+                    "for" => TokenKind::For,
+                    "in" => TokenKind::In,
+                    "struct" => TokenKind::Struct,
+                    "enum" => TokenKind::Enum,
+                    "match" => TokenKind::Match,
+                    "mod" => TokenKind::Mod,
+                    "pub" => TokenKind::Pub,
+                    "import" => TokenKind::Import,
+                    "break" => TokenKind::Break,
+                    "continue" => TokenKind::Continue,
                     _ => TokenKind::Ident(word.to_string()),
                 };
                 toks.push(Token {
