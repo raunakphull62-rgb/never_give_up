@@ -182,12 +182,19 @@ fn fmt_stmt(s: &Stmt, depth: usize) -> String {
         Stmt::Return(r) => format!("return {}", fmt_expr(&r.value)),
         Stmt::TaskGroup(g) => format!("task_group {{\n{}}}", fmt_block(&g.body, depth + 1)),
         Stmt::If(i) => {
-            let mut out = format!("if {} {{\n{}}}", fmt_expr(&i.cond), fmt_block(&i.then_block, depth + 1));
+            let mut out = format!(
+                "if {} {{\n{}}}",
+                fmt_expr(&i.cond),
+                fmt_block(&i.then_block, depth + 1)
+            );
             if let Some(e) = &i.else_block {
                 // `else if` chains re-emit flat when the else block holds one If.
                 if e.stmts.len() == 1 {
                     if let Stmt::If(inner) = &e.stmts[0] {
-                        out.push_str(&format!(" else {}", fmt_stmt(&Stmt::If(inner.clone()), depth)));
+                        out.push_str(&format!(
+                            " else {}",
+                            fmt_stmt(&Stmt::If(inner.clone()), depth)
+                        ));
                         return out;
                     }
                 }
@@ -244,7 +251,10 @@ fn fmt_expr(e: &Expr) -> String {
         Expr::Str { value, .. } => format!("\"{}\"", esc_str(value)),
         Expr::Bool { value, .. } => value.to_string(),
         Expr::ArrayLit { elems, .. } => {
-            format!("[{}]", elems.iter().map(fmt_expr).collect::<Vec<_>>().join(", "))
+            format!(
+                "[{}]",
+                elems.iter().map(fmt_expr).collect::<Vec<_>>().join(", ")
+            )
         }
         Expr::MapLit { entries, .. } => {
             let fs: Vec<String> = entries
@@ -300,7 +310,9 @@ fn fmt_expr(e: &Expr) -> String {
             format!("{}[{}]", fmt_expr(base), fmt_expr(index))
         }
         Expr::Field { base, field, .. } => format!("{}.{field}", fmt_expr(base)),
-        Expr::MethodCall { base, method, args, .. } => {
+        Expr::MethodCall {
+            base, method, args, ..
+        } => {
             format!(
                 "{}.{method}({})",
                 fmt_expr(base),
@@ -309,7 +321,12 @@ fn fmt_expr(e: &Expr) -> String {
         }
         Expr::Spawn { call, .. } => format!("spawn {}", fmt_expr(call)),
         Expr::Await { name, .. } => format!("await {name}"),
-        Expr::Call { func, type_args, args, .. } => {
+        Expr::Call {
+            func,
+            type_args,
+            args,
+            ..
+        } => {
             let targs = if type_args.is_empty() {
                 String::new()
             } else {

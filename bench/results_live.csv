@@ -1,0 +1,9 @@
+task,tier,check_clean,diag_code,scope
+S1-arity,simple,false,E-ARITY,function:main
+S2-undefined,simple,false,E-UNDEFINED,function:main
+S3-type,simple,false,E-TYPE,function:main
+M1-exhaustive,moderate,false,E-MATCH-EXHAUSTIVE,function:pick
+M2-generic,moderate,false,E-TYPE,function:same
+M3-effect,moderate,false,E-EFFECT-MISMATCH,function:g
+C1-full-stack,complex,false,E-MATCH-EXHAUSTIVE,function:get
+C2-multi-target,complex,false,E-UNDEFINED,function:bad_a,bad_b

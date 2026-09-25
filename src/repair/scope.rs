@@ -63,7 +63,9 @@ pub fn function_spans(src: &str) -> Vec<(String, usize, usize)> {
         if is_fn_at(bytes, i) {
             let start = i;
             let mut j = i + 2;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r') {
+            while j < bytes.len()
+                && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r')
+            {
                 j += 1;
             }
             // optional `pub `
@@ -155,7 +157,9 @@ fn is_fn_at(b: &[u8], i: usize) -> bool {
         return false;
     }
     let prev_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
-    let next_ok = b.get(i + 2).is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_');
+    let next_ok = b
+        .get(i + 2)
+        .is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_');
     prev_ok && next_ok
 }
 
@@ -210,13 +214,22 @@ pub fn plan_scope(diags: &[Diagnostic], src: &str, force_file: bool) -> RepairSc
         return RepairScope::File;
     }
     // keep file order for deterministic prompts/splices
-    let mut ordered: Vec<String> = spans.iter().map(|(n, _, _)| n.clone()).filter(|n| hits.contains(n)).collect();
+    let mut ordered: Vec<String> = spans
+        .iter()
+        .map(|(n, _, _)| n.clone())
+        .filter(|n| hits.contains(n))
+        .collect();
     ordered.dedup();
     RepairScope::Functions(ordered)
 }
 
 /// Attribute one diagnostic to candidate function names.
-fn attribute(d: &Diagnostic, src: &str, spans: &[(String, usize, usize)], names: &[String]) -> Vec<String> {
+fn attribute(
+    d: &Diagnostic,
+    src: &str,
+    spans: &[(String, usize, usize)],
+    names: &[String],
+) -> Vec<String> {
     // 1. Real byte spans: map slice -> enclosing function(s).
     let s = d.primary_span.start;
     let e = d.primary_span.end;
@@ -286,7 +299,11 @@ fn attribute(d: &Diagnostic, src: &str, spans: &[(String, usize, usize)], names:
         }
     }
     // E-TASK-CANCEL / spawn / await mentions: functions containing them.
-    if d.code == "E-TASK-CANCEL" || d.message.contains("spawn") || d.message.contains("await") || d.message.contains("task_group") {
+    if d.code == "E-TASK-CANCEL"
+        || d.message.contains("spawn")
+        || d.message.contains("await")
+        || d.message.contains("task_group")
+    {
         let mut v = Vec::new();
         for (n, fs, fe) in spans {
             let body = &src[*fs..*fe];
@@ -360,27 +377,44 @@ mod tests {
     fn arity_maps_to_caller() {
         let src = "fn add(a: i32) -> i32 { return a }\nfn main() -> i32 { return add(1, 2) }\n";
         let d = diag("E-ARITY", "`main` calls `add` with 2 args, want 1");
-        assert_eq!(plan_scope(&[d], src, false), RepairScope::Functions(vec!["main".into()]));
+        assert_eq!(
+            plan_scope(&[d], src, false),
+            RepairScope::Functions(vec!["main".into()])
+        );
     }
 
     #[test]
     fn effect_maps_to_caller() {
         let src = "fn f() -> i32 throws { return 1 }\nfn g() -> i32 { return f() }\n";
-        let d = diag("E-EFFECT-MISMATCH", "`g` calls throwing `f` without `throws`");
-        assert_eq!(plan_scope(&[d], src, false), RepairScope::Functions(vec!["g".into()]));
+        let d = diag(
+            "E-EFFECT-MISMATCH",
+            "`g` calls throwing `f` without `throws`",
+        );
+        assert_eq!(
+            plan_scope(&[d], src, false),
+            RepairScope::Functions(vec!["g".into()])
+        );
     }
 
     #[test]
     fn cancel_maps_to_task_group_owner() {
         let src = "fn fetch_a() -> i32 throws { return 1 }\nfn bad() -> i32 throws async { task_group { let a = spawn fetch_a() return await b } }\n";
         let d = diag("E-TASK-CANCEL", "child task may outlive its task group");
-        assert_eq!(plan_scope(&[d], src, false), RepairScope::Functions(vec!["bad".into()]));
+        assert_eq!(
+            plan_scope(&[d], src, false),
+            RepairScope::Functions(vec!["bad".into()])
+        );
     }
 
     #[test]
     fn too_many_functions_falls_back_to_file() {
-        let src = "fn a() -> i32 { return x }\nfn b() -> i32 { return y }\nfn c() -> i32 { return z }\n";
-        let ds = vec![diag("E-UNDEFINED", "undefined variable `x`"), diag("E-UNDEFINED", "undefined variable `y`"), diag("E-UNDEFINED", "undefined variable `z`")];
+        let src =
+            "fn a() -> i32 { return x }\nfn b() -> i32 { return y }\nfn c() -> i32 { return z }\n";
+        let ds = vec![
+            diag("E-UNDEFINED", "undefined variable `x`"),
+            diag("E-UNDEFINED", "undefined variable `y`"),
+            diag("E-UNDEFINED", "undefined variable `z`"),
+        ];
         assert_eq!(plan_scope(&ds, src, false), RepairScope::File);
     }
 

@@ -1,0 +1,22 @@
+{
+  "name": "klang",
+  "version": "0.1.0",
+  "description": "Klang language CLI – wrapper that resolves to the prebuilt platform binary",
+  "license": "MIT",
+  "bin": {
+    "klang": "bin/klang.js"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "optionalDependencies": {
+    "klang-linux-x64": "0.1.0",
+    "klang-linux-arm64": "0.1.0",
+    "klang-darwin-x64": "0.1.0",
+    "klang-darwin-arm64": "0.1.0",
+    "klang-win32-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

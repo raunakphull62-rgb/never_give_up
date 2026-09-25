@@ -31,10 +31,7 @@ enum Qualified {
     /// the precise path (the existing fallback would only name `m`).
     NoSuchItem,
     /// A member of module `m`. The bool is `is_pub`.
-    Member {
-        kind: MemberKind,
-        is_pub: bool,
-    },
+    Member { kind: MemberKind, is_pub: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,30 +184,30 @@ pub fn resolve_with_file(program: &Program, file: &str) -> (Program, Vec<Diagnos
         for f in &m.functions {
             if info.fns.contains_key(&f.name) {
                 let f0 = ctx.file.clone();
-                ctx.diags.push(duplicate(&f0, &format!(
-                    "duplicate function `{}` in module `{}`",
-                    f.name, m.name
-                )));
+                ctx.diags.push(duplicate(
+                    &f0,
+                    &format!("duplicate function `{}` in module `{}`", f.name, m.name),
+                ));
             }
             info.fns.insert(f.name.clone(), f.is_pub);
         }
         for s in &m.structs {
             if info.structs.contains_key(&s.name) {
                 let f0 = ctx.file.clone();
-                ctx.diags.push(duplicate(&f0, &format!(
-                    "duplicate struct `{}` in module `{}`",
-                    s.name, m.name
-                )));
+                ctx.diags.push(duplicate(
+                    &f0,
+                    &format!("duplicate struct `{}` in module `{}`", s.name, m.name),
+                ));
             }
             info.structs.insert(s.name.clone(), s.is_pub);
         }
         for e in &m.enums {
             if info.enums.contains_key(&e.name) {
                 let f0 = ctx.file.clone();
-                ctx.diags.push(duplicate(&f0, &format!(
-                    "duplicate enum `{}` in module `{}`",
-                    e.name, m.name
-                )));
+                ctx.diags.push(duplicate(
+                    &f0,
+                    &format!("duplicate enum `{}` in module `{}`", e.name, m.name),
+                ));
             }
             info.enums.insert(e.name.clone(), e.is_pub);
         }
@@ -463,7 +460,9 @@ fn rewrite_expr(e: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
                 }
             }
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             rewrite_expr(scrutinee, cur, ctx);
             for arm in arms.iter_mut() {
                 rewrite_expr(&mut arm.body, cur, ctx);
@@ -540,7 +539,9 @@ fn rewrite_ctor(slot: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
         three_seg: bool,
     }
     let shape = match slot {
-        Expr::EnumCtor { enum_name, variant, .. } => match split_head(enum_name) {
+        Expr::EnumCtor {
+            enum_name, variant, ..
+        } => match split_head(enum_name) {
             Some((m, rest)) => Shape {
                 path: enum_name.clone(),
                 head: m.to_string(),

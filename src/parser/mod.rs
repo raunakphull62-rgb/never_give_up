@@ -5,6 +5,15 @@
 //! counter) is the identity. A child is always allocated while its parent
 //! scope entry is still on the stack.
 
+//! v2 Flow (`flow`) and Echo (`echo`/`listen`) parsers live in [`flow`]
+//! and [`echo`]; they run on [`crate::lexer`] tokens and leave the v1
+//! grammar below untouched.
+
+/// v2 Echo parsing (`echo fn`, `listen`).
+pub mod echo;
+/// v2 Flow parsing (explicit `dep=` environment).
+pub mod flow;
+
 use crate::ast::{
     AssignStmt, AssignTarget, Block, BreakStmt, ContinueStmt, Effect, EnumDecl, EnumVariant, Expr,
     ForInStmt, ForRangeStmt, FunctionDecl, IfStmt, LetStmt, MatchArm, ModDecl, NodeId, Param,
@@ -488,11 +497,7 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
                             // Overflow beyond i64 (and thus i32): do not
                             // silently become 0. Surface as invalid so the
                             // parser reports instead of evaluating to 0.
-                            lex_errs.push((
-                                start,
-                                j,
-                                "integer literal out of range".to_string(),
-                            ));
+                            lex_errs.push((start, j, "integer literal out of range".to_string()));
                             toks.push(Token {
                                 kind: TokenKind::Invalid,
                                 start,
@@ -549,7 +554,11 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
                 // explicit token so the parser reports it instead of the
                 // byte loop silently skipping it. Advance one full char
                 // to stay on char boundaries.
-                let len = source[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                let len = source[i..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1);
                 toks.push(Token {
                     kind: TokenKind::Invalid,
                     start,
@@ -595,9 +604,10 @@ impl Parser {
 
     pub fn new_with_file(source: &str, file: &str) -> Self {
         let (tokens, lex_errs) = tokenize(source);
-        let lex_error = lex_errs.into_iter().next().map(|(s, e, msg)| {
-            Diagnostic::parse_error(file, s, e, &msg)
-        });
+        let lex_error = lex_errs
+            .into_iter()
+            .next()
+            .map(|(s, e, msg)| Diagnostic::parse_error(file, s, e, &msg));
         Self {
             tokens,
             pos: 0,
@@ -878,7 +888,6 @@ impl Parser {
         let mut enums = Vec::new();
         let mut functions = Vec::new();
         loop {
-            
             match &self.peek().kind {
                 TokenKind::RBrace => {
                     self.bump();
@@ -917,7 +926,6 @@ impl Parser {
         let id = self.next_id();
         let mut fields = Vec::new();
         loop {
-            
             if self.peek().kind == TokenKind::RBrace {
                 self.bump();
                 break;
@@ -953,7 +961,6 @@ impl Parser {
         let id = self.next_id();
         let mut variants = Vec::new();
         loop {
-            
             if self.peek().kind == TokenKind::RBrace {
                 self.bump();
                 break;
@@ -971,7 +978,10 @@ impl Parser {
                         let (fname, _, _) = self.expect_ident("field name")?;
                         self.expect(&TokenKind::Colon, "`:`")?;
                         let fty = self.parse_ty_name("field type")?;
-                        fields.push(Param { name: fname, ty: fty });
+                        fields.push(Param {
+                            name: fname,
+                            ty: fty,
+                        });
                         if self.peek().kind == TokenKind::Comma {
                             self.bump();
                         } else {
@@ -981,7 +991,10 @@ impl Parser {
                 }
                 self.expect(&TokenKind::RParen, "`)`")?;
             }
-            variants.push(EnumVariant { name: vname, fields });
+            variants.push(EnumVariant {
+                name: vname,
+                fields,
+            });
             self.consume_comma_opt();
         }
         Ok(EnumDecl {
@@ -1034,7 +1047,6 @@ impl Parser {
         self.enter_scope(&blk_id);
         let mut stmts = Vec::new();
         loop {
-            
             match self.peek().kind {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 _ => stmts.push(self.parse_stmt()?),
@@ -1087,7 +1099,6 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, Diagnostic> {
-        
         match self.peek().kind {
             TokenKind::Let => Ok(Stmt::Let(self.parse_let()?)),
             TokenKind::Return => Ok(Stmt::Return(self.parse_return()?)),
@@ -1341,7 +1352,6 @@ impl Parser {
     fn parse_stmt_list(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
         let mut stmts = Vec::new();
         loop {
-            
             match self.peek().kind {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 _ => stmts.push(self.parse_stmt()?),
@@ -1400,7 +1410,6 @@ impl Parser {
         let id = self.next_id();
         let mut arms = Vec::new();
         loop {
-            
             if self.peek().kind == TokenKind::RBrace {
                 self.bump();
                 break;

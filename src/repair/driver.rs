@@ -9,7 +9,7 @@ use crate::parser::Parser;
 use super::backend::ModelBackend;
 use super::config::RepairConfig;
 use super::prompt::{build_system_prompt, build_user_prompt};
-use super::scope::{RepairScope, function_spans, plan_scope};
+use super::scope::{function_spans, plan_scope, RepairScope};
 use super::splice::{check_candidate, has_unsafe_import, splice_functions};
 
 /// One logged attempt.
@@ -44,7 +44,11 @@ fn history_line(raw: &str, diags: &[Diagnostic]) -> String {
     if codes.is_empty() {
         format!("response `{}` checked clean", snippet.replace('\n', " "))
     } else {
-        format!("response `{}` still failed with {}", snippet.replace('\n', " "), codes.join(","))
+        format!(
+            "response `{}` still failed with {}",
+            snippet.replace('\n', " "),
+            codes.join(",")
+        )
     }
 }
 
@@ -60,7 +64,10 @@ fn scope_source(src: &str, scope: &RepairScope) -> (String, String) {
                     parts.push(src[*s..*e].to_string());
                 }
             }
-            (RepairScope::Functions(fs.clone()).desc(), parts.join("\n\n"))
+            (
+                RepairScope::Functions(fs.clone()).desc(),
+                parts.join("\n\n"),
+            )
         }
     }
 }
@@ -125,40 +132,20 @@ pub fn run_repair(
     let mut file_scope = cfg.scope == super::config::Scope::File;
     let mut succeeded = false;
     let mut iters_used = 0u32;
-    let res: Result<(), Vec<Diagnostic>> =
-        crate::contracts::repair_loop(max, |i| {
-            iters_used = i + 1;
-            let scope = plan_scope(&current_diags, &current, file_scope);
-            // Repeat detection: if the last response repeats verbatim,
-            // escalate to whole-file scope for the next attempt.
-            let (desc, ssrc) = scope_source(&current, &scope);
-            let user = build_user_prompt(&desc, &ssrc, &current_diags, &history, Some(&current));
-            let scope_name = match &scope {
-                RepairScope::File => "file",
-                RepairScope::Functions(_) => "function",
-            };
-            let raw = match backend.complete(&system, &user) {
-                Ok(r) => r,
-                Err(e) => {
-                    logs.push(AttemptLog {
-                        iter: i,
-                        scope: scope_name.to_string(),
-                        target: desc,
-                        diagnostics_in: current_diags.clone(),
-                        prompt_system: system.clone(),
-                        prompt_user: user,
-                        raw_response: String::new(),
-                        diagnostics_out: current_diags.clone(),
-                        note: format!("model call failed: {e}"),
-                    });
-                    history.push(format!("model call failed: {e}"));
-                    return Err(current_diags.clone());
-                }
-            };
-            let norm = raw.trim().to_string();
-            if seen_responses.contains(&norm) {
-                // Escalate: retry same iteration budget at file scope.
-                file_scope = true;
+    let res: Result<(), Vec<Diagnostic>> = crate::contracts::repair_loop(max, |i| {
+        iters_used = i + 1;
+        let scope = plan_scope(&current_diags, &current, file_scope);
+        // Repeat detection: if the last response repeats verbatim,
+        // escalate to whole-file scope for the next attempt.
+        let (desc, ssrc) = scope_source(&current, &scope);
+        let user = build_user_prompt(&desc, &ssrc, &current_diags, &history, Some(&current));
+        let scope_name = match &scope {
+            RepairScope::File => "file",
+            RepairScope::Functions(_) => "function",
+        };
+        let raw = match backend.complete(&system, &user) {
+            Ok(r) => r,
+            Err(e) => {
                 logs.push(AttemptLog {
                     iter: i,
                     scope: scope_name.to_string(),
@@ -166,53 +153,18 @@ pub fn run_repair(
                     diagnostics_in: current_diags.clone(),
                     prompt_system: system.clone(),
                     prompt_user: user,
-                    raw_response: raw.clone(),
+                    raw_response: String::new(),
                     diagnostics_out: current_diags.clone(),
-                    note: "repeat response detected: escalating to whole-file scope next attempt".to_string(),
+                    note: format!("model call failed: {e}"),
                 });
-                history.push(history_line(&raw, &current_diags));
+                history.push(format!("model call failed: {e}"));
                 return Err(current_diags.clone());
             }
-            seen_responses.push(norm);
-            // Safety: unsafe imports in model output are a failed attempt.
-            if let Some(bad) = has_unsafe_import(&raw) {
-                logs.push(AttemptLog {
-                    iter: i,
-                    scope: scope_name.to_string(),
-                    target: desc,
-                    diagnostics_in: current_diags.clone(),
-                    prompt_system: system.clone(),
-                    prompt_user: user,
-                    raw_response: raw.clone(),
-                    diagnostics_out: current_diags.clone(),
-                    note: format!("rejected unsafe import `{bad}`"),
-                });
-                history.push(format!("response rejected: unsafe import `{bad}`"));
-                return Err(current_diags.clone());
-            }
-            // Splice + full re-check.
-            let candidate = match &scope {
-                RepairScope::File => raw.clone(),
-                RepairScope::Functions(fs) => match splice_functions(&current, fs, &raw) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        logs.push(AttemptLog {
-                            iter: i,
-                            scope: scope_name.to_string(),
-                            target: desc,
-                            diagnostics_in: current_diags.clone(),
-                            prompt_system: system.clone(),
-                            prompt_user: user,
-                            raw_response: raw.clone(),
-                            diagnostics_out: current_diags.clone(),
-                            note: format!("splice failed: {e}"),
-                        });
-                        history.push(format!("splice failed: {e}; response was: {}", raw.chars().take(200).collect::<String>().replace('\n', " ")));
-                        return Err(current_diags.clone());
-                    }
-                },
-            };
-            let checked = check_candidate(&candidate);
+        };
+        let norm = raw.trim().to_string();
+        if seen_responses.contains(&norm) {
+            // Escalate: retry same iteration budget at file scope.
+            file_scope = true;
             logs.push(AttemptLog {
                 iter: i,
                 scope: scope_name.to_string(),
@@ -221,22 +173,90 @@ pub fn run_repair(
                 prompt_system: system.clone(),
                 prompt_user: user,
                 raw_response: raw.clone(),
-                diagnostics_out: checked.diagnostics.clone(),
-                note: if checked.diagnostics.is_empty() { "clean".to_string() } else { format!("{} diagnostic(s) remain", checked.diagnostics.len()) },
+                diagnostics_out: current_diags.clone(),
+                note: "repeat response detected: escalating to whole-file scope next attempt"
+                    .to_string(),
             });
-            if checked.diagnostics.is_empty() {
-                current = checked.source;
-                current_diags = vec![];
-                succeeded = true;
-                return Ok(());
-            }
-            history.push(history_line(&raw, &checked.diagnostics));
-            current = checked.source;
-            current_diags = checked.diagnostics.clone();
-            Err(checked.diagnostics)
+            history.push(history_line(&raw, &current_diags));
+            return Err(current_diags.clone());
+        }
+        seen_responses.push(norm);
+        // Safety: unsafe imports in model output are a failed attempt.
+        if let Some(bad) = has_unsafe_import(&raw) {
+            logs.push(AttemptLog {
+                iter: i,
+                scope: scope_name.to_string(),
+                target: desc,
+                diagnostics_in: current_diags.clone(),
+                prompt_system: system.clone(),
+                prompt_user: user,
+                raw_response: raw.clone(),
+                diagnostics_out: current_diags.clone(),
+                note: format!("rejected unsafe import `{bad}`"),
+            });
+            history.push(format!("response rejected: unsafe import `{bad}`"));
+            return Err(current_diags.clone());
+        }
+        // Splice + full re-check.
+        let candidate = match &scope {
+            RepairScope::File => raw.clone(),
+            RepairScope::Functions(fs) => match splice_functions(&current, fs, &raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    logs.push(AttemptLog {
+                        iter: i,
+                        scope: scope_name.to_string(),
+                        target: desc,
+                        diagnostics_in: current_diags.clone(),
+                        prompt_system: system.clone(),
+                        prompt_user: user,
+                        raw_response: raw.clone(),
+                        diagnostics_out: current_diags.clone(),
+                        note: format!("splice failed: {e}"),
+                    });
+                    history.push(format!(
+                        "splice failed: {e}; response was: {}",
+                        raw.chars().take(200).collect::<String>().replace('\n', " ")
+                    ));
+                    return Err(current_diags.clone());
+                }
+            },
+        };
+        let checked = check_candidate(&candidate);
+        logs.push(AttemptLog {
+            iter: i,
+            scope: scope_name.to_string(),
+            target: desc,
+            diagnostics_in: current_diags.clone(),
+            prompt_system: system.clone(),
+            prompt_user: user,
+            raw_response: raw.clone(),
+            diagnostics_out: checked.diagnostics.clone(),
+            note: if checked.diagnostics.is_empty() {
+                "clean".to_string()
+            } else {
+                format!("{} diagnostic(s) remain", checked.diagnostics.len())
+            },
         });
+        if checked.diagnostics.is_empty() {
+            current = checked.source;
+            current_diags = vec![];
+            succeeded = true;
+            return Ok(());
+        }
+        history.push(history_line(&raw, &checked.diagnostics));
+        current = checked.source;
+        current_diags = checked.diagnostics.clone();
+        Err(checked.diagnostics)
+    });
     let success = res.is_ok() && succeeded;
-    RepairOutcome { success, source: current, attempts: logs, final_diagnostics: current_diags, iters_used }
+    RepairOutcome {
+        success,
+        source: current,
+        attempts: logs,
+        final_diagnostics: current_diags,
+        iters_used,
+    }
 }
 
 /// Initial parse + check with the file label applied.
@@ -259,7 +279,10 @@ mod tests {
 
     fn cfg(scope: &str) -> RepairConfig {
         RepairConfig::resolve(
-            &RepairCliOverrides { scope: super::super::config::Scope::parse(scope), ..Default::default() },
+            &RepairCliOverrides {
+                scope: super::super::config::Scope::parse(scope),
+                ..Default::default()
+            },
             &RepairFileConfig::default(),
         )
     }
@@ -267,7 +290,13 @@ mod tests {
     #[test]
     fn clean_is_noop() {
         let b = MockBackend::new(vec![]);
-        let o = run_repair("fn main() -> i32 { return 42 }\n", "t.klang", &cfg("file"), &b, false);
+        let o = run_repair(
+            "fn main() -> i32 { return 42 }\n",
+            "t.klang",
+            &cfg("file"),
+            &b,
+            false,
+        );
         assert!(o.success);
         assert_eq!(o.iters_used, 0);
         assert_eq!(b.calls(), 0);
@@ -276,16 +305,32 @@ mod tests {
     #[test]
     fn dry_run_makes_no_calls() {
         let b = MockBackend::new(vec!["fn main() -> i32 { return 1 }\n".into()]);
-        let o = run_repair("fn main() -> i32 { return x }\n", "t.klang", &cfg("file"), &b, true);
+        let o = run_repair(
+            "fn main() -> i32 { return x }\n",
+            "t.klang",
+            &cfg("file"),
+            &b,
+            true,
+        );
         assert!(!o.success);
         assert_eq!(b.calls(), 0);
-        assert!(o.attempts[0].prompt_user.contains("E-UNDEFINED"), "{}", o.attempts[0].prompt_user);
+        assert!(
+            o.attempts[0].prompt_user.contains("E-UNDEFINED"),
+            "{}",
+            o.attempts[0].prompt_user
+        );
     }
 
     #[test]
     fn file_scope_converges() {
         let b = MockBackend::new(vec!["fn main() -> i32 { return 42 }\n".into()]);
-        let o = run_repair("fn main() -> i32 { return x }\n", "t.klang", &cfg("file"), &b, false);
+        let o = run_repair(
+            "fn main() -> i32 { return x }\n",
+            "t.klang",
+            &cfg("file"),
+            &b,
+            false,
+        );
         assert!(o.success, "{:?}", o.final_diagnostics);
         assert_eq!(o.iters_used, 1);
         assert!(o.source.contains("return 42"));
@@ -305,7 +350,10 @@ mod tests {
     #[test]
     fn exhaustion_returns_final_diags() {
         let b = MockBackend::new(vec!["fn main() -> i32 { return x }\n".into()]);
-        let mut flags = RepairCliOverrides { max_iters: Some(2), ..Default::default() };
+        let mut flags = RepairCliOverrides {
+            max_iters: Some(2),
+            ..Default::default()
+        };
         flags.scope = super::super::config::Scope::parse("file");
         let c = RepairConfig::resolve(&flags, &RepairFileConfig::default());
         let o = run_repair("fn main() -> i32 { return x }\n", "t.klang", &c, &b, false);

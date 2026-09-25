@@ -99,7 +99,9 @@ fn decl_name(rest: &str) -> String {
     let rest = rest.trim_start();
     let n: String = rest
         .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '"' || *c == '.' || *c == '/')
+        .take_while(|c| {
+            c.is_ascii_alphanumeric() || *c == '_' || *c == '"' || *c == '.' || *c == '/'
+        })
         .collect();
     n
 }
@@ -230,12 +232,21 @@ pub fn check_candidate(source: &str) -> CheckResult {
     let prog = match p.parse_program() {
         Ok(prog) => prog,
         Err(d) => {
-            return CheckResult { source: source.to_string(), diagnostics: vec![d] };
+            return CheckResult {
+                source: source.to_string(),
+                diagnostics: vec![d],
+            };
         }
     };
     match TypedHIR::check(prog) {
-        Ok(_) => CheckResult { source: source.to_string(), diagnostics: vec![] },
-        Err(ds) => CheckResult { source: source.to_string(), diagnostics: ds },
+        Ok(_) => CheckResult {
+            source: source.to_string(),
+            diagnostics: vec![],
+        },
+        Err(ds) => CheckResult {
+            source: source.to_string(),
+            diagnostics: ds,
+        },
     }
 }
 
@@ -264,7 +275,8 @@ mod tests {
     #[test]
     fn unknown_function_rejected() {
         let orig = "fn a() -> i32 { return 1 }\n";
-        let e = splice_functions(orig, &["a".to_string()], "fn evil() -> i32 { return 1 }\n").expect_err("reject");
+        let e = splice_functions(orig, &["a".to_string()], "fn evil() -> i32 { return 1 }\n")
+            .expect_err("reject");
         assert!(e.contains("unknown function"), "{e}");
     }
     #[test]

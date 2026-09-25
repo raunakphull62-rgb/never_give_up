@@ -54,6 +54,7 @@ becomes the result line. A program that fails to check never runs:
 ## CLI subcommands
 
 ```sh
+cargo run -- --version                # print version and exit
 cargo run -- check <file>               # parse + type-check only
 cargo run -- run <file> [entry]         # parse + check + run (entry defaults to main)
 cargo run -- build <file>               # parse + check + print MIR listing

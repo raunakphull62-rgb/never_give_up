@@ -175,8 +175,14 @@ fn generic_mismatch(
         file,
         0,
         0,
-        &format!("generic type parameter `{param}` was already inferred as `{}` from {origin}", bound.name()),
-        &["make the argument types agree", "check the generic instantiation"],
+        &format!(
+            "generic type parameter `{param}` was already inferred as `{}` from {origin}",
+            bound.name()
+        ),
+        &[
+            "make the argument types agree",
+            "check the generic instantiation",
+        ],
         "types/mismatch",
     )
 }
@@ -223,10 +229,10 @@ impl TypedHIR {
             let mut variants: HashMap<String, Vec<Ty>> = HashMap::new();
             for v in &e.variants {
                 if variants.contains_key(&v.name) {
-                    diags.push(duplicate(file, &format!(
-                        "duplicate variant `{}` in enum `{}`",
-                        v.name, e.name
-                    )));
+                    diags.push(duplicate(
+                        file,
+                        &format!("duplicate variant `{}` in enum `{}`", v.name, e.name),
+                    ));
                 }
                 variants.insert(
                     v.name.clone(),
@@ -237,7 +243,12 @@ impl TypedHIR {
                             if e.type_params.is_empty() {
                                 resolve_param_ty(&f.ty, &enums, &struct_names_early)
                             } else {
-                                resolve_generic_ty(&f.ty, &e.type_params, &enums, &struct_names_early)
+                                resolve_generic_ty(
+                                    &f.ty,
+                                    &e.type_params,
+                                    &enums,
+                                    &struct_names_early,
+                                )
                             }
                         })
                         .collect(),
@@ -287,7 +298,9 @@ impl TypedHIR {
                     param_tys: f
                         .params
                         .iter()
-                        .map(|p| resolve_generic_ty(&p.ty, &f.type_params, &enums, &struct_names_early))
+                        .map(|p| {
+                            resolve_generic_ty(&p.ty, &f.type_params, &enums, &struct_names_early)
+                        })
                         .collect(),
                     return_ty,
                 },
@@ -302,10 +315,10 @@ impl TypedHIR {
             let mut fields = HashMap::new();
             for fld in &s.fields {
                 if fields.contains_key(&fld.name) {
-                    diags.push(duplicate(file, &format!(
-                        "duplicate field `{}` in struct `{}`",
-                        fld.name, s.name
-                    )));
+                    diags.push(duplicate(
+                        file,
+                        &format!("duplicate field `{}` in struct `{}`", fld.name, s.name),
+                    ));
                 }
                 // Reserve the enum runtime representation (`__variant`,
                 // `f0`, `f1`, ...): user structs declaring these fields
@@ -337,8 +350,7 @@ impl TypedHIR {
                 // bare `parse_ty`, erasing even enum-typed fields and
                 // disabling nested-literal, field-access, and
                 // match-exhaustiveness checking through the field.
-                let fty =
-                    resolve_generic_ty(&fld.ty, &s.type_params, &enums, &struct_names_early);
+                let fty = resolve_generic_ty(&fld.ty, &s.type_params, &enums, &struct_names_early);
                 fields.insert(fld.name.clone(), fty);
             }
             struct_fields.insert(s.name.clone(), fields);
@@ -360,10 +372,10 @@ impl TypedHIR {
         let structs: Vec<String> = struct_names;
         for e in &program.enums {
             if struct_fields.contains_key(&e.name) {
-                diags.push(duplicate(file, &format!(
-                    "type `{}` declared as both enum and struct",
-                    e.name
-                )));
+                diags.push(duplicate(
+                    file,
+                    &format!("type `{}` declared as both enum and struct", e.name),
+                ));
             }
         }
         for f in &program.functions {
@@ -391,12 +403,7 @@ fn has_effect(effects: &[Effect], want: Effect) -> bool {
 /// behavior. Previously struct names and type params erased to `Unknown`,
 /// letting `x - 1` pass for generic `T` and `p.nonexistent` pass for
 /// struct params.
-fn resolve_body_ty(
-    s: &str,
-    type_params: &[String],
-    enums: &EnumTable,
-    structs: &[String],
-) -> Ty {
+fn resolve_body_ty(s: &str, type_params: &[String], enums: &EnumTable, structs: &[String]) -> Ty {
     if type_params.iter().any(|t| t == s) {
         return Ty::Param(s.to_string());
     }
@@ -428,10 +435,10 @@ fn check_function(
     let mut defined: HashMap<String, Ty> = HashMap::new();
     for p in &f.params {
         if defined.contains_key(&p.name) {
-            diags.push(duplicate(file, &format!(
-                "duplicate parameter `{}` in `{}`",
-                p.name, f.name
-            )));
+            diags.push(duplicate(
+                file,
+                &format!("duplicate parameter `{}` in `{}`", p.name, f.name),
+            ));
         }
         defined.insert(
             p.name.clone(),
@@ -439,7 +446,8 @@ fn check_function(
         );
     }
     let mut cx = Ctx { loop_depth: 0 };
-    check_block(file, 
+    check_block(
+        file,
         &f.body,
         f,
         sigs,
@@ -537,7 +545,8 @@ fn check_block(
                     if expr_contains_await(call) && group_stack.is_empty() {
                         diags.push(await_outside_group(file));
                     }
-                    check_expr(file, 
+                    check_expr(
+                        file,
                         call,
                         caller,
                         sigs,
@@ -553,7 +562,8 @@ fn check_block(
                     if expr_contains_await(&l.value) && group_stack.is_empty() {
                         diags.push(await_outside_group(file));
                     }
-                    check_expr(file, 
+                    check_expr(
+                        file,
                         &l.value,
                         caller,
                         sigs,
@@ -575,7 +585,8 @@ fn check_block(
                 if expr_contains_await(&a.value) && group_stack.is_empty() {
                     diags.push(await_outside_group(file));
                 }
-                let target_ty = check_assign_target(file, 
+                let target_ty = check_assign_target(
+                    file,
                     &a.target,
                     caller,
                     sigs,
@@ -587,7 +598,8 @@ fn check_block(
                     &mut awaited_here,
                     defined,
                 );
-                let value_ty = check_expr(file, 
+                let value_ty = check_expr(
+                    file,
                     &a.value,
                     caller,
                     sigs,
@@ -601,11 +613,7 @@ fn check_block(
                 );
                 if let Some(want) = target_ty {
                     if !assignable(&value_ty, &want) {
-                        diags.push(type_mismatch(file, 
-                            "assignment",
-                            &want.name(),
-                            &value_ty,
-                        ));
+                        diags.push(type_mismatch(file, "assignment", &want.name(), &value_ty));
                     }
                 }
             }
@@ -617,7 +625,8 @@ fn check_block(
                 if expr_contains_await(e) && group_stack.is_empty() {
                     diags.push(await_outside_group(file));
                 }
-                check_expr(file, 
+                check_expr(
+                    file,
                     e,
                     caller,
                     sigs,
@@ -634,7 +643,8 @@ fn check_block(
                 if expr_contains_await(&r.value) && group_stack.is_empty() {
                     diags.push(await_outside_group(file));
                 }
-                let got = check_expr(file, 
+                let got = check_expr(
+                    file,
                     &r.value,
                     caller,
                     sigs,
@@ -651,7 +661,8 @@ fn check_block(
                     .map(|s| s.return_ty.clone())
                     .unwrap_or(Ty::Unknown);
                 if !assignable(&got, &want) {
-                    diags.push(type_mismatch(file, 
+                    diags.push(type_mismatch(
+                        file,
                         &format!("`{}` return", caller.name),
                         &want.name(),
                         &got,
@@ -662,7 +673,8 @@ fn check_block(
                 if expr_contains_await(&p.value) && group_stack.is_empty() {
                     diags.push(await_outside_group(file));
                 }
-                check_expr(file, 
+                check_expr(
+                    file,
                     &p.value,
                     caller,
                     sigs,
@@ -693,7 +705,8 @@ fn check_block(
                 if expr_contains_await(&w.cond) && group_stack.is_empty() {
                     diags.push(await_outside_group(file));
                 }
-                let cond_ty = check_expr(file, 
+                let cond_ty = check_expr(
+                    file,
                     &w.cond,
                     caller,
                     sigs,
@@ -709,7 +722,8 @@ fn check_block(
                 cx.loop_depth += 1;
                 let mut body_defined = defined.clone();
                 let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
-                let inner = check_block(file, 
+                let inner = check_block(
+                    file,
                     &w.body,
                     caller,
                     sigs,
@@ -736,7 +750,8 @@ fn check_block(
                 }
             }
             Stmt::ForRange(fr) => {
-                let s_ty = check_expr(file, 
+                let s_ty = check_expr(
+                    file,
                     &fr.start,
                     caller,
                     sigs,
@@ -748,7 +763,8 @@ fn check_block(
                     &mut awaited_here,
                     defined,
                 );
-                let e_ty = check_expr(file, 
+                let e_ty = check_expr(
+                    file,
                     &fr.end,
                     caller,
                     sigs,
@@ -771,7 +787,8 @@ fn check_block(
                 // outer binding of the same name.
                 body_defined.insert(fr.var.clone(), Ty::Int);
                 let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
-                let inner = check_block(file, 
+                let inner = check_block(
+                    file,
                     &fr.body,
                     caller,
                     sigs,
@@ -794,7 +811,8 @@ fn check_block(
                 }
             }
             Stmt::ForIn(fi) => {
-                let iter_ty = check_expr(file, 
+                let iter_ty = check_expr(
+                    file,
                     &fi.iter,
                     caller,
                     sigs,
@@ -813,7 +831,12 @@ fn check_block(
                 match &iter_ty {
                     Ty::Array | Ty::Str | Ty::Unknown => {}
                     Ty::Map => {
-                        diags.push(type_mismatch(file, "for-in iterable", "array/str", &iter_ty));
+                        diags.push(type_mismatch(
+                            file,
+                            "for-in iterable",
+                            "array/str",
+                            &iter_ty,
+                        ));
                     }
                     other => diags.push(type_mismatch(file, "for-in iterable", "array/str", other)),
                 }
@@ -822,7 +845,8 @@ fn check_block(
                 // Element type is dynamic without generics.
                 body_defined.insert(fi.var.clone(), Ty::Unknown);
                 let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
-                let inner = check_block(file, 
+                let inner = check_block(
+                    file,
                     &fi.body,
                     caller,
                     sigs,
@@ -848,7 +872,8 @@ fn check_block(
                 if expr_contains_await(&s.cond) && group_stack.is_empty() {
                     diags.push(await_outside_group(file));
                 }
-                let cond_ty = check_expr(file, 
+                let cond_ty = check_expr(
+                    file,
                     &s.cond,
                     caller,
                     sigs,
@@ -866,7 +891,8 @@ fn check_block(
                 // spawn. Awaits in one branch alone never propagate.
                 let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
                 let mut then_defined = defined.clone();
-                let then_awaited = check_block(file, 
+                let then_awaited = check_block(
+                    file,
                     &s.then_block,
                     caller,
                     sigs,
@@ -903,7 +929,8 @@ fn check_block(
                     if let Some(else_b) = &s.else_block {
                         let mut else_defined = defined.clone();
                         let else_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
-                        let else_awaited = check_block(file, 
+                        let else_awaited = check_block(
+                            file,
                             else_b,
                             caller,
                             sigs,
@@ -920,10 +947,7 @@ fn check_block(
                             for p in pending2.iter().skip(else_before) {
                                 if !else_awaited.contains(&p.handle) {
                                     diags.push(Diagnostic::task_leak(
-                                        file,
-                                        p.span.0,
-                                        p.span.1,
-                                        &p.handle,
+                                        file, p.span.0, p.span.1, &p.handle,
                                     ));
                                 }
                             }
@@ -952,7 +976,8 @@ fn check_block(
                     }
                 } else if let Some(else_b) = &s.else_block {
                     let mut else_defined = defined.clone();
-                    let else_awaited = check_block(file, 
+                    let else_awaited = check_block(
+                        file,
                         else_b,
                         caller,
                         sigs,
@@ -974,7 +999,8 @@ fn check_block(
             }
             Stmt::TaskGroup(g) => {
                 group_stack.push(Vec::new());
-                let inner_awaited = check_block(file, 
+                let inner_awaited = check_block(
+                    file,
                     &g.body,
                     caller,
                     sigs,
@@ -1020,7 +1046,8 @@ fn assignable(got: &Ty, want: &Ty) -> bool {
 fn require_condition(file: &str, ty: &Ty, what: &str, diags: &mut Vec<Diagnostic>) {
     match ty {
         Ty::Bool | Ty::Int | Ty::Unknown => {}
-        other => diags.push(type_mismatch(file, 
+        other => diags.push(type_mismatch(
+            file,
             &format!("{what} condition"),
             "bool",
             other,
@@ -1052,11 +1079,31 @@ fn check_assign_target(
             }
         }
         AssignTarget::Index { base, index } => {
-            let base_ty = check_expr(file, 
-                base, caller, sigs, structs, struct_fields, enums, diags, depth, awaited, defined,
+            let base_ty = check_expr(
+                file,
+                base,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                depth,
+                awaited,
+                defined,
             );
-            let idx_ty = check_expr(file, 
-                index, caller, sigs, structs, struct_fields, enums, diags, depth, awaited, defined,
+            let idx_ty = check_expr(
+                file,
+                index,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                depth,
+                awaited,
+                defined,
             );
             match &base_ty {
                 Ty::Array => {
@@ -1081,8 +1128,18 @@ fn check_assign_target(
             }
         }
         AssignTarget::Field { base, field } => {
-            let base_ty = check_expr(file, 
-                base, caller, sigs, structs, struct_fields, enums, diags, depth, awaited, defined,
+            let base_ty = check_expr(
+                file,
+                base,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                depth,
+                awaited,
+                defined,
             );
             match &base_ty {
                 Ty::Struct(name) => {
@@ -1154,17 +1211,29 @@ fn match_exhaustive(file: &str, enum_name: &str, missing: &[String]) -> Diagnost
         .collect();
     Diagnostic::error(
         "E-MATCH-EXHAUSTIVE",
-        &format!("non-exhaustive match on `{enum_name}`: missing {}", want.join(", ")),
+        &format!(
+            "non-exhaustive match on `{enum_name}`: missing {}",
+            want.join(", ")
+        ),
         file,
         0,
         0,
         &format!("match on `{enum_name}` does not cover all variants"),
-        &["add arms for the missing variants", "add a wildcard `_` arm"],
+        &[
+            "add arms for the missing variants",
+            "add a wildcard `_` arm",
+        ],
         "match/exhaustiveness",
     )
 }
 
-fn enum_payload_arity(file: &str, enum_name: &str, variant: &str, want: usize, got: usize) -> Diagnostic {
+fn enum_payload_arity(
+    file: &str,
+    enum_name: &str,
+    variant: &str,
+    want: usize,
+    got: usize,
+) -> Diagnostic {
     Diagnostic::error(
         "E-ARITY",
         &format!("`{enum_name}::{variant}` carries {want} payloads, got {got}"),
@@ -1186,10 +1255,17 @@ fn struct_literal_missing(file: &str, struct_name: &str, missing: &[String]) -> 
         .iter()
         .map(|m| format!("`{struct_name}.{m}`"))
         .collect();
-    let noun = if missing.len() == 1 { "field" } else { "fields" };
+    let noun = if missing.len() == 1 {
+        "field"
+    } else {
+        "fields"
+    };
     Diagnostic::error(
         "E-ARITY",
-        &format!("`{struct_name}` literal is missing {noun} {}", fields.join(", ")),
+        &format!(
+            "`{struct_name}` literal is missing {noun} {}",
+            fields.join(", ")
+        ),
         file,
         0,
         0,
@@ -1199,10 +1275,18 @@ fn struct_literal_missing(file: &str, struct_name: &str, missing: &[String]) -> 
     )
 }
 
-fn match_binding_arity(file: &str, enum_name: &str, variant: &str, want: usize, got: usize) -> Diagnostic {
+fn match_binding_arity(
+    file: &str,
+    enum_name: &str,
+    variant: &str,
+    want: usize,
+    got: usize,
+) -> Diagnostic {
     Diagnostic::error(
         "E-ARITY",
-        &format!("pattern `{enum_name}::{variant}` binds {got} names but the variant carries {want}"),
+        &format!(
+            "pattern `{enum_name}::{variant}` binds {got} names but the variant carries {want}"
+        ),
         file,
         0,
         0,
@@ -1268,11 +1352,19 @@ fn substitute_ty(ty: &Ty, subst: &HashMap<String, (Ty, String)>) -> Ty {
 }
 
 /// Reject duplicated type-parameter names (`fn f<T, T>`).
-fn check_type_params_dup(file: &str, owner: &str, type_params: &[String], diags: &mut Vec<Diagnostic>) {
+fn check_type_params_dup(
+    file: &str,
+    owner: &str,
+    type_params: &[String],
+    diags: &mut Vec<Diagnostic>,
+) {
     let mut seen: Vec<&String> = Vec::new();
     for t in type_params {
         if seen.contains(&t) {
-            diags.push(duplicate(file, &format!("duplicate type parameter `{t}` in `{owner}`")));
+            diags.push(duplicate(
+                file,
+                &format!("duplicate type parameter `{t}` in `{owner}`"),
+            ));
         } else {
             seen.push(t);
         }
@@ -1297,7 +1389,12 @@ fn check_expr(
         Expr::Int { value, .. } => {
             // `run` narrows to i32: reject literals that would wrap.
             if *value > i32::MAX as i64 {
-                diags.push(type_mismatch(file, "integer literal", "i32 range", &Ty::Int));
+                diags.push(type_mismatch(
+                    file,
+                    "integer literal",
+                    "i32 range",
+                    &Ty::Int,
+                ));
                 return Ty::Unknown;
             }
             Ty::Int
@@ -1309,8 +1406,18 @@ fn check_expr(
             // Reached only for non-direct positions (`let`-direct is
             // handled by the caller): an unawaitable thread. Reject.
             diags.push(Diagnostic::spawn_position(file));
-            check_expr(file, 
-                call, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            check_expr(
+                file,
+                call,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             )
         }
         Expr::Await { name, .. } => {
@@ -1326,18 +1433,36 @@ fn check_expr(
             }
             defined.get(name).cloned().unwrap_or(Ty::Unknown)
         }
-        Expr::Call { func, type_args, args, .. } => {
+        Expr::Call {
+            func,
+            type_args,
+            args,
+            ..
+        } => {
             let mut arg_tys = Vec::with_capacity(args.len());
             for a in args {
-                arg_tys.push(check_expr(file, 
-                    a, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                arg_tys.push(check_expr(
+                    file,
+                    a,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    _depth,
+                    awaited,
+                    defined,
                 ));
             }
             if is_builtin(func) {
                 if !type_args.is_empty() {
                     diags.push(Diagnostic::error(
                         "E-ARITY",
-                        &format!("`{func}` takes no explicit type arguments, got {}", type_args.len()),
+                        &format!(
+                            "`{func}` takes no explicit type arguments, got {}",
+                            type_args.len()
+                        ),
                         file,
                         0,
                         0,
@@ -1384,14 +1509,23 @@ fn check_expr(
                     ));
                 }
                 if args.len() != sig.arity {
-                    diags.push(arity_mismatch(file, &caller.name, func, sig.arity, args.len()));
+                    diags.push(arity_mismatch(
+                        file,
+                        &caller.name,
+                        func,
+                        sig.arity,
+                        args.len(),
+                    ));
                     return Ty::Unknown;
                 }
                 if sig.type_params.is_empty() {
                     if !type_args.is_empty() {
                         diags.push(Diagnostic::error(
                             "E-ARITY",
-                            &format!("`{func}` takes no explicit type arguments, got {}", type_args.len()),
+                            &format!(
+                                "`{func}` takes no explicit type arguments, got {}",
+                                type_args.len()
+                            ),
                             file,
                             0,
                             0,
@@ -1403,7 +1537,8 @@ fn check_expr(
                     }
                     for (i, (got, want)) in arg_tys.iter().zip(sig.param_tys.iter()).enumerate() {
                         if !assignable(got, want) {
-                            diags.push(type_mismatch(file, 
+                            diags.push(type_mismatch(
+                                file,
                                 &format!("`{func}` arg {i}"),
                                 &want.name(),
                                 got,
@@ -1436,14 +1571,28 @@ fn check_expr(
                             ));
                             return Ty::Unknown;
                         }
-                        for (i, (param, arg_str)) in sig.type_params.iter().zip(type_args.iter()).enumerate() {
-                            let resolved = resolve_body_ty(arg_str, &caller.type_params, enums, structs);
-                            subst.insert(param.clone(), (resolved, format!("explicit type argument {i}")));
+                        for (i, (param, arg_str)) in
+                            sig.type_params.iter().zip(type_args.iter()).enumerate()
+                        {
+                            let resolved =
+                                resolve_body_ty(arg_str, &caller.type_params, enums, structs);
+                            subst.insert(
+                                param.clone(),
+                                (resolved, format!("explicit type argument {i}")),
+                            );
                         }
                     }
                     let mut ok = true;
                     for (i, (got, want)) in arg_tys.iter().zip(sig.param_tys.iter()).enumerate() {
-                        if !unify_generic(file, want, got, &mut subst, &format!("`{func}` arg {i}"), &format!("arg {i}"), diags) {
+                        if !unify_generic(
+                            file,
+                            want,
+                            got,
+                            &mut subst,
+                            &format!("`{func}` arg {i}"),
+                            &format!("arg {i}"),
+                            diags,
+                        ) {
                             ok = false;
                         }
                     }
@@ -1468,8 +1617,18 @@ fn check_expr(
         }
         Expr::ArrayLit { elems, .. } => {
             for el in elems {
-                check_expr(file, 
-                    el, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                check_expr(
+                    file,
+                    el,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    _depth,
+                    awaited,
+                    defined,
                 );
             }
             Ty::Array
@@ -1478,8 +1637,18 @@ fn check_expr(
             if !structs.contains(name) {
                 diags.push(undefined(file, name));
                 for (_, v) in fields {
-                    check_expr(file, 
-                        v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                    check_expr(
+                        file,
+                        v,
+                        caller,
+                        sigs,
+                        structs,
+                        struct_fields,
+                        enums,
+                        diags,
+                        _depth,
+                        awaited,
+                        defined,
                     );
                 }
                 return Ty::Unknown;
@@ -1489,8 +1658,18 @@ fn check_expr(
                 // instantiates the struct's type parameters independently.
                 let mut subst: HashMap<String, (Ty, String)> = HashMap::new();
                 for (fname, v) in fields {
-                    let vty = check_expr(file, 
-                        v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                    let vty = check_expr(
+                        file,
+                        v,
+                        caller,
+                        sigs,
+                        structs,
+                        struct_fields,
+                        enums,
+                        diags,
+                        _depth,
+                        awaited,
+                        defined,
                     );
                     if let Some(want) = known.get(fname) {
                         let loc = format!("`{name}.{fname}`");
@@ -1514,19 +1693,49 @@ fn check_expr(
                 }
             } else {
                 for (_, v) in fields {
-                    check_expr(file, 
-                        v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                    check_expr(
+                        file,
+                        v,
+                        caller,
+                        sigs,
+                        structs,
+                        struct_fields,
+                        enums,
+                        diags,
+                        _depth,
+                        awaited,
+                        defined,
                     );
                 }
             }
             Ty::Struct(name.clone())
         }
         Expr::Index { base, index, .. } => {
-            let b = check_expr(file, 
-                base, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let b = check_expr(
+                file,
+                base,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
-            let idx = check_expr(file, 
-                index, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let idx = check_expr(
+                file,
+                index,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             match &b {
                 Ty::Array => {
@@ -1551,15 +1760,35 @@ fn check_expr(
         }
         Expr::MapLit { entries, .. } => {
             for (_, v) in entries {
-                check_expr(file, 
-                    v, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                check_expr(
+                    file,
+                    v,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    _depth,
+                    awaited,
+                    defined,
                 );
             }
             Ty::Map
         }
         Expr::Field { base, field, .. } => {
-            let b = check_expr(file, 
-                base, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let b = check_expr(
+                file,
+                base,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             match &b {
                 Ty::Struct(name) => {
@@ -1588,14 +1817,36 @@ fn check_expr(
                 }
             }
         }
-        Expr::MethodCall { base, method, args, .. } => {
-            let b = check_expr(file, 
-                base, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+        Expr::MethodCall {
+            base, method, args, ..
+        } => {
+            let b = check_expr(
+                file,
+                base,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             let mut arg_tys = Vec::with_capacity(args.len());
             for a in args {
-                arg_tys.push(check_expr(file, 
-                    a, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+                arg_tys.push(check_expr(
+                    file,
+                    a,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    _depth,
+                    awaited,
+                    defined,
                 ));
             }
             if method == "push" || method == "pop" {
@@ -1620,18 +1871,36 @@ fn check_expr(
             check_method_call(file, &b, method, &arg_tys, diags)
         }
         Expr::Add { left, right, .. } => {
-            let l = check_expr(file, 
-                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let l = check_expr(
+                file,
+                left,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
-            let r = check_expr(file, 
-                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let r = check_expr(
+                file,
+                right,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             match (&l, &r) {
                 (Ty::Unknown, _) | (_, Ty::Unknown) => Ty::Unknown,
                 (Ty::Int, Ty::Int) => Ty::Int,
-                (Ty::Float, Ty::Float)
-                | (Ty::Int, Ty::Float)
-                | (Ty::Float, Ty::Int) => Ty::Float,
+                (Ty::Float, Ty::Float) | (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => Ty::Float,
                 (Ty::Str, _) | (_, Ty::Str) => Ty::Str,
                 _ => {
                     diags.push(type_mismatch(file, "`+` operands", "i32/f64/str", &l));
@@ -1649,19 +1918,37 @@ fn check_expr(
                 Expr::Div { .. } => "`/`",
                 _ => "`%`",
             };
-            let l = check_expr(file, 
-                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let l = check_expr(
+                file,
+                left,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
-            let r = check_expr(file, 
-                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let r = check_expr(
+                file,
+                right,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             if matches!(e, Expr::Mod { .. }) {
                 // `%` is integers only.
                 let ok = matches!(
                     (&l, &r),
-                    (Ty::Unknown, _)
-                        | (_, Ty::Unknown)
-                        | (Ty::Int, Ty::Int)
+                    (Ty::Unknown, _) | (_, Ty::Unknown) | (Ty::Int, Ty::Int)
                 );
                 if !ok {
                     diags.push(type_mismatch(file, "`%` operands", "i32", &l));
@@ -1671,21 +1958,44 @@ fn check_expr(
             match (&l, &r) {
                 (Ty::Unknown, _) | (_, Ty::Unknown) => Ty::Unknown,
                 (Ty::Int, Ty::Int) => Ty::Int,
-                (Ty::Float, Ty::Float)
-                | (Ty::Int, Ty::Float)
-                | (Ty::Float, Ty::Int) => Ty::Float,
+                (Ty::Float, Ty::Float) | (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => Ty::Float,
                 _ => {
-                    diags.push(type_mismatch(file, &format!("{op} operands"), "i32/f64", &l));
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("{op} operands"),
+                        "i32/f64",
+                        &l,
+                    ));
                     Ty::Unknown
                 }
             }
         }
         Expr::Eq { left, right, .. } | Expr::NotEq { left, right, .. } => {
-            let l = check_expr(file, 
-                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let l = check_expr(
+                file,
+                left,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
-            let r = check_expr(file, 
-                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let r = check_expr(
+                file,
+                right,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             if !equality_ok(&l, &r) {
                 diags.push(type_mismatch(file, "`==` operands", &l.name(), &r));
@@ -1696,11 +2006,31 @@ fn check_expr(
         | Expr::LtEq { left, right, .. }
         | Expr::Gt { left, right, .. }
         | Expr::GtEq { left, right, .. } => {
-            let l = check_expr(file, 
-                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let l = check_expr(
+                file,
+                left,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
-            let r = check_expr(file, 
-                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let r = check_expr(
+                file,
+                right,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             let ok = matches!(
                 (&l, &r),
@@ -1713,16 +2043,41 @@ fn check_expr(
                     | (Ty::Str, Ty::Str)
             );
             if !ok {
-                diags.push(type_mismatch(file, "comparison operands", "i32/f64/str", &l));
+                diags.push(type_mismatch(
+                    file,
+                    "comparison operands",
+                    "i32/f64/str",
+                    &l,
+                ));
             }
             Ty::Bool
         }
         Expr::And { left, right, .. } | Expr::Or { left, right, .. } => {
-            let l = check_expr(file, 
-                left, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let l = check_expr(
+                file,
+                left,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
-            let r = check_expr(file, 
-                right, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let r = check_expr(
+                file,
+                right,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             for (ty, what) in [(&l, "left `&&`/`||`"), (&r, "right `&&`/`||`")] {
                 if !matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown) {
@@ -1732,8 +2087,18 @@ fn check_expr(
             Ty::Bool
         }
         Expr::Not { inner, .. } => {
-            let t = check_expr(file, 
-                inner, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let t = check_expr(
+                file,
+                inner,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             if !matches!(t, Ty::Bool | Ty::Int | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`!` operand", "bool", &t));
@@ -1745,13 +2110,28 @@ fn check_expr(
             // literal alone exceeds the range: check the negated value.
             if let Expr::Int { value, .. } = inner.as_ref() {
                 if *value > 2147483648 {
-                    diags.push(type_mismatch(file, "integer literal", "i32 range", &Ty::Int));
+                    diags.push(type_mismatch(
+                        file,
+                        "integer literal",
+                        "i32 range",
+                        &Ty::Int,
+                    ));
                     return Ty::Unknown;
                 }
                 return Ty::Int;
             }
-            let t = check_expr(file, 
-                inner, caller, sigs, structs, struct_fields, enums, diags, _depth, awaited, defined,
+            let t = check_expr(
+                file,
+                inner,
+                caller,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                _depth,
+                awaited,
+                defined,
             );
             match &t {
                 Ty::Int => Ty::Int,
@@ -1764,12 +2144,13 @@ fn check_expr(
             }
         }
         Expr::EnumCtor {
-            enum_name, variant, args, ..
+            enum_name,
+            variant,
+            args,
+            ..
         } => {
-            let payload: Option<Vec<Ty>> = enums
-                .get(enum_name)
-                .and_then(|vs| vs.get(variant))
-                .cloned();
+            let payload: Option<Vec<Ty>> =
+                enums.get(enum_name).and_then(|vs| vs.get(variant)).cloned();
             match payload {
                 None => {
                     if enums.contains_key(enum_name) {
@@ -1778,16 +2159,26 @@ fn check_expr(
                         diags.push(undefined(file, enum_name));
                     }
                     for a in args {
-                        check_expr(file, 
-                            a, caller, sigs, structs, struct_fields, enums, diags, _depth,
-                            awaited, defined,
+                        check_expr(
+                            file,
+                            a,
+                            caller,
+                            sigs,
+                            structs,
+                            struct_fields,
+                            enums,
+                            diags,
+                            _depth,
+                            awaited,
+                            defined,
                         );
                     }
                     Ty::Unknown
                 }
                 Some(wants) => {
                     if args.len() != wants.len() {
-                        diags.push(enum_payload_arity(file, 
+                        diags.push(enum_payload_arity(
+                            file,
                             enum_name,
                             variant,
                             wants.len(),
@@ -1797,11 +2188,21 @@ fn check_expr(
                     // Fresh substitution per construction site.
                     let mut subst: HashMap<String, (Ty, String)> = HashMap::new();
                     for (idx, (a, want)) in args.iter().zip(wants.iter()).enumerate() {
-                        let got = check_expr(file, 
-                            a, caller, sigs, structs, struct_fields, enums, diags, _depth,
-                            awaited, defined,
+                        let got = check_expr(
+                            file,
+                            a,
+                            caller,
+                            sigs,
+                            structs,
+                            struct_fields,
+                            enums,
+                            diags,
+                            _depth,
+                            awaited,
+                            defined,
                         );
-                        unify_generic(file, 
+                        unify_generic(
+                            file,
                             want,
                             &got,
                             &mut subst,
@@ -1811,9 +2212,18 @@ fn check_expr(
                         );
                     }
                     for a in args.iter().skip(wants.len()) {
-                        check_expr(file, 
-                            a, caller, sigs, structs, struct_fields, enums, diags, _depth,
-                            awaited, defined,
+                        check_expr(
+                            file,
+                            a,
+                            caller,
+                            sigs,
+                            structs,
+                            struct_fields,
+                            enums,
+                            diags,
+                            _depth,
+                            awaited,
+                            defined,
                         );
                     }
                     Ty::Enum(enum_name.clone())
@@ -1822,7 +2232,8 @@ fn check_expr(
         }
         Expr::Match {
             scrutinee, arms, ..
-        } => check_match(file, 
+        } => check_match(
+            file,
             scrutinee,
             arms,
             caller,
@@ -1856,14 +2267,22 @@ fn check_match(
     awaited: &mut Vec<String>,
     defined: &HashMap<String, Ty>,
 ) -> Ty {
-    let s_ty = check_expr(file, 
-        scrutinee, caller, sigs, structs, struct_fields, enums, diags, depth, awaited,
+    let s_ty = check_expr(
+        file,
+        scrutinee,
+        caller,
+        sigs,
+        structs,
+        struct_fields,
+        enums,
+        diags,
+        depth,
+        awaited,
         defined,
     );
     match &s_ty {
         Ty::Enum(ename) => {
-            let variants: HashMap<String, Vec<Ty>> =
-                enums.get(ename).cloned().unwrap_or_default();
+            let variants: HashMap<String, Vec<Ty>> = enums.get(ename).cloned().unwrap_or_default();
             let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut has_wildcard = false;
             let mut result: Option<Ty> = None;
@@ -1876,7 +2295,8 @@ fn check_match(
                     let aname = arm.enum_name.as_deref().unwrap_or("");
                     let avar = arm.variant.as_deref().unwrap_or("");
                     if aname != ename.as_str() {
-                        diags.push(type_mismatch(file, 
+                        diags.push(type_mismatch(
+                            file,
                             "match arm",
                             &format!("variant of `{ename}`"),
                             &Ty::Enum(aname.to_string()),
@@ -1886,7 +2306,8 @@ fn check_match(
                         }
                     } else if let Some(wants) = variants.get(avar) {
                         if arm.bindings.len() != wants.len() {
-                            diags.push(match_binding_arity(file, 
+                            diags.push(match_binding_arity(
+                                file,
                                 ename,
                                 avar,
                                 wants.len(),
@@ -1913,9 +2334,18 @@ fn check_match(
                         }
                     }
                 }
-                let body_ty = check_expr(file, 
-                    &arm.body, caller, sigs, structs, struct_fields, enums, diags, depth,
-                    awaited, &arm_defined,
+                let body_ty = check_expr(
+                    file,
+                    &arm.body,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    depth,
+                    awaited,
+                    &arm_defined,
                 );
                 match &result {
                     None => result = Some(body_ty),
@@ -1997,10 +2427,7 @@ fn check_match(
                 if !arm.is_wildcard() {
                     let aname = arm.enum_name.as_deref().unwrap_or("");
                     let avar = arm.variant.as_deref().unwrap_or("");
-                    let known = enums
-                        .get(aname)
-                        .and_then(|vs| vs.get(avar))
-                        .is_some();
+                    let known = enums.get(aname).and_then(|vs| vs.get(avar)).is_some();
                     if !known {
                         diags.push(undefined(file, &format!("{aname}::{avar}")));
                     }
@@ -2008,9 +2435,18 @@ fn check_match(
                         arm_defined.insert(b.clone(), Ty::Unknown);
                     }
                 }
-                let body_ty = check_expr(file, 
-                    &arm.body, caller, sigs, structs, struct_fields, enums, diags, depth,
-                    awaited, &arm_defined,
+                let body_ty = check_expr(
+                    file,
+                    &arm.body,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    depth,
+                    awaited,
+                    &arm_defined,
                 );
                 if result.is_none() {
                     result = Some(body_ty);
@@ -2025,9 +2461,18 @@ fn check_match(
                 for b in &arm.bindings {
                     arm_defined.insert(b.clone(), Ty::Unknown);
                 }
-                check_expr(file, 
-                    &arm.body, caller, sigs, structs, struct_fields, enums, diags, depth,
-                    awaited, &arm_defined,
+                check_expr(
+                    file,
+                    &arm.body,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    depth,
+                    awaited,
+                    &arm_defined,
                 );
             }
             Ty::Unknown
@@ -2044,10 +2489,7 @@ fn equality_ok(l: &Ty, r: &Ty) -> bool {
     if l == r {
         return true;
     }
-    matches!(
-        (l, r),
-        (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int)
-    )
+    matches!((l, r), (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int))
 }
 
 fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagnostic>) -> Ty {
@@ -2075,7 +2517,12 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
     match func {
         "len" => {
             if !matches!(&args[0], Ty::Array | Ty::Str | Ty::Map | Ty::Unknown) {
-                diags.push(type_mismatch(file, "`len()` argument", "array/str/map", &args[0]));
+                diags.push(type_mismatch(
+                    file,
+                    "`len()` argument",
+                    "array/str/map",
+                    &args[0],
+                ));
             }
             Ty::Int
         }
@@ -2123,7 +2570,8 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "write_file" => {
             for (i, a) in args.iter().enumerate() {
                 if !matches!(a, Ty::Str | Ty::Unknown) {
-                    diags.push(type_mismatch(file, 
+                    diags.push(type_mismatch(
+                        file,
                         &format!("`write_file()` arg {i}"),
                         "str",
                         a,
@@ -2178,7 +2626,12 @@ fn check_method_call(
                 }
             }
             _ => {
-                diags.push(type_mismatch(file, "string method", "known str method", base));
+                diags.push(type_mismatch(
+                    file,
+                    "string method",
+                    "known str method",
+                    base,
+                ));
                 Ty::Unknown
             }
         },
@@ -2200,7 +2653,12 @@ fn check_method_call(
                 }
             }
             _ => {
-                diags.push(type_mismatch(file, "array method", "known array method", base));
+                diags.push(type_mismatch(
+                    file,
+                    "array method",
+                    "known array method",
+                    base,
+                ));
                 Ty::Unknown
             }
         },
@@ -2223,7 +2681,12 @@ fn check_method_call(
             }
         },
         other => {
-            diags.push(type_mismatch(file, "method receiver", "str/array/map", other));
+            diags.push(type_mismatch(
+                file,
+                "method receiver",
+                "str/array/map",
+                other,
+            ));
             Ty::Unknown
         }
     }
@@ -2233,7 +2696,8 @@ fn check_method_call(
 pub fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "len" | "push"
+        "len"
+            | "push"
             | "pop"
             | "range"
             | "str"
@@ -2352,12 +2816,8 @@ fn expr_contains_await(e: &Expr) -> bool {
         Expr::EnumCtor { args, .. } => args.iter().any(expr_contains_await),
         Expr::Match {
             scrutinee, arms, ..
-        } => {
-            expr_contains_await(scrutinee) || arms.iter().any(|a| expr_contains_await(&a.body))
-        }
-        Expr::Index { base, index, .. } => {
-            expr_contains_await(base) || expr_contains_await(index)
-        }
+        } => expr_contains_await(scrutinee) || arms.iter().any(|a| expr_contains_await(&a.body)),
+        Expr::Index { base, index, .. } => expr_contains_await(base) || expr_contains_await(index),
         Expr::Field { base, .. } => expr_contains_await(base),
         Expr::MethodCall { base, args, .. } => {
             expr_contains_await(base) || args.iter().any(expr_contains_await)
@@ -2384,9 +2844,7 @@ fn stmt_uses_tasks(s: &crate::ast::Stmt) -> bool {
                     .map(|b| b.stmts.iter().any(stmt_uses_tasks))
                     .unwrap_or(false)
         }
-        Stmt::While(w) => {
-            expr_contains_await(&w.cond) || w.body.stmts.iter().any(stmt_uses_tasks)
-        }
+        Stmt::While(w) => expr_contains_await(&w.cond) || w.body.stmts.iter().any(stmt_uses_tasks),
         Stmt::ForRange(fr) => fr.body.stmts.iter().any(stmt_uses_tasks),
         Stmt::ForIn(fi) => {
             expr_contains_await(&fi.iter) || fi.body.stmts.iter().any(stmt_uses_tasks)

@@ -57,10 +57,18 @@ pub struct MockBackend {
 
 impl MockBackend {
     pub fn new(responses: Vec<String>) -> Self {
-        Self { responses: std::sync::Mutex::new(responses), calls: std::sync::Mutex::new(0), fail_with: None }
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            calls: std::sync::Mutex::new(0),
+            fail_with: None,
+        }
     }
     pub fn failing(msg: &str) -> Self {
-        Self { responses: std::sync::Mutex::new(vec![]), calls: std::sync::Mutex::new(0), fail_with: Some(msg.to_string()) }
+        Self {
+            responses: std::sync::Mutex::new(vec![]),
+            calls: std::sync::Mutex::new(0),
+            fail_with: Some(msg.to_string()),
+        }
     }
 }
 

@@ -4,6 +4,13 @@
 //! entered, so every child path extends its parent path. No global counter is
 //! used alone as identity; identity is the full path from the root.
 
+/// v2 Echo syntax nodes (`echo fn`, `Echo<T>`, `listen`).
+pub mod echo;
+/// v2 Flow syntax nodes (explicit `dep=` environment).
+pub mod flow;
+/// v2 resonance qualifiers (`?T` / `T` / `!T`).
+pub mod resonance;
+
 use std::fmt;
 
 /// Stable structural identity for every syntax node.

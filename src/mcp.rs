@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use crate::diagnostics::{Diagnostic, Fix, Span};
 use crate::hir::TypedHIR;
 use crate::parser::Parser;
-use crate::repair::scope::{RepairScope, is_declaration_level, plan_scope};
+use crate::repair::scope::{is_declaration_level, plan_scope, RepairScope};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "klang";
@@ -313,18 +313,41 @@ fn json_int(v: &Json) -> Result<i64, String> {
 }
 
 fn diagnostic_from_json(v: &Json) -> Result<Diagnostic, String> {
-    let code = v.get("code").and_then(Json::as_str).ok_or("diagnostic missing code")?;
-    let message = v.get("message").and_then(Json::as_str).ok_or("diagnostic missing message")?;
+    let code = v
+        .get("code")
+        .and_then(Json::as_str)
+        .ok_or("diagnostic missing code")?;
+    let message = v
+        .get("message")
+        .and_then(Json::as_str)
+        .ok_or("diagnostic missing message")?;
     let rule = v.get("rule").and_then(Json::as_str).unwrap_or("");
-    let span = v.get("primary_span").ok_or("diagnostic missing primary_span")?;
-    let file = span.get("file").and_then(Json::as_str).unwrap_or("input.warden");
-    let start = span.get("start").map(json_int).transpose()? .unwrap_or(0).max(0) as usize;
-    let end = span.get("end").map(json_int).transpose()?.unwrap_or(0).max(0) as usize;
+    let span = v
+        .get("primary_span")
+        .ok_or("diagnostic missing primary_span")?;
+    let file = span
+        .get("file")
+        .and_then(Json::as_str)
+        .unwrap_or("input.warden");
+    let start = span
+        .get("start")
+        .map(json_int)
+        .transpose()?
+        .unwrap_or(0)
+        .max(0) as usize;
+    let end = span
+        .get("end")
+        .map(json_int)
+        .transpose()?
+        .unwrap_or(0)
+        .max(0) as usize;
     let fixes = match v.get("fixes") {
         Some(Json::Arr(items)) => items
             .iter()
             .filter_map(|f| f.get("label").and_then(Json::as_str))
-            .map(|l| Fix { label: l.to_string() })
+            .map(|l| Fix {
+                label: l.to_string(),
+            })
             .collect(),
         _ => Vec::new(),
     };
@@ -335,12 +358,31 @@ fn diagnostic_from_json(v: &Json) -> Result<Diagnostic, String> {
             .collect::<Result<Vec<_>, _>>()?,
         _ => Vec::new(),
     };
+    // `expected`/`found` are optional (null or absent on v1 diagnostics).
+    let opt = |key: &str| match v.get(key) {
+        Some(Json::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
     Ok(Diagnostic {
         code: code.to_string(),
-        severity: v.get("severity").and_then(Json::as_str).unwrap_or("error").to_string(),
+        severity: v
+            .get("severity")
+            .and_then(Json::as_str)
+            .unwrap_or("error")
+            .to_string(),
         message: message.to_string(),
-        primary_span: Span { file: file.to_string(), start, end },
-        cause: v.get("cause").and_then(Json::as_str).unwrap_or("").to_string(),
+        primary_span: Span {
+            file: file.to_string(),
+            start,
+            end,
+        },
+        cause: v
+            .get("cause")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string(),
+        expected: opt("expected"),
+        found: opt("found"),
         fixes,
         rule: rule.to_string(),
         related,
@@ -375,7 +417,55 @@ fn diags_json(diags: &[Diagnostic]) -> Json {
 
 /// `klang_check`: source in, diagnostics out (empty array = clean).
 pub fn tool_check(source: &str) -> Json {
-    Json::Obj(vec![("diagnostics".to_string(), diags_json(&check_source(source)))])
+    Json::Obj(vec![(
+        "diagnostics".to_string(),
+        diags_json(&check_source(source)),
+    )])
+}
+
+/// Parse + check one v2 source, returning the diagnostics (empty = clean).
+///
+/// Explicit v2 mode shared by `klang check --lang v2` / `klang check-v2`
+/// and the `klang_v2_check` tool, so CLI and MCP serialize equivalent
+/// diagnostics by construction. Leading-construct dispatch: `flow...`
+/// parses as a Flow declaration, `echo...` as an Echo declaration,
+/// `listen...` as a listen expression; anything else gets the v2 lexer
+/// check (lex errors surface, otherwise clean — file-level v2 programs
+/// arrive after this milestone).
+pub fn v2_check_source(source: &str) -> Vec<Diagnostic> {
+    let trimmed = source.trim_start();
+    if trimmed.starts_with("flow") {
+        return match crate::parser::flow::parse_flow_decl(source, None) {
+            Ok(_) => vec![],
+            Err(d) => vec![d],
+        };
+    }
+    if trimmed.starts_with("echo") {
+        return match crate::parser::echo::parse_echo_decl(source) {
+            Ok(_) => vec![],
+            Err(d) => vec![d],
+        };
+    }
+    if trimmed.starts_with("listen") {
+        return match crate::parser::echo::parse_listen(source) {
+            Ok(_) => vec![],
+            Err(d) => vec![d],
+        };
+    }
+    match crate::lexer::lex(source) {
+        Ok(_) => vec![],
+        Err(e) => vec![Diagnostic::parse_error(
+            "input.v2", e.offset, e.offset, &e.message,
+        )],
+    }
+}
+
+/// `klang_v2_check`: v2 source in, v2 diagnostics out (empty = clean).
+pub fn tool_v2_check(source: &str) -> Json {
+    Json::Obj(vec![(
+        "diagnostics".to_string(),
+        diags_json(&v2_check_source(source)),
+    )])
 }
 
 /// `klang_run`: check first, then execute `entry` (default `main`) with
@@ -445,7 +535,10 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
             Json::Obj(vec![
                 ("ok".to_string(), Json::Bool(false)),
                 ("stage".to_string(), Json::Str("timeout".to_string())),
-                ("timeout_secs".to_string(), Json::Int(RUN_TIMEOUT_SECS as i64)),
+                (
+                    "timeout_secs".to_string(),
+                    Json::Int(RUN_TIMEOUT_SECS as i64),
+                ),
             ]),
         ),
     }
@@ -469,7 +562,10 @@ pub fn tool_fmt(source: &str) -> (bool, Json) {
             false,
             Json::Obj(vec![
                 ("ok".to_string(), Json::Bool(true)),
-                ("formatted".to_string(), Json::Str(crate::fmt::fmt_program(&prog))),
+                (
+                    "formatted".to_string(),
+                    Json::Str(crate::fmt::fmt_program(&prog)),
+                ),
             ]),
         ),
     }
@@ -504,7 +600,8 @@ pub fn tool_scope_plan(source: &str, diags: &[Diagnostic]) -> Json {
             rules.sort();
             rules.dedup();
             let reason = if rules.is_empty() {
-                "diagnostics span multiple scopes or could not be attributed; use whole file".to_string()
+                "diagnostics span multiple scopes or could not be attributed; use whole file"
+                    .to_string()
             } else {
                 format!(
                     "declaration-level diagnostics (rules: {}) always repair at file scope",
@@ -526,10 +623,7 @@ pub fn tool_scope_plan(source: &str, diags: &[Diagnostic]) -> Json {
 fn rpc_error(id: Option<&Json>, code: i64, message: &str) -> String {
     Json::Obj(vec![
         ("jsonrpc".to_string(), Json::Str("2.0".to_string())),
-        (
-            "id".to_string(),
-            id.cloned().unwrap_or(Json::Null),
-        ),
+        ("id".to_string(), id.cloned().unwrap_or(Json::Null)),
         (
             "error".to_string(),
             Json::Obj(vec![
@@ -560,10 +654,10 @@ fn tool_text(result: Json, is_error: bool) -> Json {
     Json::Obj(vec![
         (
             "content".to_string(),
-            Json::Arr(vec![Json::Obj(vec![(
-                "type".to_string(),
-                Json::Str("text".to_string()),
-            ), ("text".to_string(), Json::Str(result.render()))])]),
+            Json::Arr(vec![Json::Obj(vec![
+                ("type".to_string(), Json::Str("text".to_string())),
+                ("text".to_string(), Json::Str(result.render())),
+            ])]),
         ),
         ("isError".to_string(), Json::Bool(is_error)),
     ])
@@ -632,6 +726,12 @@ fn tool_list() -> Json {
                 ],
                 &["source", "diagnostics"],
             ),
+            tool(
+                "klang_v2_check",
+                "Check Klang v2 source (resonance types, flows, echoes). Returns the v2 diagnostics as JSON (empty array means clean).",
+                vec![("source".to_string(), str_prop("Klang v2 source text to check"))],
+                &["source"],
+            ),
         ]),
     )])
 }
@@ -650,6 +750,7 @@ fn call_tool(name: &str, args: &Json) -> Result<(bool, Json), String> {
     };
     match name {
         "klang_check" => Ok((false, tool_check(&source(obj)?))),
+        "klang_v2_check" => Ok((false, tool_v2_check(&source(obj)?))),
         "klang_run" => {
             let entry = obj
                 .get("entry")
@@ -661,9 +762,10 @@ fn call_tool(name: &str, args: &Json) -> Result<(bool, Json), String> {
         "klang_fmt" => Ok(tool_fmt(&source(obj)?)),
         "klang_scope_plan" => {
             let src = source(obj)?;
-            let raw = obj.get("diagnostics").and_then(Json::as_arr).ok_or(
-                "missing required array argument: diagnostics".to_string(),
-            )?;
+            let raw = obj
+                .get("diagnostics")
+                .and_then(Json::as_arr)
+                .ok_or("missing required array argument: diagnostics".to_string())?;
             let mut diags = Vec::with_capacity(raw.len());
             for (i, d) in raw.iter().enumerate() {
                 diags.push(
@@ -692,13 +794,20 @@ pub fn handle_request(line: &str) -> Option<String> {
     }
     let id = id.expect("id present");
     if req.get("jsonrpc").and_then(Json::as_str) != Some("2.0") {
-        return Some(rpc_error(Some(id), -32600, "invalid request: want {\"jsonrpc\": \"2.0\"}"));
+        return Some(rpc_error(
+            Some(id),
+            -32600,
+            "invalid request: want {\"jsonrpc\": \"2.0\"}",
+        ));
     }
     match method {
         "initialize" => Some(rpc_result(
             id,
             Json::Obj(vec![
-                ("protocolVersion".to_string(), Json::Str(PROTOCOL_VERSION.to_string())),
+                (
+                    "protocolVersion".to_string(),
+                    Json::Str(PROTOCOL_VERSION.to_string()),
+                ),
                 (
                     "capabilities".to_string(),
                     Json::Obj(vec![("tools".to_string(), Json::Obj(vec![]))]),
@@ -720,13 +829,15 @@ pub fn handle_request(line: &str) -> Option<String> {
             let args = params.get("arguments").unwrap_or(&Json::Null);
             match call_tool(name, args) {
                 Ok((is_error, result)) => Some(rpc_result(id, tool_text(result, is_error))),
-                Err(e) if e.starts_with("unknown tool:") => {
-                    Some(rpc_error(Some(id), -32602, &e))
-                }
+                Err(e) if e.starts_with("unknown tool:") => Some(rpc_error(Some(id), -32602, &e)),
                 Err(e) => Some(rpc_error(Some(id), -32602, &e)),
             }
         }
-        _ => Some(rpc_error(Some(id), -32601, &format!("method not found: {method}"))),
+        _ => Some(rpc_error(
+            Some(id),
+            -32601,
+            &format!("method not found: {method}"),
+        )),
     }
 }
 
@@ -760,7 +871,8 @@ mod tests {
         let prog = p.parse_program().expect("parses");
         let diags = TypedHIR::check(prog).expect_err("fails");
         for d in &diags {
-            let back = diagnostic_from_json(&parse_json(&d.to_json()).expect("json")).expect("parse");
+            let back =
+                diagnostic_from_json(&parse_json(&d.to_json()).expect("json")).expect("parse");
             assert_eq!(back.code, d.code);
             assert_eq!(back.message, d.message);
             assert_eq!(back.rule, d.rule);

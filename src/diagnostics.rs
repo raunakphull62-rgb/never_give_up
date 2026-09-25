@@ -20,6 +20,9 @@ pub struct Fix {
 /// A single compiler-raised error as a structured object.
 /// `related` carries grouped child failures (`E-TASK-GROUP`); empty
 /// everywhere else, so all existing construction stays valid.
+/// `expected`/`found` carry the two sides of a mismatch when known
+/// (v2 resonance/schema diagnostics); `None` elsewhere, so existing
+/// consumers keep working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: String,
@@ -27,6 +30,8 @@ pub struct Diagnostic {
     pub message: String,
     pub primary_span: Span,
     pub cause: String,
+    pub expected: Option<String>,
+    pub found: Option<String>,
     pub fixes: Vec<Fix>,
     pub rule: String,
     pub related: Vec<Diagnostic>,
@@ -53,6 +58,8 @@ impl Diagnostic {
                 end,
             },
             cause: cause.to_string(),
+            expected: None,
+            found: None,
             fixes: fix_labels
                 .iter()
                 .map(|l| Fix {
@@ -62,6 +69,13 @@ impl Diagnostic {
             rule: rule.to_string(),
             related: Vec::new(),
         }
+    }
+
+    /// Attach the two sides of a mismatch (`want X, got Y`).
+    pub fn with_types(mut self, expected: &str, found: &str) -> Self {
+        self.expected = Some(expected.to_string());
+        self.found = Some(found.to_string());
+        self
     }
 
     /// Task-group failure aggregate: every child failure, none dropped
@@ -77,6 +91,8 @@ impl Diagnostic {
                 end: 0,
             },
             cause: "one or more child tasks failed; siblings were cancelled and joined".to_string(),
+            expected: None,
+            found: None,
             fixes: vec![Fix {
                 label: "fix each related failure".to_string(),
             }],
@@ -86,7 +102,8 @@ impl Diagnostic {
     }
 
     /// Cooperative-cancellation notice: excluded from group aggregates.
-    pub fn cancelled(handle: &str) -> Self {        Self::error(
+    pub fn cancelled(handle: &str) -> Self {
+        Self::error(
             "E-CANCELLED",
             &format!("task `{handle}` was cancelled after a sibling failed"),
             "runtime",
@@ -176,7 +193,10 @@ impl Diagnostic {
             start,
             end,
             "only `pub` declarations are visible across module boundaries",
-            &["mark the declaration `pub`", "use it from inside its own module"],
+            &[
+                "mark the declaration `pub`",
+                "use it from inside its own module",
+            ],
             "modules/visibility",
         )
     }
@@ -219,8 +239,14 @@ impl Diagnostic {
             .map(|f| format!("{{\"label\": \"{}\"}}", Self::esc(&f.label)))
             .collect();
         let related: Vec<String> = self.related.iter().map(|d| d.to_json()).collect();
+        // `expected`/`found` are `null` when the diagnostic carries no
+        // mismatch sides, so old consumers keep parsing the same shape.
+        let opt = |v: &Option<String>| match v {
+            Some(s) => format!("\"{}\"", Self::esc(s)),
+            None => "null".to_string(),
+        };
         format!(
-            "{{\n  \"code\": \"{}\",\n  \"severity\": \"{}\",\n  \"message\": \"{}\",\n  \"primary_span\": {{\"file\": \"{}\", \"start\": {}, \"end\": {}}},\n  \"cause\": \"{}\",\n  \"fixes\": [{}],\n  \"rule\": \"{}\",\n  \"related\": [{}]\n}}",
+            "{{\n  \"code\": \"{}\",\n  \"severity\": \"{}\",\n  \"message\": \"{}\",\n  \"primary_span\": {{\"file\": \"{}\", \"start\": {}, \"end\": {}}},\n  \"cause\": \"{}\",\n  \"expected\": {},\n  \"found\": {},\n  \"fixes\": [{}],\n  \"rule\": \"{}\",\n  \"related\": [{}]\n}}",
             Self::esc(&self.code),
             Self::esc(&self.severity),
             Self::esc(&self.message),
@@ -228,6 +254,8 @@ impl Diagnostic {
             self.primary_span.start,
             self.primary_span.end,
             Self::esc(&self.cause),
+            opt(&self.expected),
+            opt(&self.found),
             fixes.join(", "),
             Self::esc(&self.rule),
             related.join(", "),

@@ -18,10 +18,15 @@
 //! starts_with/ends_with/replace/chars/len`), arrays (`len/push/pop/
 //! contains/join`), maps (`keys/contains/len`).
 
+/// v2 Echo runtime: explicit state, result storage, lossless failures.
+pub mod echo;
+/// v2 heap policy and reference counting (see `gc`).
+pub mod gc;
+
 use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 use std::thread::JoinHandle;
 
@@ -335,7 +340,9 @@ fn exec_function(
         match &ins.op {
             MirOp::Jump { target } | MirOp::JumpIfFalse { target, .. } => {
                 if *target > instrs.len() {
-                    return Err(runtime_err("invalid jump target (unlowered break/continue?)"));
+                    return Err(runtime_err(
+                        "invalid jump target (unlowered break/continue?)",
+                    ));
                 }
             }
             _ => {}
@@ -367,7 +374,10 @@ fn exec_function(
     // Innermost group token, else the inherited one: a spawned task runs
     // in its parent's group, so the parent token is its own.
     let current = |groups: &[(String, CancelToken)], parent: &CancelToken| -> CancelToken {
-        groups.last().map(|(_, t)| t.clone()).unwrap_or_else(|| parent.clone())
+        groups
+            .last()
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| parent.clone())
     };
     while pc < instrs.len() {
         let instr = &instrs[pc];
@@ -817,7 +827,8 @@ fn exec_function(
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "len" | "push"
+        "len"
+            | "push"
             | "pop"
             | "range"
             | "str"

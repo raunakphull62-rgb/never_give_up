@@ -24,7 +24,11 @@ fn esc(s: &str) -> String {
 
 /// Render diagnostics as their existing `to_json()` objects, joined.
 fn diags_json(diags: &[Diagnostic]) -> String {
-    diags.iter().map(|d| d.to_json()).collect::<Vec<_>>().join(", ")
+    diags
+        .iter()
+        .map(|d| d.to_json())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn attempt_json(a: &AttemptLog) -> String {
@@ -43,7 +47,7 @@ fn attempt_json(a: &AttemptLog) -> String {
 }
 
 /// Serialize the full attempt history (what `main.rs` writes to disk).
- pub fn render_log(
+pub fn render_log(
     target: &str,
     success: bool,
     attempts: &[AttemptLog],
@@ -60,7 +64,7 @@ fn attempt_json(a: &AttemptLog) -> String {
 }
 
 /// Write the log file. Returns the path written.
- pub fn write_log(
+pub fn write_log(
     path: &str,
     target: &str,
     success: bool,

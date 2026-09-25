@@ -8,7 +8,7 @@
 //! identical diagnostic shape, identical scope verdicts to the
 //! `repair_gates.rs` suite, end-to-end oracle loop.
 
-use klang::mcp::{Json, handle_request, parse_json};
+use klang::mcp::{handle_request, parse_json, Json};
 
 fn req(id: &str, method: &str, params: Json) -> String {
     Json::Obj(vec![
@@ -35,11 +35,16 @@ fn result_of(resp: &Json) -> &Json {
 
 /// The tool's payload: `result.content[0].text` parsed as JSON.
 fn text_payload(resp: &Json) -> Json {
-    let content = result_of(resp).get("content").and_then(Json::as_arr).expect("content array");
-    let text = content[0].get("text").and_then(Json::as_str).expect("text block");
+    let content = result_of(resp)
+        .get("content")
+        .and_then(Json::as_arr)
+        .expect("content array");
+    let text = content[0]
+        .get("text")
+        .and_then(Json::as_str)
+        .expect("text block");
     parse_json(text).expect("payload parses")
 }
-
 
 fn as_bool(v: &Json) -> Option<bool> {
     match v {
@@ -73,33 +78,67 @@ fn check_diags(source: &str) -> Vec<klang::diagnostics::Diagnostic> {
 #[test]
 fn handshake_and_tool_list() {
     let params = Json::Obj(vec![
-        ("protocolVersion".to_string(), Json::Str("2024-11-05".to_string())),
+        (
+            "protocolVersion".to_string(),
+            Json::Str("2024-11-05".to_string()),
+        ),
         ("capabilities".to_string(), Json::Obj(vec![])),
         (
             "clientInfo".to_string(),
-            Json::Obj(vec![("name".to_string(), Json::Str("fake-harness".to_string()))]),
+            Json::Obj(vec![(
+                "name".to_string(),
+                Json::Str("fake-harness".to_string()),
+            )]),
         ),
     ]);
-    let resp = parse_json(&handle_request(&req("1", "initialize", params)).expect("resp")).expect("json");
+    let resp =
+        parse_json(&handle_request(&req("1", "initialize", params)).expect("resp")).expect("json");
     let result = result_of(&resp);
     assert_eq!(
         result.get("protocolVersion").and_then(Json::as_str),
         Some("2024-11-05")
     );
     assert_eq!(
-        result.get("serverInfo").and_then(|s| s.get("name")).and_then(Json::as_str),
+        result
+            .get("serverInfo")
+            .and_then(|s| s.get("name"))
+            .and_then(Json::as_str),
         Some("klang")
     );
     // notifications/initialized gets silence.
-    assert!(handle_request("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}").is_none());
+    assert!(
+        handle_request("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}").is_none()
+    );
 
-    let resp = parse_json(&handle_request(&req("2", "tools/list", Json::Obj(vec![]))).expect("resp"))
-        .expect("json");
-    let tools = result_of(&resp).get("tools").and_then(Json::as_arr).expect("tools");
-    let names: Vec<&str> = tools.iter().filter_map(|t| t.get("name")).filter_map(Json::as_str).collect();
-    assert_eq!(names, vec!["klang_check", "klang_run", "klang_fmt", "klang_scope_plan"]);
+    let resp =
+        parse_json(&handle_request(&req("2", "tools/list", Json::Obj(vec![]))).expect("resp"))
+            .expect("json");
+    let tools = result_of(&resp)
+        .get("tools")
+        .and_then(Json::as_arr)
+        .expect("tools");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name"))
+        .filter_map(Json::as_str)
+        .collect();
+    // Phase 11 migration (documented): `klang_v2_check` joined the tool
+    // list; v1 tools keep their names and shapes.
+    assert_eq!(
+        names,
+        vec![
+            "klang_check",
+            "klang_run",
+            "klang_fmt",
+            "klang_scope_plan",
+            "klang_v2_check"
+        ]
+    );
     for t in tools {
-        assert!(t.get("description").and_then(Json::as_str).is_some(), "{t:?}");
+        assert!(
+            t.get("description").and_then(Json::as_str).is_some(),
+            "{t:?}"
+        );
         assert!(t.get("inputSchema").is_some(), "{t:?}");
     }
 }
@@ -144,8 +183,14 @@ fn scope_plan_matches_planner_verdicts() {
     for (src, want_scope, want_fns) in cases {
         let check_resp = call("c", "klang_check", src_arg(src));
         let check_payload = text_payload(&check_resp);
-        let diags = check_payload.get("diagnostics").expect("diagnostics").clone();
-        assert!(!diags.as_arr().expect("array").is_empty(), "must fail check: {src:?}");
+        let diags = check_payload
+            .get("diagnostics")
+            .expect("diagnostics")
+            .clone();
+        assert!(
+            !diags.as_arr().expect("array").is_empty(),
+            "must fail check: {src:?}"
+        );
         let args = Json::Obj(vec![
             ("source".to_string(), Json::Str(src.to_string())),
             ("diagnostics".to_string(), diags),
@@ -180,16 +225,23 @@ fn scope_plan_matches_planner_verdicts() {
 fn scope_plan_declaration_level_goes_file_with_reason() {
     // Declaration-level diagnostics always repair at file scope (F5),
     // with the reason naming the rule.
-    let src = "mod m { fn secret() -> i32 { return 1 } }\nfn main() -> i32 { return m::secret() }\n";
+    let src =
+        "mod m { fn secret() -> i32 { return 1 } }\nfn main() -> i32 { return m::secret() }\n";
     let check_resp = call("c", "klang_check", src_arg(src));
-    let diags = text_payload(&check_resp).get("diagnostics").expect("diags").clone();
+    let diags = text_payload(&check_resp)
+        .get("diagnostics")
+        .expect("diags")
+        .clone();
     let args = Json::Obj(vec![
         ("source".to_string(), Json::Str(src.to_string())),
         ("diagnostics".to_string(), diags),
     ]);
     let payload = text_payload(&call("s", "klang_scope_plan", args));
     assert_eq!(payload.get("scope").and_then(Json::as_str), Some("file"));
-    let reason = payload.get("reason").and_then(Json::as_str).expect("reason");
+    let reason = payload
+        .get("reason")
+        .and_then(Json::as_str)
+        .expect("reason");
     assert!(reason.contains("modules/visibility"), "{reason}");
 }
 
@@ -203,7 +255,10 @@ fn run_tool_executes_and_reports() {
             Json::Str("fn main() -> i32 { print(40 + 2) return 42 }".to_string()),
         )]),
     );
-    assert_eq!(result_of(&resp).get("isError").and_then(as_bool), Some(false));
+    assert_eq!(
+        result_of(&resp).get("isError").and_then(as_bool),
+        Some(false)
+    );
     let payload = text_payload(&resp);
     assert_eq!(payload.get("ok").and_then(as_bool), Some(true));
     let out: Vec<&str> = payload
@@ -220,17 +275,32 @@ fn run_tool_executes_and_reports() {
 #[test]
 fn run_tool_checks_first_and_surfaces_runtime_errors() {
     // Check failure: no execution, diagnostics back, isError set.
-    let resp = call("r", "klang_run", src_arg("fn main() -> i32 { return nope }"));
+    let resp = call(
+        "r",
+        "klang_run",
+        src_arg("fn main() -> i32 { return nope }"),
+    );
     let payload = text_payload(&resp);
     assert_eq!(payload.get("ok").and_then(as_bool), Some(false));
     assert_eq!(payload.get("stage").and_then(Json::as_str), Some("check"));
-    assert!(!payload.get("diagnostics").and_then(Json::as_arr).expect("diags").is_empty());
+    assert!(!payload
+        .get("diagnostics")
+        .and_then(Json::as_arr)
+        .expect("diags")
+        .is_empty());
     // Runtime failure: stage + verbatim diagnostic object.
-    let resp = call("r", "klang_run", src_arg("fn main() -> i32 { return 1 / 0 }"));
+    let resp = call(
+        "r",
+        "klang_run",
+        src_arg("fn main() -> i32 { return 1 / 0 }"),
+    );
     let payload = text_payload(&resp);
     assert_eq!(payload.get("stage").and_then(Json::as_str), Some("run"));
     assert_eq!(
-        payload.get("error").and_then(|e| e.get("code")).and_then(Json::as_str),
+        payload
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(Json::as_str),
         Some("E-RUNTIME")
     );
 }
@@ -240,7 +310,10 @@ fn fmt_tool_round_trips_and_reports_parse_errors() {
     let resp = call("f", "klang_fmt", src_arg("fn main() -> i32 { return 1+2 }"));
     let payload = text_payload(&resp);
     assert_eq!(payload.get("ok").and_then(as_bool), Some(true));
-    let formatted = payload.get("formatted").and_then(Json::as_str).expect("formatted");
+    let formatted = payload
+        .get("formatted")
+        .and_then(Json::as_str)
+        .expect("formatted");
     assert!(formatted.contains("return (1 + 2)"), "{formatted}");
     // Re-checks clean (formatter output is valid input).
     assert!(check_diags(formatted).is_empty());
@@ -249,7 +322,10 @@ fn fmt_tool_round_trips_and_reports_parse_errors() {
     let payload = text_payload(&resp);
     assert_eq!(payload.get("ok").and_then(as_bool), Some(false));
     assert_eq!(
-        payload.get("diagnostic").and_then(|e| e.get("code")).and_then(Json::as_str),
+        payload
+            .get("diagnostic")
+            .and_then(|e| e.get("code"))
+            .and_then(Json::as_str),
         Some("E-PARSE")
     );
 }
@@ -265,13 +341,25 @@ fn protocol_errors_are_json_rpc_shaped() {
     assert_eq!(err(resp).get("code").and_then(as_int), Some(-32602));
     // Malformed diagnostics array for scope planning.
     let bad = Json::Obj(vec![
-        ("source".to_string(), Json::Str("fn main() -> i32 { return 1 }".to_string())),
-        ("diagnostics".to_string(), Json::Arr(vec![Json::Obj(vec![]) ])),
+        (
+            "source".to_string(),
+            Json::Str("fn main() -> i32 { return 1 }".to_string()),
+        ),
+        (
+            "diagnostics".to_string(),
+            Json::Arr(vec![Json::Obj(vec![])]),
+        ),
     ]);
     let resp = call("e", "klang_scope_plan", bad);
-    assert!(err(resp).get("message").and_then(Json::as_str).expect("msg").contains("diagnostics[0]"));
+    assert!(err(resp)
+        .get("message")
+        .and_then(Json::as_str)
+        .expect("msg")
+        .contains("diagnostics[0]"));
     // Unknown method.
-    let resp = parse_json(&handle_request(&req("e", "bogus/method", Json::Obj(vec![]))).expect("resp")).expect("json");
+    let resp =
+        parse_json(&handle_request(&req("e", "bogus/method", Json::Obj(vec![]))).expect("resp"))
+            .expect("json");
     assert_eq!(err(resp).get("code").and_then(as_int), Some(-32601));
     // Garbage line.
     let resp = parse_json(&handle_request("definitely not json").expect("resp")).expect("json");
@@ -288,7 +376,10 @@ fn fake_harness_oracle_loop_converges_through_mcp() {
 
     // 1. check: exactly one E-ARITY diagnostic.
     let diags_payload = text_payload(&call("h1", "klang_check", src_arg(broken)));
-    let diags = diags_payload.get("diagnostics").and_then(Json::as_arr).expect("diags");
+    let diags = diags_payload
+        .get("diagnostics")
+        .and_then(Json::as_arr)
+        .expect("diags");
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].get("code").and_then(Json::as_str), Some("E-ARITY"));
 
@@ -301,7 +392,10 @@ fn fake_harness_oracle_loop_converges_through_mcp() {
             ("diagnostics".to_string(), Json::Arr(diags.clone())),
         ]),
     ));
-    assert_eq!(scope_payload.get("scope").and_then(Json::as_str), Some("function"));
+    assert_eq!(
+        scope_payload.get("scope").and_then(Json::as_str),
+        Some("function")
+    );
     let fns: Vec<&str> = scope_payload
         .get("functions")
         .and_then(Json::as_arr)
@@ -313,7 +407,11 @@ fn fake_harness_oracle_loop_converges_through_mcp() {
 
     // 3. harness "edits" (oracle fix), re-check is clean, run gives 3.
     let clean = text_payload(&call("h3", "klang_check", src_arg(fixed)));
-    assert!(clean.get("diagnostics").and_then(Json::as_arr).expect("diags").is_empty());
+    assert!(clean
+        .get("diagnostics")
+        .and_then(Json::as_arr)
+        .expect("diags")
+        .is_empty());
     let run = text_payload(&call("h4", "klang_run", src_arg(fixed)));
     assert_eq!(run.get("return_value").and_then(as_int), Some(3));
 }

@@ -5,10 +5,10 @@
 //! Phase 1 (next): lower the int-only MIR subset through the same
 //! `JITModule`/`FunctionBuilder` path, behind `--backend jit`.
 
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 
 /// Phase-0 probe: JIT-compile `add(a, b) = a + b`, run it on (7, 35).
 pub fn probe_add() -> Result<i64, String> {
@@ -103,10 +103,7 @@ pub fn run_jit(mir: &MirModule, entry: &str, args: &[i64]) -> Result<(i64, Vec<S
 
     let mut builder = JITBuilder::new(cranelift_module::default_libcall_names())
         .map_err(|e| format!("jit builder: {e}"))?;
-    builder.symbol(
-        "klang_print_i64",
-        host_print_i64 as *const u8,
-    );
+    builder.symbol("klang_print_i64", host_print_i64 as *const u8);
     let mut module = JITModule::new(builder);
 
     let mut print_sig = module.make_signature();
@@ -183,12 +180,10 @@ pub fn run_jit(mir: &MirModule, entry: &str, args: &[i64]) -> Result<(i64, Vec<S
         let f = unsafe { std::mem::transmute::<*const u8, fn(i64, i64) -> i64>(code) };
         f(args[0], args[1])
     } else if n_params == 3 {
-        let f =
-            unsafe { std::mem::transmute::<*const u8, fn(i64, i64, i64) -> i64>(code) };
+        let f = unsafe { std::mem::transmute::<*const u8, fn(i64, i64, i64) -> i64>(code) };
         f(args[0], args[1], args[2])
     } else if n_params == 4 {
-        let f =
-            unsafe { std::mem::transmute::<*const u8, fn(i64, i64, i64, i64) -> i64>(code) };
+        let f = unsafe { std::mem::transmute::<*const u8, fn(i64, i64, i64, i64) -> i64>(code) };
         f(args[0], args[1], args[2], args[3])
     } else {
         return Err("jit phase-1: entry arity > 4 unsupported".to_string());
@@ -368,7 +363,13 @@ fn compile_func(
 
     // Jump targets may equal `n` (past-the-end = halt, e.g. `if` without
     // `else`); those map to the `end` block returning `last_var`.
-    let target_block = |t: usize| -> Block { if t < n { blocks[t] } else { end } };
+    let target_block = |t: usize| -> Block {
+        if t < n {
+            blocks[t]
+        } else {
+            end
+        }
+    };
     for (i, ins) in f.instrs.iter().enumerate() {
         fb.switch_to_block(blocks[i]);
         if i == 0 {
@@ -472,10 +473,16 @@ fn compile_func(
                     ));
                 }
                 let callee = ids.get(func).ok_or_else(|| {
-                    format!("jit phase-1: unknown function `{func}` called from `{}`", f.name)
+                    format!(
+                        "jit phase-1: unknown function `{func}` called from `{}`",
+                        f.name
+                    )
                 })?;
                 let callee_fn = mir.find(func).ok_or_else(|| {
-                    format!("jit phase-1: unknown function `{func}` called from `{}`", f.name)
+                    format!(
+                        "jit phase-1: unknown function `{func}` called from `{}`",
+                        f.name
+                    )
                 })?;
                 let func_ref = module.declare_func_in_func(*callee, fb.func);
                 // Missing args read 0, extras ignored (mirrors zip in calls).
@@ -502,7 +509,8 @@ fn compile_func(
                 let c = use_v!(cond);
                 let zero = fb.ins().iconst(types::I64, 0);
                 let nz = fb.ins().icmp(IntCC::NotEqual, c, zero);
-                fb.ins().brif(nz, fallthrough, &[], target_block(*target), &[]);
+                fb.ins()
+                    .brif(nz, fallthrough, &[], target_block(*target), &[]);
                 continue;
             }
             MirOp::Jump { target } => {

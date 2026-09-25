@@ -1,0 +1,9 @@
+{
+  "name": "klang-win32-x64",
+  "version": "0.1.0",
+  "description": "Prebuilt klang binary for win32-x64",
+  "license": "MIT",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

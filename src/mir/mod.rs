@@ -4,6 +4,14 @@
 //! task-group regions and jump-based `if`/`while`/`for`. Every MIR item keeps
 //! its source `NodeId` as origin so diagnostics and later derives can map back.
 
+//! v2 Flow lowering (explicit environments) lives in [`flow_lowering`];
+//! v2 Echo state machines arrive in Phase 9.
+
+/// v2 Echo lowering (explicit state machines).
+pub mod echo_lowering;
+/// v2 Flow lowering (explicit `dep=` environments).
+pub mod flow_lowering;
+
 use crate::ast::{AssignTarget, Expr, NodeId, Program, Stmt};
 
 /// One MIR instruction with source origin.
@@ -340,7 +348,10 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
             dst
         }
         Expr::EnumCtor {
-            enum_name, variant, args, ..
+            enum_name,
+            variant,
+            args,
+            ..
         } => {
             // Enums reuse the struct runtime value: the tag lives in a
             // hidden `__variant` string field, payloads in positional

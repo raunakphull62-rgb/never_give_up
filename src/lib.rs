@@ -1,5 +1,6 @@
 //! Klang compiler core: AST, parser, typed HIR, diagnostics + full foundation.
 
+pub mod ai_safety;
 pub mod ast;
 pub mod codegen;
 pub mod contracts;
@@ -9,6 +10,7 @@ pub mod diagnostics;
 pub mod fmt;
 pub mod hir;
 pub mod jit;
+pub mod lexer;
 pub mod lsp;
 pub mod mcp;
 pub mod mir;
@@ -18,6 +20,8 @@ pub mod package;
 pub mod parser;
 pub mod repair;
 pub mod runtime;
+pub mod sema;
+pub mod stdlib;
 
 pub use ast::{Block, Effect, Expr, FunctionDecl, NodeId, Param, Program, Stmt};
 pub use diagnostics::{Diagnostic, Fix, Span};

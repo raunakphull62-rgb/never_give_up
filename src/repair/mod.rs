@@ -27,7 +27,7 @@ pub mod splice;
 
 pub use backend::{MockBackend, ModelBackend, ModelError};
 pub use config::{RepairCliOverrides, RepairConfig, RepairFileConfig, Scope};
-pub use driver::{AttemptLog, RepairOutcome, run_repair};
+pub use driver::{run_repair, AttemptLog, RepairOutcome};
 pub use log::write_log;
 pub use prompt::{build_system_prompt, build_user_prompt};
 pub use scope::plan_scope;

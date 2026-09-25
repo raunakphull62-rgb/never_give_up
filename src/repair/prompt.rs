@@ -78,8 +78,23 @@ mod tests {
     use super::*;
     #[test]
     fn prompt_contains_json_and_hints() {
-        let d = Diagnostic::error("E-TASK-CANCEL", "leak", "f", 0, 1, "c", &["await task before leaving scope"], "r");
-        let u = build_user_prompt("function bad", "fn bad() -> i32 { return 1 }", &[d], &[], None);
+        let d = Diagnostic::error(
+            "E-TASK-CANCEL",
+            "leak",
+            "f",
+            0,
+            1,
+            "c",
+            &["await task before leaving scope"],
+            "r",
+        );
+        let u = build_user_prompt(
+            "function bad",
+            "fn bad() -> i32 { return 1 }",
+            &[d],
+            &[],
+            None,
+        );
         assert!(u.contains("E-TASK-CANCEL"), "{u}");
         assert!(u.contains("await task before leaving scope"), "{u}");
         assert!(u.contains("ONLY the corrected"), "{u}");

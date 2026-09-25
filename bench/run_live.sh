@@ -16,7 +16,7 @@ BIN=""
 # NOTE: `[ -x ]` is unreliable for root on noexec mounts (it reports true
 # for target/debug/klang and exec still fails), so every candidate is
 # probe-executed, not just permission-checked.
-for cand in "$CARGO_TARGET_DIR/debug/klang" "${KLANG_BIN:-}" ./target/debug/klang; do
+for cand in "${CARGO_TARGET_DIR:-}/debug/klang" "${KLANG_BIN:-}" ./target/debug/klang; do
   [ -n "$cand" ] || continue
   if [ -x "$cand" ] && printf '' | "$cand" mcp >/dev/null 2>&1; then
     BIN="$cand"

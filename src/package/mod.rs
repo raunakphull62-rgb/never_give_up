@@ -3,6 +3,12 @@
 //! Single blessed CLI: `klang build/run/test/fmt/check/doc`.
 //! One manifest as source of truth + content-addressed lockfile.
 
+//! v2 manifest keys (`klang`, `schemas`, `repair`) live in [`manifest`];
+//! they parse offline and default so v1 files keep working.
+
+/// v2 `klang.toml` keys (offline; no registry).
+pub mod manifest;
+
 /// Parsed `klang.toml` manifest (minimal v0.1 shape + local path deps).
 ///
 /// ```toml
@@ -84,8 +90,7 @@ fn strip_inline_comment(line: &str) -> &str {
 fn parse_toml_value(v: &str) -> String {
     let v = v.trim();
     if v.len() >= 2
-        && ((v.starts_with('"') && v.ends_with('"'))
-            || (v.starts_with('\'') && v.ends_with('\'')))
+        && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')))
     {
         v[1..v.len() - 1].to_string()
     } else {

@@ -46,7 +46,9 @@ pub fn emit_listing(module: &MirModule) -> String {
                 MirOp::ConstFloat { into, bits } => {
                     format!("  {into} = const_float {}", f64::from_bits(*bits))
                 }
-                MirOp::ConstStr { into, value } => format!("  {into} = const_str \"{}\"", esc(value)),
+                MirOp::ConstStr { into, value } => {
+                    format!("  {into} = const_str \"{}\"", esc(value))
+                }
                 MirOp::Copy { into, from } => format!("  {into} = copy {from}"),
                 MirOp::Add { into, left, right } => format!("  {into} = add {left} {right}"),
                 MirOp::Sub { into, left, right } => format!("  {into} = sub {left} {right}"),

@@ -145,6 +145,7 @@ offsets (`source.as_bytes()`, `n = bytes.len()`).
 ## 5. Toolchain
 
 ```sh
+cargo run -- --version          # print version (klang 0.1.0) and exit
 cargo run -- check <file>        # parse + type-check (JSON diagnostics)
 cargo run -- fmt <file> [--write]# canonical format (idempotent)
 cargo run -- run <file> [entry]  # parse + check + run (entry default main)

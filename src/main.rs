@@ -82,6 +82,10 @@ fn real_main() {
     // Backcompat: `cargo run -- <file.klang> [entry]` == `run`.
     // No args = full gate demo below.
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("klang {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.len() > 1 {
         run_file_mode(&args[1..]);
         return;
@@ -443,17 +447,55 @@ fn run_file_mode(args: &[String]) {
     // Split leading subcommand from file args. Backcompat: a bare `<file>`
     // first arg means `run <file> [entry]`.
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
-        Some("check") | Some("fmt") | Some("run") | Some("build") | Some("repair") | Some("mcp") => {
-            (args[0].as_str(), &args[1..])
-        }
+        Some("check") | Some("check-v2") | Some("fmt") | Some("run") | Some("build")
+        | Some("repair") | Some("mcp") => (args[0].as_str(), &args[1..]),
         _ => ("run", args),
     };
     if cmd == "mcp" {
         run_mcp_mode();
         return;
     }
+    // Explicit v2 mode: `check --lang v2 <file>` or `check-v2 <file>`.
+    // v1 files never silently use v2 semantics: the mode is always chosen
+    // by the caller, never inferred.
+    if cmd == "check-v2" {
+        if rest.is_empty() {
+            eprintln!("usage: check-v2 <file.v2>");
+            std::process::exit(2);
+        }
+        run_v2_check_mode(&rest[0]);
+        return;
+    }
+    if cmd == "check" {
+        let (is_v2, files) = split_check_lang(rest);
+        if is_v2 {
+            if files.is_empty() {
+                eprintln!("usage: check --lang v2 <file.v2>");
+                std::process::exit(2);
+            }
+            run_v2_check_mode(&files[0]);
+            return;
+        }
+        if files.len() != rest.len() {
+            // Only `--lang v1` (or similar) flags were present: same as a
+            // plain check on the file. Recurse once on flag-free args.
+            if files.is_empty() {
+                eprintln!(
+                    "usage: <check|fmt|run|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
+                );
+                std::process::exit(2);
+            }
+            let mut owned = vec!["check".to_string()];
+            owned.extend(files);
+            run_file_mode(&owned);
+            return;
+        }
+    }
     if rest.is_empty() {
-        eprintln!("usage: <check|fmt|run|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]");
+        eprintln!(
+            "usage: <check|fmt|run|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
+        );
+        eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -755,8 +797,56 @@ fn run_mcp_mode() {
 }
 
 /// Directory containing `path` (for `klang.toml` lookup).
-fn target_dir(path: &str) -> std::path::PathBuf {    std::path::Path::new(path)
+fn target_dir(path: &str) -> std::path::PathBuf {
+    std::path::Path::new(path)
         .parent()
         .map(|d| d.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// `check --lang v2 <file>`: split `(is_v2, files)` out of `rest`.
+///
+/// Only `v2` switches modes; `--lang v1` (or no flag) stays on the v1
+/// path with flags stripped. Unknown `--lang` values are ignored here and
+/// surface as file errors downstream, never as silent mode switches.
+fn split_check_lang(rest: &[String]) -> (bool, Vec<String>) {
+    let mut lang: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--lang" {
+            match it.next() {
+                Some(v) => lang = Some(v.clone()),
+                None => {
+                    eprintln!("check: --lang needs a value (want v1|v2)");
+                    std::process::exit(2);
+                }
+            }
+        } else if let Some(v) = a.strip_prefix("--lang=") {
+            lang = Some(v.to_string());
+        } else {
+            files.push(a.clone());
+        }
+    }
+    (lang.as_deref() == Some("v2"), files)
+}
+
+/// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
+/// shared [`klang::mcp::v2_check_source`] front end and print the same
+/// `Diagnostic::to_json()` objects the MCP tool embeds.
+fn run_v2_check_mode(path: &str) {
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    match klang::with_deep_stack(move || klang::mcp::v2_check_source(&src)) {
+        diags if diags.is_empty() => println!("check: OK (0 diagnostics)"),
+        diags => {
+            println!("check: FAIL ({} diagnostics)", diags.len());
+            for d in &diags {
+                println!("{}", d.to_json());
+            }
+            std::process::exit(1);
+        }
+    }
 }

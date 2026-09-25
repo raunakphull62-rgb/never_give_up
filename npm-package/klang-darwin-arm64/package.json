@@ -1,0 +1,9 @@
+{
+  "name": "klang-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Prebuilt klang binary for darwin-arm64 (Apple Silicon)",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "klang-linux-arm64",
+  "version": "0.1.0",
+  "description": "Prebuilt klang binary for linux-arm64 (musl static, Termux-compatible)",
+  "license": "MIT",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}

@@ -129,8 +129,7 @@ fn strip_comment(line: &str) -> &str {
 fn toml_value(v: &str) -> String {
     let v = v.trim();
     if v.len() >= 2
-        && ((v.starts_with('"') && v.ends_with('"'))
-            || (v.starts_with('\'') && v.ends_with('\'')))
+        && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')))
     {
         return v[1..v.len() - 1].to_string();
     }
@@ -156,7 +155,8 @@ mod tests {
     }
     #[test]
     fn defaults_apply_when_nothing_configured() {
-        let cfg = RepairConfig::resolve(&RepairCliOverrides::default(), &RepairFileConfig::default());
+        let cfg =
+            RepairConfig::resolve(&RepairCliOverrides::default(), &RepairFileConfig::default());
         assert_eq!(cfg.max_iters, RepairConfig::DEFAULT_ITERS);
         assert_eq!(cfg.scope, Scope::Function);
     }
