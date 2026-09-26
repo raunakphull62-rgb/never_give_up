@@ -2498,7 +2498,7 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
         "str" | "int" | "float" => 1,
         "assert" => 1,
-        "read_file" | "exists" | "env" => 1,
+        "read_file" | "exists" | "env" | "remove_file" => 1,
         "regex_is_match" | "regex_find" => 2,
         _ => return Ty::Unknown,
     };
@@ -2599,6 +2599,12 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
                 diags.push(type_mismatch(file, "`exists()` path", "str", &args[0]));
             }
             Ty::Bool
+        }
+        "remove_file" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`remove_file()` path", "str", &args[0]));
+            }
+            Ty::Int
         }
         "env" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
@@ -2763,6 +2769,7 @@ pub fn is_builtin(name: &str) -> bool {
             | "write_file"
             | "append_file"
             | "exists"
+            | "remove_file"
             | "env"
             | "run_process"
             | "regex_is_match"

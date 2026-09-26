@@ -1,9 +1,9 @@
 //! Klang OS-interop file boundary (STDLIB-OSIO-1).
 //!
-//! `file::read/write/append/exists` in the PRD map onto Klang's existing
-//! flat builtins `read_file` / `write_file` / `append_file` / `exists`
-//! (see `hir::is_builtin` and `runtime::exec_builtin`). Flat names are
-//! deliberate: Klang's `::` call syntax only resolves through declared
+//! `file::read/write/append/exists/remove` in the PRD map onto Klang's
+//! existing flat builtins `read_file` / `write_file` / `append_file` /
+//! `exists` / `remove_file` (see `hir::is_builtin` and
+//! `runtime::exec_builtin`). Flat names are deliberate: Klang's `::` call syntax only resolves through declared
 //! `mod` blocks (`modules::rewrite_ctor` converts `m::f(args)` into a
 //! `Call` only when `m` is a program module), so a namespaced
 //! `file::read(...)` spelling would parse as an enum constructor and
@@ -109,4 +109,12 @@ pub fn append(path: &str, content: &str) -> Result<usize, Diagnostic> {
 /// Check whether `path` exists. Never fails (mirrors `exists()`).
 pub fn exists(path: &str) -> bool {
     std::path::Path::new(path).exists()
+}
+
+/// Delete the file at `path`. Returns `()` on success; missing files map
+/// to `E-IO-NOT-FOUND` and permission failures to `E-IO-PERMISSION` via
+/// the shared [`map_io_error`] helper (same convention as
+/// read/write/append). Directory removal is out of scope.
+pub fn remove(path: &str) -> Result<(), Diagnostic> {
+    std::fs::remove_file(path).map_err(|e| map_io_error("remove_file", path, &e))
 }

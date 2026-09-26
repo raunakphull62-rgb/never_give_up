@@ -126,6 +126,7 @@ Free: `len`, `push`, `pop`, `range`, `str`, `int`, `float`, `keys`,
 | `write_file(p: str, c: str) -> i32` | checked | writes, returns byte count |
 | `append_file(p: str, c: str) -> i32` | checked | appends (creating when absent), returns byte count appended |
 | `exists(p: str) -> bool` | checked | path exists |
+| `remove_file(p: str) -> i32` | checked | deletes the file, `E-IO-NOT-FOUND` if missing |
 | `env(name: str) -> str` | checked | env var or `""` |
 | `run_process(cmd: str, args: array) -> map` | checked | argv-array spawn (no shell); map has `stdout: str`, `stderr: str`, `exit_code: i32`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
 | `regex_is_match(pat: str, text: str) -> bool` | checked | true when the pattern matches; bad pattern is `E-REGEX-INVALID-PATTERN` |

@@ -9,9 +9,10 @@ pub mod verify;
 /// Network boundary: `net::echo_get` behind a mockable transport.
 pub mod net;
 
-/// OS-interop file boundary: `read`/`write`/`append`/`exists` with
-/// `E-IO-*` diagnostics (STDLIB-OSIO-1). Wired into the interpreter as
-/// the flat builtins `read_file`/`write_file`/`append_file`/`exists`.
+/// OS-interop file boundary: `read`/`write`/`append`/`exists`/`remove`
+/// with `E-IO-*` diagnostics (STDLIB-OSIO-1, remove in follow-up). Wired
+/// into the interpreter as the flat builtins
+/// `read_file`/`write_file`/`append_file`/`exists`/`remove_file`.
 pub mod file;
 
 /// OS-interop process boundary: `run(cmd, args)` with `E-PROCESS-*`

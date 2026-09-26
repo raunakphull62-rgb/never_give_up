@@ -160,3 +160,38 @@ fn osio_file_append_arg_types_checked() {
     let err = klang::hir::TypedHIR::check(prog).expect_err("must fail");
     assert!(err.iter().any(|d| d.code == "E-ARITY"));
 }
+
+#[test]
+fn osio_file_remove_existing_then_exists_false() {
+    let path = tmp_path("remove_existing.txt");
+    std::fs::write(&path, "to delete").unwrap();
+    let src = format!(
+        "fn main() -> i32 {{ remove_file(\"{path}\") if exists(\"{path}\") {{ return 1 }} return 42 }}"
+    );
+    let (v, _) = run_src(&src, "main").expect("runs");
+    assert_eq!(v, 42);
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "file must actually be gone from the filesystem"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn osio_file_remove_missing_is_not_found() {
+    let path = tmp_path("remove_missing_xyz_12345.txt");
+    let _ = std::fs::remove_file(&path);
+    let src = format!("fn main() -> i32 {{ remove_file(\"{path}\") return 0 }}");
+    let err = run_src(&src, "main").expect_err("must fail");
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
+}
+
+#[test]
+fn osio_file_remove_unsafe_absolute_path_stays_runtime_error() {
+    // Same capability guard as reads/writes (`reject_unsafe_path`):
+    // absolute paths outside the temp dir are E-RUNTIME, not E-IO-*.
+    let src =
+        "fn main() -> i32 { remove_file(\"/no/such/klang-file-xyz-outside-tmp\") return 0 }";
+    let err = run_src(src, "main").expect_err("must fail");
+    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+}

@@ -842,6 +842,7 @@ fn is_builtin(name: &str) -> bool {
             | "write_file"
             | "append_file"
             | "exists"
+            | "remove_file"
             | "env"
             | "run_process"
             | "regex_is_match"
@@ -1006,6 +1007,14 @@ fn exec_builtin(
             let path = get(&args[0]).render();
             reject_unsafe_path(&path)?;
             Ok(Value::Int(i64::from(std::path::Path::new(&path).exists())))
+        }
+        "remove_file" => {
+            if args.len() != 1 {
+                return Err(runtime_err("remove_file() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::file::remove(&path).map(|()| Value::Int(1))
         }
         "env" => {
             if args.len() != 1 {

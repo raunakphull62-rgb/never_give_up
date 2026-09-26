@@ -1918,3 +1918,100 @@ Phase 4 close, matching.
 - AC8: this entry.
 - AC1/AC3/AC4: not this phase — no file/regex/env code was added or
   claimed here (file surface untouched since STDLIB-OSIO-1).
+
+---
+
+# STDLIB-OSIO-6 — file::remove follow-up: `remove_file` (code-verified)
+
+Note on numbering: the task prompt asked to log this as `STDLIB-OSIO-4`,
+but `STDLIB-OSIO-4` (env vars + integration) and `STDLIB-OSIO-5` (docs)
+already exist above, so this is logged as the next free number,
+`STDLIB-OSIO-6`, to avoid a duplicate heading. No other file operations
+(rename, copy, directory listing, etc.) were added — single function only.
+
+## Naming decision (checked before writing)
+
+`src/stdlib/file.rs` internal functions are `read`/`write`/`append`/
+`exists`; the Klang-level convention is flat builtins `read_file` /
+`write_file` / `append_file` / `exists` (`src/hir.rs:is_builtin`,
+`src/runtime/mod.rs:exec_builtin`). The new surface follows both: Rust
+`stdlib::file::remove` wired as flat Klang builtin `remove_file(path)
+-> i32` (returns `1` on success; `Int` so `return remove_file(p)`
+typechecks like `write_file`/`append_file`). MIR passes `Call.func`
+through generically so no lowering change was needed; JIT rejects all
+builtins via `hir::is_builtin`, unchanged.
+
+## Error / guard decision (stated explicitly)
+
+- Same `reject_unsafe_path` sandbox as reads/writes/appends/exists:
+  absolute paths outside `std::env::temp_dir()` and any `..` component
+  stay `E-RUNTIME` (policy rejection, not I/O failure — same rationale
+  as STDLIB-OSIO-1). The delete path calls the guard before touching
+  the filesystem, so it cannot bypass the boundary.
+- Same `E-IO-*` convention via the existing `map_io_error` helper (no
+  new mapper): `NotFound` → `E-IO-NOT-FOUND`, `PermissionDenied` →
+  `E-IO-PERMISSION`, else `E-IO-FAILED` with the real OS string.
+  Implementation is `std::fs::remove_file` + `map_io_error
+  ("remove_file", ...)` (`src/stdlib/file.rs`).
+
+## Files created/changed
+
+- MODIFIED `src/stdlib/file.rs` — added `pub fn remove(path)`.
+- MODIFIED `src/stdlib/mod.rs` — doc line now lists `remove` /
+  `remove_file`.
+- MODIFIED `src/runtime/mod.rs` — `is_builtin` + new `remove_file`
+  arm (arity 1, `reject_unsafe_path`, delegates to
+  `stdlib::file::remove`, returns `Int(1)`).
+- MODIFIED `src/hir.rs` — `remove_file` arity 1, `str` arg check,
+  returns `Ty::Int`; `is_builtin` extended.
+- MODIFIED `tests/osio_file_gates.rs` — 3 new tests (see below).
+- MODIFIED `SPEC.md` §4 + `docs/reference.md` — one row each for
+  `remove_file` (no new `@run` samples, to avoid F4/F19-class drift).
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`,
+`cargo 1.98.1`)
+
+Baseline before work (Phase 5 close): `SUM passed=324 failed=0`,
+`GREP sum=324`.
+
+Targeted (after work):
+
+```
+running 12 tests
+test osio_file_remove_existing_then_exists_false ... ok
+test osio_file_remove_missing_is_not_found ... ok
+test osio_file_remove_unsafe_absolute_path_stays_runtime_error ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+```
+
+(`osio_file_gates` was 9 tests, now 12 — the only delta is the 3 new
+tests; full list also includes the 9 pre-existing tests passing.)
+
+Full regression (after work): `SUM passed=327 failed=0`
+(324 baseline + 3 new), `GREP sum=327` — both numbers from the same
+session, matching, delta exactly +3. `scripts/verify_docs.py`:
+`verified 49 samples`, `all docs samples verified, 0 UNVERIFIED markers`
+(unchanged — SPEC/reference edits add no new samples).
+
+## Acceptance (against the task)
+
+- Remove-then-`exists`-is-false: met —
+  `osio_file_remove_existing_then_exists_false` (Klang-level
+  `remove_file` + `exists` check in one program returning 42, plus a
+  Rust-side `Path::exists` assert so a no-op success cannot pass).
+- Remove-missing-is-`E-IO-NOT-FOUND`: met —
+  `osio_file_remove_missing_is_not_found` (asserts the real code, not a
+  silent no-op or panic).
+- Remove-outside-sandbox-rejected-like-reads/writes: met —
+  `osio_file_remove_unsafe_absolute_path_stays_runtime_error` (same
+  `/no/such/klang-file-xyz-outside-tmp` shape as
+  `osio_file_unsafe_absolute_path_stays_runtime_error`, asserts
+  `E-RUNTIME`).
+- Scope: met — no rename/copy/listing or other file ops added.
+
+## Suggestion (not implemented, per scope)
+
+If a next file op is wanted, `rename_file(src, dst)` (move) is the
+natural follow-up from real-script porting (temp-write + atomic
+replace); it would need both-path sandbox checks plus a defined
+cross-device/error semantic before implementation.
