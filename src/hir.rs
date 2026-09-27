@@ -2500,6 +2500,8 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "assert" => 1,
         "read_file" | "exists" | "env" | "remove_file" => 1,
         "regex_is_match" | "regex_find" => 2,
+        "time_sleep" | "time_elapsed" => 1,
+        "time_now" => 0,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -2652,6 +2654,19 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Map
         }
+        "time_sleep" => {
+            if !matches!(&args[0], Ty::Int | Ty::Float | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`time_sleep()` seconds", "number", &args[0]));
+            }
+            Ty::Int
+        }
+        "time_now" => Ty::Float,
+        "time_elapsed" => {
+            if !matches!(&args[0], Ty::Int | Ty::Float | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`time_elapsed()` since", "number", &args[0]));
+            }
+            Ty::Float
+        }
         _ => Ty::Unknown,
     }
 }
@@ -2774,6 +2789,9 @@ pub fn is_builtin(name: &str) -> bool {
             | "run_process"
             | "regex_is_match"
             | "regex_find"
+            | "time_sleep"
+            | "time_now"
+            | "time_elapsed"
     )
 }
 

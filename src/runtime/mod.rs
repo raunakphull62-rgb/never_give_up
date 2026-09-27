@@ -899,6 +899,9 @@ fn is_builtin(name: &str) -> bool {
             | "run_process"
             | "regex_is_match"
             | "regex_find"
+            | "time_sleep"
+            | "time_now"
+            | "time_elapsed"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1130,6 +1133,50 @@ fn exec_builtin(
                     ),
                 ),
             ]))
+        }
+        "time_sleep" => {
+            if args.len() != 1 {
+                return Err(runtime_err("time_sleep() takes 1 argument"));
+            }
+            // Numeric values only: a dynamically-typed non-number
+            // (e.g. a string out of a map lookup, which checks as
+            // Unknown) is a loud E-TIME-INVALID, never a silent
+            // sleep-0.
+            let seconds = match get(&args[0]) {
+                Value::Int(v) => v as f64,
+                Value::Float(v) => v,
+                other => {
+                    return Err(crate::stdlib::time::not_a_number(
+                        "time_sleep",
+                        "time_sleep() seconds",
+                        &other.render(),
+                    ));
+                }
+            };
+            crate::stdlib::time::sleep(seconds).map(|()| Value::Int(1))
+        }
+        "time_now" => {
+            if !args.is_empty() {
+                return Err(runtime_err("time_now() takes 0 arguments"));
+            }
+            Ok(Value::Float(crate::stdlib::time::now()))
+        }
+        "time_elapsed" => {
+            if args.len() != 1 {
+                return Err(runtime_err("time_elapsed() takes 1 argument"));
+            }
+            let since = match get(&args[0]) {
+                Value::Int(v) => v as f64,
+                Value::Float(v) => v,
+                other => {
+                    return Err(crate::stdlib::time::not_a_number(
+                        "time_elapsed",
+                        "time_elapsed() since",
+                        &other.render(),
+                    ));
+                }
+            };
+            Ok(Value::Float(crate::stdlib::time::elapsed(since)))
         }
         "__echo_create" => {
             if args.len() != 1 {

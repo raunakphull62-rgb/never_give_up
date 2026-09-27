@@ -27,6 +27,12 @@ pub mod process;
 /// `regex_is_match(pattern, text)` / `regex_find(pattern, text)`.
 pub mod regex;
 
+/// OS-interop time boundary: `sleep`/`now`/`elapsed` with
+/// `E-TIME-INVALID` diagnostics (STDLIB-TIME-1). Wired into the
+/// interpreter as the flat builtins
+/// `time_sleep(seconds)` / `time_now()` / `time_elapsed(since)`.
+pub mod time;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {

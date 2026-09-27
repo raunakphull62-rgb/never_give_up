@@ -2174,3 +2174,91 @@ After work: `cargo test` → `passed: 337 failed: 0`,
 Full regression (after work): `SUM passed=337 failed=0`
 (327 baseline + 10 new), `GREP sum=337` — both numbers from the same
 session, matching, delta exactly +10.
+
+---
+
+# STDLIB-TIME-1 — Phase 1: time builtins (code-verified)
+
+Scope: PRD Phase 1 only (`time_sleep`/`time_now`/`time_elapsed`).
+`src/stdlib/net.rs` untouched; no new dependencies (std only).
+
+## Pre-work baseline (this session, live)
+
+- `cargo test` (with `CARGO_TARGET_DIR=/tmp/klang-target`, since the
+  repo's `target/` sits on a non-executable mount — same workaround
+  as prior audits): `passed sum: 337, failed sum: 0` across 49
+  `test result:` lines, all `ok`.
+- `grep -rc "#\[test\]" src/ tests/`: `total test attrs: 337`.
+- Both match (337 = 337).
+
+## Naming (PRD §3 question, answered by reading code)
+
+Flat `time_sleep`/`time_now`/`time_elapsed`, not `time::sleep` —
+confirmed against `hir.rs::is_builtin` (only flat names; `::` calls
+resolve solely through declared `mod` blocks per
+`modules::rewrite_ctor`). Same reason documented in
+`src/stdlib/file.rs`/`process.rs`/`regex.rs` headers.
+
+## Clock choice (PRD §3 question, answered by reading code)
+
+`time_now()` = seconds since Unix epoch via `SystemTime` (real
+wall-clock timestamp). No monotonic-clock precedent exists in the
+codebase to match — the sole `Duration` use is the MCP run timeout
+(`src/mcp.rs:510`). `time_elapsed(since)` reads the same clock, so
+the pair is self-consistent. Documented in `src/stdlib/time.rs`.
+
+## What was built
+
+- `src/stdlib/time.rs` (new): `now()` / `sleep(f64)` /
+  `elapsed(f64)` + `E-TIME-INVALID` constructors with a distinct
+  cause per mode (negative carries the value; NaN/infinite/overflow
+  each named; non-numeric dynamic values via `not_a_number`). Huge
+  finite values go through `Duration::try_from_secs_f64`, so they
+  are a loud diagnostic, never a `from_secs_f64` panic.
+- `src/stdlib/mod.rs`: `pub mod time;` (net.rs untouched).
+- `src/hir.rs`: arities (`time_sleep` 1, `time_now` 0, `time_elapsed`
+  1), numeric arg checks (`Int|Float|Unknown`, else `E-TYPE`;
+  `time_now` → `Ty::Float`, `time_elapsed` → `Ty::Float`,
+  `time_sleep` → `Ty::Int`), `is_builtin` entries. Zero-arg
+  `time_now()` flows through the existing `check_builtin_call`
+  path with no parser changes.
+- `src/runtime/mod.rs`: `is_builtin` entries + `exec_builtin` arms.
+  Runtime values are matched (`Int` widens to `f64`), so
+  `time_sleep(0)` works; a dynamically-typed non-number (e.g. a
+  string out of a map lookup, statically `Unknown`) is
+  `E-TIME-INVALID` via `not_a_number`, never a silent sleep-0.
+  `time_sleep` returns `Int(1)` on success (matches `remove_file`'s
+  success-marker convention).
+- `tests/osio_time_gates.rs` (new, 7 tests): ~1s sleep measured in
+  `[0.8, 5.0]` (lower bound proves the sleep happened; upper bound
+  deliberately generous against loaded-CI flake), zero sleep in
+  float+int form, `now()` positive epoch timestamp asserted
+  `> 1_000_000_000.0`, monotonic advance, negative → 
+  `E-TIME-INVALID`, dynamic string → `E-TIME-INVALID`, Rust-level
+  cause-specificity (neg/NaN/inf/huge), arity/type gates.
+
+## Live verification (this session, real output)
+
+`cargo test --test osio_time_gates`:
+`test result: ok. 7 passed; 0 failed` (finished in 1.01s).
+
+Built binary probes (`cargo run -q -- run ...`):
+`time_now`/`sleep(1.0)`/`elapsed` program printed a real timestamp
+and measured duration, then `run main() = 42`:
+```
+print: 1790488792.8507535
+print: 1.0005896091461182
+run main() = 42
+```
+Negative probe (`time_sleep(-0.5)`) produced the real diagnostic:
+```
+{"code": "E-TIME-INVALID", "message": "time_sleep failed: sleep
+duration -0.5 is negative", "cause": "negative duration -0.5 is not
+a valid sleep duration", "rule": "time/invalid", ...}
+```
+
+## Regression (after Phase 1)
+
+`SUM passed=344 failed=0`, 0 non-ok suites;
+`GREP sum=344` — both from the same session, matching, delta
+exactly +7 (337 baseline + 7 new).
