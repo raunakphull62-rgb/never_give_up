@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    let s = "A\u0041B"
+    print(s)
+    print(len(s))
+    return 0
+}

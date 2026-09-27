@@ -503,22 +503,58 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
         // never abort the server process.
         let r = crate::with_deep_stack(move || {
             let mir = crate::mir::lower(&prog);
-            crate::runtime::run_with_output(&mir, &entry, &[], &HashMap::new())
+            crate::runtime::run_with_output_value(&mir, &entry, &[], &HashMap::new())
         });
         let _ = tx.send(r);
     });
     match rx.recv_timeout(std::time::Duration::from_secs(RUN_TIMEOUT_SECS)) {
-        Ok(Ok((v, out))) => (
-            false,
-            Json::Obj(vec![
-                ("ok".to_string(), Json::Bool(true)),
-                (
-                    "stdout".to_string(),
-                    Json::Arr(out.into_iter().map(Json::Str).collect()),
-                ),
-                ("return_value".to_string(), Json::Int(v as i64)),
-            ]),
-        ),
+        Ok(Ok((v, out))) => {
+            // Preserve the value's actual type: `Float` stays a JSON
+            // number with its fractional part (the old `i32` channel
+            // truncated `42.0` to `42`); out-of-range `Int` stays a loud
+            // `E-OVERFLOW` instead of a silent wrap.
+            let ret = match &v {
+                crate::runtime::Value::Int(n) => {
+                    if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
+                        let d = crate::diagnostics::Diagnostic::error(
+                            "E-OVERFLOW",
+                            "integer overflow in `return`: result out of i32 range",
+                            "runtime",
+                            0,
+                            0,
+                            "i32 arithmetic never wraps: out-of-range results are errors",
+                            &["use smaller operands", "check bounds before operating"],
+                            "arithmetic/overflow",
+                        );
+                        return (
+                            true,
+                            Json::Obj(vec![
+                                ("ok".to_string(), Json::Bool(false)),
+                                ("stage".to_string(), Json::Str("run".to_string())),
+                                (
+                                    "error".to_string(),
+                                    parse_json(&d.to_json()).expect("to_json is valid json"),
+                                ),
+                            ]),
+                        );
+                    }
+                    Json::Int(*n)
+                }
+                crate::runtime::Value::Float(f) => Json::Float(*f),
+                other => Json::Str(other.render()),
+            };
+            (
+                false,
+                Json::Obj(vec![
+                    ("ok".to_string(), Json::Bool(true)),
+                    (
+                        "stdout".to_string(),
+                        Json::Arr(out.into_iter().map(Json::Str).collect()),
+                    ),
+                    ("return_value".to_string(), ret),
+                ]),
+            )
+        }
         Ok(Err(d)) => (
             true,
             Json::Obj(vec![

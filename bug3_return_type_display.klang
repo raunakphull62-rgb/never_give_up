@@ -1,0 +1,5 @@
+fn main() -> f64 {
+    let x = 42.0
+    print(x)
+    return x
+}

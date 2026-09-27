@@ -619,12 +619,33 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    match klang::runtime::run_with_output(&mir, &entry, &[], &HashMap::new()) {
+    match klang::runtime::run_with_output_value(&mir, &entry, &[], &HashMap::new()) {
         Ok((v, out)) => {
             for line in &out {
                 println!("print: {line}");
             }
-            println!("run {entry}() = {v}");
+            // Render through the value's actual type tag (`Value::render`
+            // keeps `42.0` as `42.0`); the old `i32` channel truncated
+            // every `f64` return to an integer. Out-of-range `Int` returns
+            // stay loud `E-OVERFLOW`, matching `run_with_output`.
+            if let klang::runtime::Value::Int(n) = &v {
+                if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
+                    let d = klang::diagnostics::Diagnostic::error(
+                        "E-OVERFLOW",
+                        "integer overflow in `return`: result out of i32 range",
+                        "runtime",
+                        0,
+                        0,
+                        "i32 arithmetic never wraps: out-of-range results are errors",
+                        &["use smaller operands", "check bounds before operating"],
+                        "arithmetic/overflow",
+                    );
+                    println!("run: FAIL");
+                    println!("{}", d.to_json());
+                    std::process::exit(1);
+                }
+            }
+            println!("run {entry}() = {}", v.render());
         }
         Err(d) => {
             println!("run: FAIL");

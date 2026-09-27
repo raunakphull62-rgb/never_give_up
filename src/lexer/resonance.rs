@@ -476,16 +476,62 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     }
                     if bytes[j] == b'\\' && j + 1 < n {
                         match bytes[j + 1] {
-                            b'n' => val.push('\n'),
-                            b't' => val.push('\t'),
-                            b'"' => val.push('"'),
-                            b'\\' => val.push('\\'),
+                            b'n' => {
+                                val.push('\n');
+                                j += 2;
+                            }
+                            b'r' => {
+                                val.push('\r');
+                                j += 2;
+                            }
+                            b't' => {
+                                val.push('\t');
+                                j += 2;
+                            }
+                            b'"' => {
+                                val.push('"');
+                                j += 2;
+                            }
+                            b'\\' => {
+                                val.push('\\');
+                                j += 2;
+                            }
+                            b'u' => {
+                                // Standard `\uXXXX` Unicode escape, mirroring
+                                // the v1 parser path.
+                                if j + 5 < n
+                                    && bytes[j + 2].is_ascii_hexdigit()
+                                    && bytes[j + 3].is_ascii_hexdigit()
+                                    && bytes[j + 4].is_ascii_hexdigit()
+                                    && bytes[j + 5].is_ascii_hexdigit()
+                                {
+                                    let hex = &source[j + 2..j + 6];
+                                    if let Ok(cp) = u32::from_str_radix(hex, 16) {
+                                        if let Some(ch) = char::from_u32(cp) {
+                                            val.push(ch);
+                                            j += 6;
+                                        } else {
+                                            val.push('\\');
+                                            val.push('u');
+                                            j += 2;
+                                        }
+                                    } else {
+                                        val.push('\\');
+                                        val.push('u');
+                                        j += 2;
+                                    }
+                                } else {
+                                    val.push('\\');
+                                    val.push('u');
+                                    j += 2;
+                                }
+                            }
                             other => {
                                 val.push('\\');
                                 val.push(other as char);
+                                j += 2;
                             }
                         }
-                        j += 2;
                     } else {
                         let ch = source[j..].chars().next().unwrap_or('\u{FFFD}');
                         val.push(ch);

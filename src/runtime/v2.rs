@@ -31,6 +31,31 @@ fn rt_err(msg: &str) -> Diagnostic {
     )
 }
 
+fn overflow_err(op: &str) -> Diagnostic {
+    Diagnostic::error(
+        "E-OVERFLOW",
+        &format!("integer overflow in `{op}`: result out of i32 range"),
+        "input.v2",
+        0,
+        0,
+        "i32 arithmetic never wraps: out-of-range results are errors",
+        &["use smaller operands", "check bounds before operating"],
+        "arithmetic/overflow",
+    )
+}
+
+fn to_i32_checked(v: i64, op: &str) -> Result<i32, Diagnostic> {
+    i32::try_from(v).map_err(|_| overflow_err(op))
+}
+
+fn checked_int_op(op: &str, a: i64, b: i64, f: impl Fn(i32, i32) -> Option<i32>) -> Result<Value, Diagnostic> {
+    let x = to_i32_checked(a, op)?;
+    let y = to_i32_checked(b, op)?;
+    f(x, y)
+        .map(|v| Value::Int(i64::from(v)))
+        .ok_or_else(|| overflow_err(op))
+}
+
 fn map_schema_ty(s: &str) -> Result<FieldTy, Diagnostic> {
     match s.trim().to_lowercase().as_str() {
         "str" | "string" => Ok(FieldTy::Str),
@@ -354,7 +379,7 @@ pub fn run_v2_program(
         if matches!(v, Value::Str(_)) {
             return Ok((0, out));
         }
-        return Err(rt_err("integer overflow: result out of i32 range"));
+        return Err(overflow_err("return"));
     }
     Ok((n as i32, out))
 }
@@ -528,18 +553,18 @@ fn eval_expr(
             Ok(match (&l, &r) {
                 (Value::Str(a), b) => Value::Str(format!("{a}{}", b.render())),
                 (a, Value::Str(b)) => Value::Str(format!("{}{b}", a.render())),
-                _ => Value::Int(l.as_int().wrapping_add(r.as_int())),
+                _ => checked_int_op("add", l.as_int(), r.as_int(), |a, b| a.checked_add(b))?,
             })
         }
         V2Expr::Sub { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;
             let r = eval_expr(right, frame, global, depth)?;
-            Ok(Value::Int(l.as_int().wrapping_sub(r.as_int())))
+            Ok(checked_int_op("sub", l.as_int(), r.as_int(), |a, b| a.checked_sub(b))?)
         }
         V2Expr::Mul { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;
             let r = eval_expr(right, frame, global, depth)?;
-            Ok(Value::Int(l.as_int().wrapping_mul(r.as_int())))
+            Ok(checked_int_op("mul", l.as_int(), r.as_int(), |a, b| a.checked_mul(b))?)
         }
         V2Expr::Div { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;
@@ -547,7 +572,7 @@ fn eval_expr(
             if r.as_int() == 0 {
                 return Err(rt_err("division by zero"));
             }
-            Ok(Value::Int(l.as_int().wrapping_div(r.as_int())))
+            Ok(checked_int_op("div", l.as_int(), r.as_int(), |a, b| a.checked_div(b))?)
         }
         V2Expr::Mod { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;
@@ -555,7 +580,7 @@ fn eval_expr(
             if r.as_int() == 0 {
                 return Err(rt_err("modulo by zero"));
             }
-            Ok(Value::Int(l.as_int().wrapping_rem(r.as_int())))
+            Ok(checked_int_op("mod", l.as_int(), r.as_int(), |a, b| a.checked_rem(b))?)
         }
         V2Expr::Eq { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;

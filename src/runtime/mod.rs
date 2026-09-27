@@ -159,6 +159,30 @@ fn runtime_err(msg: &str) -> Diagnostic {
     )
 }
 
+/// Integer overflow: an `i32` arithmetic result left the
+/// `i32::MIN..=i32::MAX` range. Loud error, never a silent wrap or an
+/// out-of-range value (cf. the checker, which already rejects
+/// out-of-range literals with `E-TYPE`).
+fn overflow_err(op: &str) -> Diagnostic {
+    Diagnostic::error(
+        "E-OVERFLOW",
+        &format!("integer overflow in `{op}`: result out of i32 range"),
+        "runtime",
+        0,
+        0,
+        "i32 arithmetic never wraps: out-of-range results are errors",
+        &["use smaller operands", "check bounds before operating"],
+        "arithmetic/overflow",
+    )
+}
+
+/// Convert a runtime `Int` operand to `i32`, failing loudly when the
+/// stored `i64` is already outside `i32` range (e.g. from `int()` on a
+/// huge string). Keeps every arithmetic site in one enforcement point.
+fn to_i32_checked(v: i64, op: &str) -> Result<i32, Diagnostic> {
+    i32::try_from(v).map_err(|_| overflow_err(op))
+}
+
 /// Concurrency-specific runtime failure (task panics, task limits): the
 /// only path that keeps the historical concurrent-execution cause.
 fn concurrent_err(msg: &str) -> Diagnostic {
@@ -222,13 +246,15 @@ pub fn run(
 /// `range()` is capped at 100k; task spawning gets an analogous bound.
 pub const MAX_CONCURRENT_TASKS: usize = 256;
 
-/// Run with explicit args + captured `print` output.
-pub fn run_with_output(
+/// Run with explicit args + captured `print` output, preserving the
+/// runtime value's actual type for display (`Value::render` keeps `42.0`
+/// as `42.0`; the `i32` channel below would truncate it to `42`).
+pub fn run_with_output_value(
     module: &MirModule,
     entry: &str,
     args: &[Value],
     stubs: &HashMap<String, i32>,
-) -> Result<(i32, Vec<String>), Diagnostic> {
+) -> Result<(Value, Vec<String>), Diagnostic> {
     // Entry arity must match exactly (calling-convention safety), mirroring
     // the JIT backend. The CLI always passes zero args, so missing params
     // are an arity error, not silent zeros.
@@ -260,10 +286,22 @@ pub fn run_with_output(
     };
     let v = exec_function(&ctx, entry, args, 0, &CancelToken::default())?;
     let out = ctx.output.lock().unwrap().clone();
-    // Do not silently truncate via `as i32`: surface out-of-range results.
+    Ok((v, out))
+}
+
+/// Run with explicit args + captured `print` output.
+pub fn run_with_output(
+    module: &MirModule,
+    entry: &str,
+    args: &[Value],
+    stubs: &HashMap<String, i32>,
+) -> Result<(i32, Vec<String>), Diagnostic> {
+    let (v, out) = run_with_output_value(module, entry, args, stubs)?;
+    // Do not silently truncate via `as i32`: surface out-of-range results
+    // with the same `E-OVERFLOW` as intermediate arithmetic.
     let n = v.as_int();
     if n < i32::MIN as i64 || n > i32::MAX as i64 {
-        return Err(runtime_err("integer overflow: result out of i32 range"));
+        return Err(overflow_err("return"));
     }
     Ok((n as i32, out))
 }
@@ -541,7 +579,12 @@ fn exec_function(
                     (Value::Str(a), b) => Value::Str(format!("{a}{}", b.render())),
                     (a, Value::Str(b)) => Value::Str(format!("{}{b}", a.render())),
                     _ if l.is_float() || r.is_float() => Value::Float(l.as_float() + r.as_float()),
-                    _ => Value::Int(l.as_int().wrapping_add(r.as_int())),
+                    _ => {
+                        let x = to_i32_checked(l.as_int(), "add")?;
+                        let y = to_i32_checked(r.as_int(), "add")?;
+                        let z = x.checked_add(y).ok_or_else(|| overflow_err("add"))?;
+                        Value::Int(i64::from(z))
+                    }
                 };
                 values.insert(into.clone(), v.clone());
                 last = v;
@@ -549,14 +592,14 @@ fn exec_function(
             }
             MirOp::Sub { into, left, right } => {
                 let (l, r) = ints_or_floats(&values, &ctx.stubs, left, right);
-                let v = num2(l, r, |a, b| a.wrapping_sub(b), |a, b| a - b);
+                let v = num2_checked("sub", l, r, |a, b| a.checked_sub(b), |a, b| a - b)?;
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
             }
             MirOp::Mul { into, left, right } => {
                 let (l, r) = ints_or_floats(&values, &ctx.stubs, left, right);
-                let v = num2(l, r, |a, b| a.wrapping_mul(b), |a, b| a * b);
+                let v = num2_checked("mul", l, r, |a, b| a.checked_mul(b), |a, b| a * b)?;
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
@@ -570,7 +613,9 @@ fn exec_function(
                     }
                     _ => {}
                 }
-                let v = num2(l, r, |a, b| a.wrapping_div(b), |a, b| a / b);
+                // `i32::MIN / -1` overflows `i32` (checked_div is None):
+                // loud `E-OVERFLOW`, never a silent out-of-range value.
+                let v = num2_checked("div", l, r, |a, b| a.checked_div(b), |a, b| a / b)?;
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
@@ -585,7 +630,10 @@ fn exec_function(
                 if r == 0 {
                     return Err(runtime_err("modulo by zero"));
                 }
-                let v = Value::Int(l.wrapping_rem(r));
+                let x = to_i32_checked(l, "mod")?;
+                let y = to_i32_checked(r, "mod")?;
+                let z = x.checked_rem(y).ok_or_else(|| overflow_err("mod"))?;
+                let v = Value::Int(i64::from(z));
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
@@ -658,7 +706,11 @@ fn exec_function(
                 let v = lookup(&values, &ctx.stubs, inner).unwrap_or(Value::Int(0));
                 let out = match v {
                     Value::Float(x) => Value::Float(-x),
-                    _ => Value::Int(v.as_int().wrapping_neg()),
+                    _ => {
+                        let x = to_i32_checked(v.as_int(), "neg")?;
+                        let z = x.checked_neg().ok_or_else(|| overflow_err("neg"))?;
+                        Value::Int(i64::from(z))
+                    }
                 };
                 values.insert(into.clone(), out.clone());
                 last = out;
@@ -1374,6 +1426,41 @@ fn num2(
                 },
             );
             Value::Float(float_op(x, y))
+        }
+    }
+}
+
+/// Checked integer arithmetic over `i32` semantics: both `i64` operands
+/// must already fit `i32`, and the `i32::checked_*` result must too.
+/// Float-involved pairs stay unchecked `f64` math (no `i32` range applies).
+fn num2_checked(
+    op: &str,
+    l: Num,
+    r: Num,
+    int_op: impl Fn(i32, i32) -> Option<i32>,
+    float_op: impl Fn(f64, f64) -> f64,
+) -> Result<Value, Diagnostic> {
+    match (l, r) {
+        (Num::Float(a), Num::Float(b)) => Ok(Value::Float(float_op(a, b))),
+        (Num::Int(a), Num::Int(b)) => {
+            let x = to_i32_checked(a, op)?;
+            let y = to_i32_checked(b, op)?;
+            int_op(x, y)
+                .map(|v| Value::Int(i64::from(v)))
+                .ok_or_else(|| overflow_err(op))
+        }
+        (a, b) => {
+            let (x, y) = (
+                match a {
+                    Num::Int(v) => v as f64,
+                    Num::Float(v) => v,
+                },
+                match b {
+                    Num::Int(v) => v as f64,
+                    Num::Float(v) => v,
+                },
+            );
+            Ok(Value::Float(float_op(x, y)))
         }
     }
 }

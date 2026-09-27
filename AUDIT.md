@@ -2015,3 +2015,162 @@ If a next file op is wanted, `rename_file(src, dst)` (move) is the
 natural follow-up from real-script porting (temp-write + atomic
 replace); it would need both-path sandbox checks plus a defined
 cross-device/error semantic before implementation.
+
+---
+
+# Triple-bug fix: unicode escape, i32 overflow, f64 display (code-verified)
+
+Logging choice: one combined entry with three sub-entries
+(BUGS-3-1/2/3). Fresh `BUGS-3-*` prefix — no collision with F12–F17,
+F-V2-1, or STDLIB-OSIO-*.
+
+Baseline (before work, same session, `CARGO_TARGET_DIR=/tmp/klang-target`):
+`cargo test` → `passed: 327 failed: 0`,
+`grep -rc "#\[test\]" src/ tests/` → `327`.
+After work: `cargo test` → `passed: 337 failed: 0`,
+`grep -rc` → `337` — both numbers matching, delta exactly +10
+(`tests/bugs3_gates.rs`, 10 regression tests). Toolchain
+`cargo 1.98.1 / rustc 1.98.1`.
+
+### BUGS-3-1 — BUG (high): `\uXXXX` escape not decoded — FIXED
+- Repro (`bug1_unicode_escape.klang`):
+  ```
+  fn main() -> i32 {
+      let s = "A\u0041B"
+      print(s)
+      print(len(s))
+      return 0
+  }
+  ```
+- Observed (buggy, live `klang run` before fix):
+  ```
+  check: OK (0 diagnostics)
+  print: A\u0041B
+  print: 8
+  run main() = 0
+  ```
+  (MIR showed `t0 = const_str "A\\u0041B"` — lexer passed it through.)
+- Cause: string lexing in `src/parser/mod.rs:427-438` (`tokenize`)
+  matched only `n/t/"/\` and fell every other escape (including `u`,
+  and also missing `r`) into the literal `push('\\') + push(other)`
+  pass-through. Same duplication in `src/lexer/resonance.rs:477-488`
+  (v2 lexer).
+- Fix: same code path/pattern, extended match arms — added `r → \r`
+  plus a `u` arm parsing exactly 4 hex digits (`u32::from_str_radix`
+  + `char::from_u32`; surrogates/invalid fall back to literal
+  pass-through, never panic; byte-index math stays on ASCII
+  boundaries). Both lexers fixed identically.
+- After (live `klang run`, same file):
+  ```
+  check: OK (0 diagnostics)
+  print: AAB
+  print: 3
+  run main() = 0
+  ```
+  (MIR now `t0 = const_str "AAB"`.)
+- Extra positions (live): `"\u0041BC"` → `ABC`, `"A\u0041C"` → `AAC`,
+  `"AB\u0041"` → `ABA`, `"\u0041\u0042\u0043"` → `ABC`, `len` → `3`.
+  Other escapes preserved: `"a\nb\tc\rd\\e\"f"` renders with real
+  newline/tab/CR/backslash/quote (verified via `cat -A`).
+- Regression tests: `bugs3_unicode_escape_decoded`,
+  `bugs3_unicode_escape_positions`, `bugs3_other_escapes_still_work`
+  (`tests/bugs3_gates.rs`).
+
+### BUGS-3-2 — BUG (high): runtime arithmetic had no i32 bounds checking — FIXED
+- Repro (`bug2_overflow_runtime.klang`):
+  ```
+  fn main() -> i32 {
+      let a = 2147483647
+      let b = a + 1
+      print(b)
+      return 0
+  }
+  ```
+- Observed (buggy, live before fix): `check: OK (0 diagnostics)` then
+  `print: 2147483648` — a value outside `i32` (`max 2147483647`).
+  Companion (`bug2_overflow_literal.klang`, `let x = 2147483648`)
+  correctly fails check with `E-TYPE "integer literal: want i32
+  range, got i32"` — checker enforced literals, interpreter enforced
+  nothing (all `wrapping_*` on `i64` in `src/runtime/mod.rs:544-588`
+  and `src/runtime/v2.rs:531-558`).
+- Semantic decision (stated, not silent): option (b) — overflow is a
+  runtime error. Rationale: the codebase already treats out-of-range
+  integers as loud errors at the return boundary (`run_with_output`
+  `E-RUNTIME "integer overflow..."`), the checker's literal rejection
+  shows intent to reject (not wrap), and the project's core promise is
+  "AI mistakes surface as errors, not silent wrong answers" — wrapping
+  `2147483647 + 1` to `-2147483648` would be the silent-wrong-answer
+  option. Wrapping also contradicts the existing boundary check (a
+  wrapped value would never trip it).
+- Fix: new `E-OVERFLOW` / `arithmetic/overflow`
+  (`overflow_err(op)` + `to_i32_checked` + `num2_checked` in
+  `src/runtime/mod.rs`; mirrored `overflow_err`/`to_i32_checked`/
+  `checked_int_op` in `src/runtime/v2.rs`). `add/sub/mul/div/mod/neg`
+  convert operands to `i32` (out-of-range operand is itself overflow)
+  then use `checked_add/sub/mul/div/rem/neg`; `i32::MIN / -1` correctly
+  errors via `checked_div`. String-concat and float paths untouched.
+  Final-return check unified to the same `E-OVERFLOW` (was `E-RUNTIME`).
+  JIT left unchecked (documented int-only probe backend, not the
+  interpreter path in the repro).
+- After (live `klang run`, same file):
+  ```
+  check: OK (0 diagnostics)
+  run: FAIL
+  {
+    "code": "E-OVERFLOW",
+    "severity": "error",
+    "message": "integer overflow in `add`: result out of i32 range",
+    "primary_span": {"file": "runtime", "start": 0, "end": 0},
+    "cause": "i32 arithmetic never wraps: out-of-range results are errors",
+    "expected": null,
+    "found": null,
+    "fixes": [{"label": "use smaller operands"}, {"label": "check bounds before operating"}],
+    "rule": "arithmetic/overflow",
+    "related": []
+  }
+  ```
+- Boundary siblings (live, all `E-OVERFLOW`): `i32::MIN - 1` (`sub`),
+  `i32::MAX * 2` (`mul`), `i32::MIN / -1` (`div`). In-range
+  `20 + 22 = 42` still runs.
+- Regression tests: `bugs3_add/sub/mul/div_overflow_is_error`,
+  `bugs3_in_range_arithmetic_still_runs` (`tests/bugs3_gates.rs`).
+
+### BUGS-3-3 — BUG (medium): final summary dropped f64 fraction — FIXED
+- Repro (`bug3_return_type_display.klang`):
+  ```
+  fn main() -> f64 {
+      let x = 42.0
+      print(x)
+      return x
+  }
+  ```
+- Observed (buggy, live before fix):
+  ```
+  print: 42.0
+  run main() = 42
+  ```
+- Cause: `run_with_output` returns `(i32, Vec<String>)` via
+  `v.as_int()`; the CLI (`src/main.rs:622-627`) printed that `i32`,
+  truncating every `f64` return. `Value::render` already knew the
+  right answer (`42.0`); the summary channel threw the type tag away.
+  Same truncation in MCP `tool_run` (`return_value: Int(v)`).
+- Fix: new `run_with_output_value` (value-preserving channel;
+  `run_with_output` kept as the `i32` wrapper so all 39 existing
+  callers/tests are untouched). CLI now uses the value channel and
+  prints `v.render()` (out-of-range `Int` still loud `E-OVERFLOW`);
+  MCP `tool_run` returns `Float(f)` for floats (out-of-range `Int`
+  → `E-OVERFLOW` error object).
+- After (live `klang run`, same file):
+  ```
+  print: 42.0
+  run main() = 42.0
+  ```
+  Non-whole control (`return 3.14`): `print: 3.14` /
+  `run main() = 3.14` (live-verified, not a whole-float coincidence).
+- Regression tests: `bugs3_f64_return_renders_fraction`,
+  `bugs3_f64_nonwhole_return_renders` (`tests/bugs3_gates.rs`,
+  via `run_with_output_value` + `render()`).
+
+Full regression (after work): `SUM passed=337 failed=0`
+(327 baseline + 10 new), `GREP sum=337` — both numbers from the same
+session, matching, delta exactly +10.
