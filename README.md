@@ -15,11 +15,18 @@ The current language includes functions, control flow, structs, arrays, maps, st
 
 ## Quick start
 
-You need a stable Rust toolchain. From the project directory, build the binary:
+Install a precompiled release binary; you do **not** need Cargo or a Rust toolchain. The commands below install the latest Linux x86_64 release in your user-local `~/.local/bin` directory:
 
 ```sh
-cargo build
+mkdir -p "$HOME/.local/bin"
+wget -O /tmp/klang-linux-x86_64.tar.gz https://github.com/raunakphull62-rgb/never_give_up/releases/latest/download/klang-linux-x86_64.tar.gz
+tar -xzf /tmp/klang-linux-x86_64.tar.gz -C /tmp
+install -m 755 /tmp/klang "$HOME/.local/bin/klang"
+export PATH="$HOME/.local/bin:$PATH"
+klang --version
 ```
+
+To keep `klang` on your `PATH` in future terminal sessions, add `$HOME/.local/bin` to your shell's startup file. The latest release also provides [macOS Apple Silicon, Windows x86_64, and Linux ARM64/Termux packages][6]. Download the asset matching your operating system and processor from the [releases page][7].
 
 Create `hello.klang`:
 
@@ -38,8 +45,8 @@ fn main() -> i32 {
 Check the program, then run it:
 
 ```sh
-cargo run -- check hello.klang
-cargo run -- run hello.klang
+klang check hello.klang
+klang run hello.klang
 ```
 
 A successful run prints the program output (`42`) and the entry function’s return value (`run main() = 42`). The `run` command also prints the MIR listing before execution. The entry point defaults to `main`; pass another function name after the file to choose a different entry point.
@@ -48,21 +55,21 @@ A successful run prints the program output (`42`) and the entry function’s ret
 
 | Command | Behavior |
 |---|---|
-| `cargo run -- check <file.klang>` | Parse and type-check source; print diagnostics on failure. |
-| `cargo run -- run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter. |
-| `cargo run -- run <file.klang> [entry] --backend-jit` | Execute with the optional JIT backend; its supported surface is integer-only. |
-| `cargo run -- build <file.klang>` | Check and print MIR; this command does not emit a native executable. |
-| `cargo run -- fmt <file.klang>` | Print canonical formatting. |
-| `cargo run -- fmt <file.klang> --write` | Rewrite the file with canonical formatting. **Comments are not preserved by the formatter.** |
-| `cargo run -- repair <file.klang> --dry-run` | Show the diagnostics and planned repair prompt without calling a model. |
-| `cargo run -- mcp` | Start the MCP server over standard input and output. |
-| `cargo run -- check-v2 <file.v2>` | Check a v2 program. `check --lang v2 <file.v2>` is an equivalent explicit form. |
-| `cargo run -- run-v2 <file.v2> [entry]` | Run a v2 program. `run --lang v2 <file.v2> [entry]` is an equivalent explicit form. |
+| `klang check <file.klang>` | Parse and type-check source; print diagnostics on failure. |
+| `klang run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter. |
+| `klang run <file.klang> [entry] --backend-jit` | Execute with the optional JIT backend; its supported surface is integer-only. |
+| `klang build <file.klang>` | Check and print MIR; this command does not emit a native executable. |
+| `klang fmt <file.klang>` | Print canonical formatting. |
+| `klang fmt <file.klang> --write` | Rewrite the file with canonical formatting. **Comments are not preserved by the formatter.** |
+| `klang repair <file.klang> --dry-run` | Show the diagnostics and planned repair prompt without calling a model. |
+| `klang mcp` | Start the MCP server over standard input and output. |
+| `klang check-v2 <file.v2>` | Check a v2 program. `klang check --lang v2 <file.v2>` is an equivalent explicit form. |
+| `klang run-v2 <file.v2> [entry]` | Run a v2 program. `klang run --lang v2 <file.v2> [entry]` is an equivalent explicit form. |
 
 For v1 programs, passing a source file without a subcommand remains a shorthand for `run`:
 
 ```sh
-cargo run -- examples/simple.klang
+klang examples/simple.klang
 ```
 
 ## Language at a glance
@@ -110,7 +117,7 @@ A spawned task must be bound directly to a variable inside a `task_group`, and i
 Start Klang as an MCP server over stdio:
 
 ```sh
-cargo run -- mcp
+klang mcp
 ```
 
 The server handles JSON-RPC messages and offers these tools:
@@ -125,19 +132,19 @@ The server handles JSON-RPC messages and offers these tools:
 
 A repair loop can therefore remain with the harness: check the source, send the diagnostics to its model, apply a proposed edit, and check again. Klang supplies deterministic compiler feedback; it does not choose or call a model. `repair --dry-run` is available to inspect the planned first prompt without making model calls. See the [repair guide][3].
 
-## Build, test, and verify examples
+## Contribute: build, test, and verify examples
 
-Build and run the Rust test suite with Cargo:
+Precompiled binaries are intended for normal use. If you are changing the Rust source, install a stable Rust toolchain, then build and run the test suite with Cargo:
 
 ```sh
 cargo build
 cargo test
 ```
 
-The repository also includes documentation examples with machine-check directives. After building, verify those examples against the real binary:
+The repository also includes documentation examples with machine-check directives. Verify them against an installed binary:
 
 ```sh
-scripts/verify_docs.py --bin target/debug/klang
+scripts/verify_docs.py --bin "$(command -v klang)"
 ```
 
 The test suite covers the parser, type checker, runtime, task groups, enums, generics, modules, package helpers, MCP tools, repair planning, security checks, and v2 components. Runnable examples are in [`examples/`](examples/); user documentation is in [`docs/`](docs/).
@@ -185,3 +192,5 @@ See [known limitations][4] for additional detail and current caveats.
 [3]: ./docs/repair.md "Klang repair and MCP guide"
 [4]: ./docs/limitations.md "Klang known limitations"
 [5]: ./docs/getting-started.md "Klang getting started"
+[6]: https://github.com/raunakphull62-rgb/never_give_up/releases/latest "Klang precompiled release packages"
+[7]: https://github.com/raunakphull62-rgb/never_give_up/releases "All Klang releases"
