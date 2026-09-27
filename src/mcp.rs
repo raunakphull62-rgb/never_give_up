@@ -503,12 +503,12 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
         // never abort the server process.
         let r = crate::with_deep_stack(move || {
             let mir = crate::mir::lower(&prog);
-            crate::runtime::run_with_output_value(&mir, &entry, &[], &HashMap::new())
+            crate::runtime::run_with_output_value_partial(&mir, &entry, &[], &HashMap::new())
         });
         let _ = tx.send(r);
     });
     match rx.recv_timeout(std::time::Duration::from_secs(RUN_TIMEOUT_SECS)) {
-        Ok(Ok((v, out))) => {
+        Ok((Ok(v), out)) => {
             // Preserve the value's actual type: `Float` stays a JSON
             // number with its fractional part (the old `i32` channel
             // truncated `42.0` to `42`); out-of-range `Int` stays a loud
@@ -531,6 +531,12 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
                             Json::Obj(vec![
                                 ("ok".to_string(), Json::Bool(false)),
                                 ("stage".to_string(), Json::Str("run".to_string())),
+                                (
+                                    "stdout".to_string(),
+                                    Json::Arr(
+                                        out.iter().cloned().map(Json::Str).collect(),
+                                    ),
+                                ),
                                 (
                                     "error".to_string(),
                                     parse_json(&d.to_json()).expect("to_json is valid json"),
@@ -555,11 +561,17 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
                 ]),
             )
         }
-        Ok(Err(d)) => (
+        Ok((Err(d), out)) => (
             true,
             Json::Obj(vec![
                 ("ok".to_string(), Json::Bool(false)),
                 ("stage".to_string(), Json::Str("run".to_string())),
+                (
+                    // HEAVY-TEST-1: keep what the program printed before it
+                    // failed — the diagnostic alone hides how far it got.
+                    "stdout".to_string(),
+                    Json::Arr(out.into_iter().map(Json::Str).collect()),
+                ),
                 (
                     "error".to_string(),
                     parse_json(&d.to_json()).expect("to_json is valid json"),

@@ -33,6 +33,13 @@ pub mod regex;
 /// `time_sleep(seconds)` / `time_now()` / `time_elapsed(since)`.
 pub mod time;
 
+/// OS-interop HTTP boundary: real synchronous `GET`/`POST` via
+/// `ureq` with `E-NET-*` diagnostics (STDLIB-NET-1). Wired into the
+/// interpreter as the flat builtins
+/// `http_get(url)` / `http_post(url, body, headers)`. `net.rs`'s
+/// `MockTransport` is the v2 echo test double and stays untouched.
+pub mod http;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {

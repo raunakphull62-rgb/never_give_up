@@ -2262,3 +2262,483 @@ a valid sleep duration", "rule": "time/invalid", ...}
 `SUM passed=344 failed=0`, 0 non-ok suites;
 `GREP sum=344` — both from the same session, matching, delta
 exactly +7 (337 baseline + 7 new).
+
+---
+
+# STDLIB-NET-1 — Phase 2: HTTP client (code-verified)
+
+Scope: PRD Phase 2 only (`http_get`/`http_post`). `src/stdlib/net.rs`
+untouched (verified: `git status` shows no modification to it).
+Phase 1's time work committed before this phase started; pre-work
+baseline re-measured below.
+
+## Pre-work baseline (this session, live)
+
+- `cargo test` (`CARGO_TARGET_DIR=/tmp/klang-target`): `passed sum:
+  344, failed sum: 0`, all suites `ok` (re-measured; matches the
+  Phase 1 closing number exactly).
+- `grep -rc "#\[test\]" src/ tests/`: `total test attrs: 344`.
+
+## Implementation choice: ureq, not a subprocess or hand-rolled socket
+
+The crate needs real HTTPS (the test endpoint is https). Options
+considered: (a) shelling out to `curl` — the same workaround class
+the PRD rejects for sleep; (b) hand-rolled `TcpStream` HTTP/1.1 —
+no TLS, so https endpoints are impossible without a second TLS
+crate; (c) `ureq` 3.4.2 (added to `Cargo.toml`, +239 lockfile
+lines): synchronous, no async runtime, rustls TLS + gzip in default
+features. Picked (c). `cargo add ureq` + `cargo fetch` confirm
+crates.io is reachable from this environment.
+
+## What was built
+
+- `src/stdlib/http.rs` (new): `get(url)` / `post(url, body,
+  headers)` over one `ureq::Agent` per call (no shared pool — each
+  call independent, correct for v1). `http_status_as_error(false)`:
+  4xx/5xx populate `status`, never raise (parallel to run_process
+  non-zero-exit). Timeouts 10s connect / 60s whole-call backstop.
+  Bodies are lossy-UTF-8 (same precedent as `process::run`'s stdout
+  capture). Request headers: array of `"Name: Value"` strings
+  (run_process argv-array precedent; split on FIRST colon so values
+  may contain colons); validated up front with the `http` crate's
+  own parsers. Response headers: lowercased-name map, repeats joined
+  `", "`, so `resp["headers"]["content-type"]` works like
+  `regex_find`'s `m["named"]["user"]`.
+- Codes: `E-NET-UNREACHABLE` (exchange failed — refused, DNS,
+  timeout, TLS, bad server bytes; real `ureq`/OS string as cause),
+  `E-NET-INVALID-URL` (`BadUri` AND `Http` — see mapping bug below),
+  plus deliberate addition `E-NET-INVALID-HEADER` for malformed
+  header entries (own code, not folded into URL/unreachable;
+  documented in `http.rs` with rationale).
+- `src/stdlib/mod.rs`: `pub mod http;`. `src/hir.rs`: arities
+  (`http_get` 1, `http_post` 3), Str/Array arg checks, `is_builtin`
+  entries. `src/runtime/mod.rs`: `is_builtin` entries,
+  `exec_builtin` arms → `resp["status"/"body"/"headers"]` map via
+  `http_response_map`. Non-array `headers` arg is `E-RUNTIME`
+  (mirrors `run_process`'s non-array message verbatim in style).
+- `tests/osio_http_gates.rs` (new, 10 tests).
+
+## Mapping bug found by live verification (not by reasoning)
+
+First run: 8/10 passed; `"not a url at all"` mapped to
+`E-NET-INVALID-HEADER` (`ureq::Error::Http("http: invalid uri
+character")`), because I had assumed URI problems always surface as
+`BadUri`. Wrong — spaces surface as `Http`. Fixed: `Http` maps to
+`E-NET-INVALID-URL` (sound: all request headers pass `parse_header`
+first and `http_get` sets none, so no header-caused `Http` can reach
+`ureq`; documented in `map_error`). Empty-string URL verified as
+`Http("http: empty string")` → also `E-NET-INVALID-URL`. The tests
+pin these real strings.
+
+## Endpoint choice (why httpbin.org, what was excluded)
+
+- Probed live: `https://httpbin.org/get` → 200 in 0.30s; POST
+  `/post` echoes body in `data` + headers back (verified with
+  curl); `https://postman-echo.com/get` → 200 in 0.19s;
+  `https://httpbingo.com/get` → TIMEOUT after 15s (000) —
+  EXCLUDED, would be a flaky CI dependency.
+- Picked https://httpbin.org (the PRD's own example class):
+  operating for 10+ years, the canonical echo service, and the
+  service ureq's own docs use in examples. Assertions are on real
+  content: GET asserts 200 + body contains `httpbin.org`; POST
+  asserts 200 + body contains the sent string
+  (`klang-post-probe-456`) + the echoed custom header value
+  (`header-val-789`).
+- Hermetic tier needs no internet at all: std-`TcpListener`
+  loopback server (ephemeral port, serves exactly N requests, 20s
+  deadline so client failures fail instead of hanging) pins GET
+  status/body/headers, POST body+header round-trip (incl.
+  colon-in-value `a:b:c`), 404-as-result, and refused-connection
+  (bind-drop-guaranteed ECONNREFUSED) → `E-NET-UNREACHABLE` with
+  real `Connection refused (os error 111)`.
+
+## External-network flag (explicit, per PRD)
+
+The two `osio_http_public_*` tests need outbound internet wherever
+`cargo test` runs. GitHub-hosted runners have unrestricted outbound
+access by default — no egress allowlist on standard runners (docs
+note only crypto-mining/malicious hosts blocked via /etc/hosts and
+inbound ICMP blocked); the repo's own `release.yml` already depends
+on this (`actions/checkout`, toolchain download, `cargo install
+cross --git https://...` on ubuntu-latest). BUT: this repo has no
+test-running CI job (`release.yml` builds binaries on tags only),
+so Phase 2 changes no existing CI behavior — the new dependency
+falls on dev machines and any future test workflow, stated here.
+
+## Live verification (this session, real output)
+
+`cargo test --test osio_http_gates`: `10 passed; 0 failed`.
+Public pair serially (`--test-threads=1`): `finished in 0.30s`
+(real round trips, not mocks).
+
+Built binary (`klang run`): GET probe printed real values, `run
+main() = 42`:
+```
+print: 200
+print: application/json
+run main() = 42
+```
+Refused probe produced the real diagnostic:
+```
+{"code": "E-NET-UNREACHABLE", "message":
+"http_get(http://127.0.0.1:9/) failed: io: Connection refused (os
+error 111)", "cause": "io: Connection refused (os error 111)",
+"rule": "net/unreachable", ...}
+```
+
+## Regression (after Phase 2)
+
+`SUM passed=354 failed=0`, 0 non-ok suites;
+`GREP sum=354` — both from the same session, matching, delta
+exactly +10 (344 baseline + 10 new).
+
+---
+
+# STDLIB-NET-2 — Phase 3: time+HTTP integration program (code-verified)
+
+Scope: PRD Phase 3 only — one real multi-capability `.klang`
+program. No `src/`/`tests/` changes (checked `git status`: only the
+new example file plus this entry).
+
+## Files created
+
+- CREATED `examples/time_http_integration.klang` — follows the
+  `examples/osio_integration.klang` header convention (phase label,
+  run command, expected output, 42-on-success). Captures
+  `time_now()`, issues a real `http_get("https://httpbin.org/get")`,
+  measures with `time_elapsed()`, prints status + seconds, returns
+  42 only when status is 200, the body names the endpoint, and the
+  measurement is non-negative. NEEDS OUTBOUND INTERNET (same
+  httpbin dependency as the `osio_http_public_*` gates, stated in
+  the file header).
+
+## Live verification (this session, real output)
+
+`klang check`: `check: OK (0 diagnostics)`.
+
+`klang run examples/time_http_integration.klang main` (excerpt —
+real output also prints MIR lines, same as prior probes):
+
+```
+print: 200
+print: 0.1332387924194336
+print: body ok
+run main() = 42
+(EXIT=0)
+```
+
+The middle print is the measured request duration in seconds —
+both capabilities genuinely combined (a stubbed clock or a mocked
+client could not produce a real 200 + a real sub-second
+measurement + a real body-content match in one run).
+
+## Regression (after Phase 3)
+
+`SUM passed=354 failed=0`, 0 non-ok suites;
+`GREP sum=354` — both from the same session, matching, delta +0
+(354 baseline, no new tests this phase — the integration program is
+live-run only, same as `osio_integration.klang`).
+
+---
+
+# STDLIB-NET-3 — Phase 4: docs (code-verified)
+
+Scope: PRD Phase 4 only — usage examples where the OSIO stdlib is
+documented. No `src/`/`tests/`/`examples/` changes (checked `git
+status`: only `docs/*` plus this entry).
+
+## Convention (checked before writing)
+
+`docs/README.md` index + `scripts/verify_docs.py`: every
+````klang` block carries a machine-checked first-line directive
+(`// @run prints: … ; return: N` matches prints exactly and parses
+an integer return, `// @run-fail E-CODE`, `// @check-fail E-CODE`,
+`// @check-ok`) and the script runs each block against the real
+binary (`/tmp/klang-target/debug/klang`). `docs/reference.md` §5
+holds the per-builtin arity/rules table (no separate diagnostics
+table exists — nothing else to extend).
+
+## Files created/changed
+
+- MODIFIED `docs/os-interop.md` — the OSIO page (retitled to cover
+  time + HTTP): new `## Time` (0.5s sleep measured against a 0.4s
+  lower bound — proves the sleep with no flaky upper bound; zero
+  sleep + positive `now()`; negative → `E-TIME-INVALID`) and new
+  `## HTTP` (httpbin GET with real status/body assertions, httpbin
+  POST with echoed body/header assertions, `E-NET-INVALID-URL` /
+  `E-NET-INVALID-HEADER` / `E-NET-UNREACHABLE` run-fail samples —
+  all three hermetic, needing no internet — plus the timeout values
+  and the plainly-stated trust model). The existing "Putting it
+  together" chain is untouched (it mirrors
+  `examples/osio_integration.klang`).
+- MODIFIED `docs/reference.md` — two builtin-table rows
+  (`time_sleep`/`time_now`/`time_elapsed`, `http_get`/`http_post`
+  with arities, return shapes, and all four new codes).
+- MODIFIED `docs/README.md` — index bullet now lists time + HTTP.
+- `docs/limitations.md` untouched (nothing there is contradicted:
+  the package-manager "no network fetching" note is still true —
+  the new client is stdlib HTTP, not package fetching).
+
+## Test results (real output)
+
+`scripts/verify_docs.py` (after work, first try, no fix-ups):
+
+```
+verified 57 samples: {'check-ok': 0, 'run': 29, 'check-fail': 19, 'run-fail': 9}
+all docs samples verified, 0 UNVERIFIED markers
+```
+
+(49 before + 8 new: 4 `@run`, 4 `@run-fail`. The two httpbin `@run`
+samples need outbound internet at docs-verification time — same
+dependency as the `osio_http_public_*` gates, already flagged in
+STDLIB-NET-1; every other new sample is hermetic.)
+
+## Regression (after Phase 4)
+
+`SUM passed=354 failed=0`, 0 non-ok suites;
+`GREP sum=354` — both from the same session, matching, delta +0
+(354 baseline, docs-only phase).
+
+---
+
+# HEAVY-TEST — heavy real-world testing pass (code-verified, no fixes)
+
+Scope: the prompt's five areas plus one multi-file tool, each as real
+`.klang`/`.v2` programs run against `/tmp/klang-target/debug/klang`
+(`cargo 1.98.1`, `klang 0.1.0`). Baseline `SUM passed=354 failed=0`,
+`GREP sum=354` re-measured at session start; no `src/` changes in this
+pass (findings documented, not fixed, per the prompt). Full programs
+live in `/tmp/heavy/` (names below); the one new bug's minimal repro is
+checked in as `heavy_print_loss.klang` (repo root, `bugN`-style).
+
+## 1. Core language stress — all pass
+
+- `core1_recursion_generics_match.klang`: 4-variant enum exhaustive
+  match + recursive `sum_shapes` over an enum array + `fib(15)` +
+  generic `wrap`/`describe_wrap` incl. nested `wrap(wrap(21))`.
+  `check: OK`; run prints `80 / 610 / 42 / -5`, `run main() = 135`
+  (= 30+20+0+30 areas; fib(15)=610; 40+2; Err(5)->-5; 80+fib(10)=135).
+  All exact.
+- `core2_shadow_coerce_returns.klang`: re-`let` shadowing across types
+  (i32 -> str -> f64), int/float coercion on all three return paths,
+  int+str concat. `check: OK`; prints `5.5 / 1.5 / -5.5` plus every
+  shadowing branch; checker and runtime agree everywhere.
+- `core3_struct_enum_nested.klang`: `Profile` with `Status` enum field
+  + `Team` nesting `Profile`; `t.lead.status` access through
+  `birthday`/`promote`/`team_report` call chains. `check: OK`; all
+  prints exact (`90 / -4 / -999`, team totals `44` and `45`,
+  `run main() = 86`).
+
+## 2. OSIO stdlib in combination — passes, with one structural limit
+
+- `osio_chain.klang`: write file -> read -> `regex_find` capture ->
+  `run_process("grep", ...)` on the same path -> second `regex_find`
+  on the process stdout -> `write_file` report -> read back. `check:
+  OK`, `run main() = 42`; on-disk report confirmed
+  (`first=ada@example.com`, `grep_found=ada@example.com`).
+- Error paths: `osio_all_errors_one_run.klang` (all four triggers in
+  one program) stops at the FIRST failure with `E-IO-NOT-FOUND` —
+  Klang has no try/catch, so one run can never exhibit all four
+  diagnostics. Each path run separately is specific and correct:
+  missing file -> `E-IO-NOT-FOUND` / `io/not-found` (os error 2);
+  `regex_is_match("([", ...)` -> `E-REGEX-INVALID-PATTERN` /
+  `regex/pattern` (real `unclosed character class` cause);
+  nonexistent command -> `E-PROCESS-NOT-FOUND` / `process/not-found`
+  (os error 2); absolute path outside temp dir -> `E-RUNTIME` /
+  `runtime/execution` (`unsafe absolute path` message). No shared
+  generic code. Minor echo of F14 (second series): the sandbox
+  rejection's message is specific but its `cause` is still the generic
+  `"runtime execution failed"`.
+
+## 3. v2 combined — runtime pillars still real, one static-check gap
+
+- `v2_combo_good.v2` (schema + valid `tune` + computed-`dep` flow +
+  two echoes used together): `check-v2: OK`;
+  `klang run-v2` AND plain `klang run` both print
+  `Struct { name: ada, age: 36 } / 36 / 105 / 56`,
+  `run main() = 141` (`fetch_age = 36`, `fetch_bonus(5) = 105`,
+  `classify(36) = 36+20 = 56` with `threshold = (10+5)+5` computed,
+  never a literal). No stub could produce these.
+- `v2_combo_bad.v2` (`age: "not a number"`): `check-v2: OK (0
+  diagnostics)` — the static check does NOT validate tune literals —
+  but `run-v2` fails loudly with `E-SCHEMA-INVALID` naming `age`
+  (`want int, got str`). See HEAVY-TEST-2. Valid and invalid tune
+  cannot coexist in one run (first failure aborts, same structural
+  limit as §2).
+
+## 4. Time + networking — passes (Phase 2 confirmed landed)
+
+- `time_net_success_only.klang`: timed `http_get` to httpbin.org
+  prints `200 / 0.7874...s / body ok`, `run main() = 42`. The measured
+  0.79s matches `curl`'s 0.78s for the same endpoint this session —
+  a real clock around a real request.
+- Invalid URL (`"not a url at all"`) -> `E-NET-INVALID-URL`
+  (`http: invalid uri character`, rule `net/invalid-url`);
+  `http://127.0.0.1:9/` -> `E-NET-UNREACHABLE`
+  (`Connection refused (os error 111)`). Distinct codes/causes/rules.
+  Combined success-then-bad program verified the abort limit (§2) and
+  additionally exposed HEAVY-TEST-1 (prints lost on failure).
+
+## 5. Edge cases and adversarial input — all hold, two confirmations
+
+- Malformed: unclosed brace -> `E-PARSE "expected \`}\`"`; binary
+  garbage -> `E-PARSE "invalid token"`; truncated signature ->
+  `E-PARSE "expected parameter name"`. All exit 1, all carry the real
+  file path (F12 second-series still holding), no crash.
+- `edge_multi_error.klang` (arity + undefined + type errors):
+  `check: FAIL (3 diagnostics)` — `E-ARITY`, `E-UNDEFINED`, `E-TYPE`
+  all in one pass (multi-error reporting still holding; spans still
+  `0,0` per the F7 debt, but `file` is now real per F12).
+- Cross-feature (never jointly tested before):
+  - `x_sleep_in_spawn.klang` (`time_sleep` inside `spawn`ed tasks):
+    works, `print: 42`, `run main() = 42`.
+  - `x_runproc_in_flow.v2` / `x_runproc_v2_only.v2`: v2 rejects
+    `run_process("echo", ["hi"])` with `E-PARSE-V2 "expected
+    expression"` at the `[` (bytes 51-52). See HEAVY-TEST-3.
+  - `x_qualified_generic_call.klang` (`m::count<i32>(5)`): still
+    misparses as comparisons with cascading `E-ARITY`/`E-UNDEFINED`/
+    `E-TYPE` (F15's documented "qualified generic calls remain future
+    work" — confirmed unchanged, loud, no crash). See HEAVY-TEST-4.
+  - Depth boundary re-probed: `countdown(63)` -> `63` clean;
+    `countdown(64)` -> `E-RUNTIME "call depth exceeded"` with the
+    fixed cause `"call stack depth limit reached"` (F14 + F20 both
+    holding exactly).
+
+## 6. Multi-file tool: `logscan` (`/tmp/heavy/tool/`, 3 files) — works
+
+`logline.klang` (`mod logline`: `Entry` struct, regex `classify`,
+`level_name`) + `stats.klang` (`mod stats`: `pct`, `report_line`) +
+`logscan.klang` (`import` both; `scan()` reads a log, classifies each
+line, writes a report file, cross-checks ERROR count via
+`run_process("grep", ["-c", ...])` + `int()` on the stdout).
+`check: OK`; on the 5-line sample prints
+`total=5 / ERROR: 2 (40.0%) / WARN: 1 (20.0%) / INFO: 2 (40.0%) /
+OTHER: 0 (0.0%)`, `grep_errors=2`, `run main() = 42`. Re-run against a
+different 4-line log gives different correct counts (`0/2/0/2`,
+return 42); empty log gives `total=0`, return 2 by design (and
+exercises non-zero-exit-is-result: `grep -c` exits 1 on empty input
+yet parses to `0` normally). `klang fmt` round-trips the entry file.
+Frictions met while building (no new numbers — all previously
+documented or logged below): `regex_find` has no find-all (first
+match only — the grep cross-check covers counting instead);
+single-expression match arms (used `if`/`else` chains, F19);
+`print` of a multi-line string renders embedded newlines.
+
+### HEAVY-TEST-1 — BUG (medium): `print` output before a runtime failure is silently discarded — DOCUMENTED (not fixed)
+
+- Repro (`heavy_print_loss.klang`, repo root — smallest form):
+  `print("before failure")` then a failing `read_file`. Live
+  `klang run` prints NO `print:` line at all — only `run: FAIL` +
+  the `E-IO-NOT-FOUND` JSON (exit 1). A succeeding run of the same
+  first statement prints normally, so the output existed and was
+  dropped, not never-produced. Also observed with
+  `time_net_success_then_badurl.klang` (three success prints +
+  `good=42` vanished) and `x_depth_boundary.klang` (`countdown(63)`
+  print vanished when `countdown(64)` failed later).
+- Cause (read, not fixed): `run_with_output_value`
+  (`src/runtime/mod.rs:287`) propagates the first `Err` with `?`,
+  discarding `ctx.output`; the CLI `Err` arm (`src/main.rs:650-654`)
+  prints only the diagnostic. Same shape in MCP `tool_run`
+  (value-or-error channel, not inspected this pass beyond the CLI).
+- Why it matters: every debugging workflow prints-then-fails; losing
+  the prints hides how far the program got (here: hid a good 0.79s
+  HTTP timing and a good depth-63 result). Failure diagnostics stay
+  complete — this is output loss, not misdiagnosis.
+
+  **Fixed (this round, code-verified).** Root-cause citation above
+  confirmed by reading: the `?` at `src/runtime/mod.rs:287`, the CLI
+  `Err` arm, plus two more instances of the same pattern found by
+  checking (not assuming): MCP `tool_run`'s run-failure object
+  (`src/mcp.rs`, no `stdout` key on failure) and the v2 mirror
+  (`exec_block(...)?` in `src/runtime/v2.rs` dropping
+  `global.output`, `run_v2_mode`'s `Err` arm printing only the
+  diagnostic). The `check` path has no equivalent pattern: check
+  failures print every diagnostic (`src/main.rs` check arm), and
+  parse failure precedes checking by construction, so there is no
+  partial output to lose there. JIT noted as suggestion below, not
+  changed.
+
+  - Fix: new `run_with_output_value_partial` /
+    `run_v2_program_partial` return `(Result<.., Diagnostic>,
+    Vec<String>)` — output snapshot survives failure; the original
+    functions delegate with byte-identical success/failure behavior
+    for all existing callers. CLI `run` / `run-v2` `Err` arms print
+    accumulated `print:` lines before `run: FAIL`; MCP run-failure
+    and overflow objects gain a `stdout` array (additive keys — the
+    `mcp_gates` shape assertions use `.get()`, unaffected).
+  - Before (`heavy_print_loss.klang`, original code via stash +
+    rebuild, live `klang run`, exit 1):
+    ```
+    run: FAIL
+      "code": "E-IO-NOT-FOUND",
+    ```
+    (no `print:` line — the bug).
+  - After (same repro, fixed code, live `klang run`, exit 1):
+    ```
+    print: before failure
+    run: FAIL
+      "code": "E-IO-NOT-FOUND",
+    ```
+  - Regression tests (`tests/print_loss_gates.rs`, 8 tests):
+    single-print + diagnostic via the partial runner; multi-print
+    order (`first/42/third`); success-path delegate unchanged;
+    arity-failure carries empty output; CLI-level repro through
+    `CARGO_BIN_EXE_klang` asserting `print:` precedes `run: FAIL`
+    with exit 1 (both the checked-in repro and a temp multi-print
+    file); v2 partial runner (`E-SCHEMA-INVALID` + surviving print);
+    v2 CLI-level print-before-FAIL.
+  - Full regression: baseline `SUM passed=354 failed=0` / `GREP
+    sum=354` (measured before the change); after:
+    `SUM passed=362 failed=0` / `GREP sum=362` (delta exactly +8),
+    `scripts/verify_docs.py` 57/57 (no doc `run-fail` sample has a
+    completed print before its failure, so none changes shape).
+  - Suggestion (not fixed, per scope): the JIT `run: JIT-FAIL` arm
+    (`src/main.rs`) has the same drop shape over `jit_output()` —
+    but JIT is the documented int-only probe backend, so it is
+    recorded here, not changed. HEAVY-TEST-2/-3 untouched.
+
+### HEAVY-TEST-2 — TRIAGED (static/runtime split): `check-v2` accepts invalid `tune` literals that `run-v2` rejects — DOCUMENTED
+
+- `v2_combo_bad.v2`: `check-v2` reports `OK (0 diagnostics)` while
+  `run-v2` reports `E-SCHEMA-INVALID` naming `age`. The v1 analogy
+  would be `P { x: 1 }` with a missing field — which F9 made a
+  check-time error. For v2 the boundary check lives at runtime
+  (`runtime::v2`, `SchemaRegistry::check_boundary` in the tuner
+  gates), and the CLI check path never evaluates the literal.
+- Triage: logged as a split, not fixed — deciding whether `check-v2`
+  should const-evaluate `tune` literals is a design call (dynamic
+  values in that position can never be checked statically; literals
+  equally could be). No silent wrong answer either way: `run` is
+  loud, `check` is merely lenient. Any future const-evaluation must
+  handle non-literal tune arguments explicitly.
+
+### HEAVY-TEST-3 — SCOPING RESULT (useful negative): v2 cannot express OSIO calls — two independent levels — DOCUMENTED
+
+- Parse level: `run_process("echo", ["hi"])` in `.v2` fails
+  `E-PARSE-V2` at the array-literal `[` (bytes 51-52); the v2 grammar
+  (`src/parser/v2.rs`) has no array-literal syntax, so argv-style
+  builtins are inexpressible before builtins even matter.
+- Runtime level: `src/runtime/v2.rs` contains zero references to
+  `run_process`/`time_sleep`/`http_get`/`read_file`/`regex_*` (grep
+  verified) — even a scalar-arg builtin would have no executor.
+- Related placeholder (same pattern as F12, distinct instance):
+  v2 diagnostics carry `"file": "input.v2"` instead of the real path
+  (seen on both `E-PARSE-V2` and `E-SCHEMA-INVALID`). Recorded here,
+  not fixed, matching how F14 handled the `"file": "runtime"`
+  sibling.
+- Verdict for the prompt's cross-feature question: unsupported, with
+  exact diagnostics at the first boundary — a fine result, no
+  workaround attempted.
+
+### HEAVY-TEST-4 — CONFIRMATION (no change): qualified explicit-generic calls still parse as comparisons — DOCUMENTED
+
+- `m::count<i32>(5)` yields `E-ARITY` (0 args), `E-UNDEFINED`
+  (`i32`), `E-TYPE` (comparison on bool) — the F15 backtracking
+  covers bare names only, exactly as F15 stated ("Qualified generic
+  calls (`m::f<T>()`) remain future work"). Loud, no crash, no
+  miscompilation. The cascade gives no hint of the real ambiguity
+  (same wart F15 documented for the bare-name case before its fix);
+  extending backtracking across `::` is the natural follow-up, left
+  for the fixing round.
+
+## Regression (this pass): `SUM passed=354 failed=0`, `GREP sum=354` — unchanged (no `src/` edits, docs-only + 1 repro file).

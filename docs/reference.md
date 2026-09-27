@@ -131,6 +131,8 @@ Free functions and methods:
 | `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND` (paths outside the temp dir are still `E-RUNTIME` via the unsafe-path guard) |
 | `run_process(cmd, args)` | 2 | argv-array spawn, no shell; returns map `stdout`/`stderr`/`exit_code`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
 | `regex_is_match(pat, text)` / `regex_find(pat, text)` | 2 / 2 | regex search; `find` returns map `matched`/`match`/`groups`/`named`; no match is a normal result, bad pattern is `E-REGEX-INVALID-PATTERN` |
+| `time_sleep(s)` / `time_now()` / `time_elapsed(since)` | 1 / 0 / 1 | blocking sleep (fractional seconds ok, int widens), Unix-epoch clock, same-clock elapsed; returns int/float/float; bad duration is `E-TIME-INVALID` |
+| `http_get(url)` / `http_post(url, body, headers)` | 1 / 3 | sync HTTP via ureq (10s connect / 60s backstop); returns map `status`/`body`/`headers` (lowercased names); error statuses are normal results; transport failures are `E-NET-UNREACHABLE`, bad URLs `E-NET-INVALID-URL`, bad header entries `E-NET-INVALID-HEADER` |
 
 String methods (`upper lower trim chars len split contains
 starts_with ends_with replace`), array methods (`len push pop

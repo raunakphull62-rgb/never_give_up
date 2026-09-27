@@ -259,11 +259,28 @@ pub fn run_v2_program(
     prog: &V2Program,
     entry: &str,
 ) -> Result<(i32, Vec<String>), Diagnostic> {
+    let (r, out) = run_v2_program_partial(prog, entry);
+    r.map(|v| (v, out))
+}
+
+/// Same as [`run_v2_program`], but the accumulated `print` output is
+/// returned alongside the outcome even on failure, so callers can show
+/// what the program printed before it failed (HEAVY-TEST-1: this output
+/// used to be silently dropped on `Err`). Failures before execution
+/// starts (bad schema types, missing echo bodies, unknown entry) carry
+/// empty output — nothing could have printed yet.
+pub fn run_v2_program_partial(
+    prog: &V2Program,
+    entry: &str,
+) -> (Result<i32, Diagnostic>, Vec<String>) {
     let mut schemas = HashMap::new();
     for s in &prog.schemas {
         let mut fields = Vec::new();
         for f in &s.fields {
-            fields.push(SchemaField::new(&f.name, map_schema_ty(&f.ty)?));
+            match map_schema_ty(&f.ty) {
+                Ok(ty) => fields.push(SchemaField::new(&f.name, ty)),
+                Err(d) => return (Err(d), Vec::new()),
+            }
         }
         schemas.insert(
             s.name.clone(),
@@ -272,18 +289,24 @@ pub fn run_v2_program(
     }
     let mut echo_defs = HashMap::new();
     for e in &prog.echo_fns {
-        let body = prog.echo_bodies.get(&e.name).ok_or_else(|| {
-            Diagnostic::error(
-                "E-PARSE-V2",
-                &format!("echo fn `{}` has no body", e.name),
-                "input.v2",
-                0,
-                0,
-                "echo fns must have bodies to execute",
-                &["give the echo fn a `{ ... }` body"],
-                "syntax/echo",
-            )
-        })?;
+        let body = match prog.echo_bodies.get(&e.name) {
+            Some(body) => body,
+            None => {
+                return (
+                    Err(Diagnostic::error(
+                        "E-PARSE-V2",
+                        &format!("echo fn `{}` has no body", e.name),
+                        "input.v2",
+                        0,
+                        0,
+                        "echo fns must have bodies to execute",
+                        &["give the echo fn a `{ ... }` body"],
+                        "syntax/echo",
+                    )),
+                    Vec::new(),
+                )
+            }
+        };
         echo_defs.insert(
             e.name.clone(),
             EchoDef {
@@ -300,7 +323,10 @@ pub fn run_v2_program(
     let mut global_flows = HashMap::new();
     for d in &prog.flows {
         if let Some(name) = &d.name {
-            let body_expr = crate::parser::v2::parse_v2_expr(&d.expr.body).map_err(|e| e)?;
+            let body_expr = match crate::parser::v2::parse_v2_expr(&d.expr.body) {
+                Ok(body_expr) => body_expr,
+                Err(d) => return (Err(d), Vec::new()),
+            };
             global_flows.insert(
                 name.clone(),
                 FlowDef {
@@ -320,24 +346,46 @@ pub fn run_v2_program(
         handles: Arc::new(Mutex::new(HashMap::new())),
         counter: Arc::new(Mutex::new(0)),
     };
-    let func = global.functions.get(entry).ok_or_else(|| {
-        Diagnostic::parse_error("input.v2", 0, 0, &format!("unknown entry `{entry}`"))
-    })?;
-    let func = func.clone();
+    let func = match global.functions.get(entry) {
+        Some(func) => func.clone(),
+        None => {
+            return (
+                Err(Diagnostic::parse_error(
+                    "input.v2",
+                    0,
+                    0,
+                    &format!("unknown entry `{entry}`"),
+                )),
+                Vec::new(),
+            )
+        }
+    };
     if !func.params.is_empty() {
-        return Err(Diagnostic::error(
-            "E-ARITY",
-            &format!("entry `{entry}` takes {} args, got 0", func.params.len()),
-            "input.v2",
-            0,
-            0,
-            "call arity must match",
-            &["pass the right number of arguments"],
-            "calls/arity",
-        ));
+        return (
+            Err(Diagnostic::error(
+                "E-ARITY",
+                &format!("entry `{entry}` takes {} args, got 0", func.params.len()),
+                "input.v2",
+                0,
+                0,
+                "call arity must match",
+                &["pass the right number of arguments"],
+                "calls/arity",
+            )),
+            Vec::new(),
+        );
     }
     let mut frame = Frame::default();
-    let ret = exec_block(&func.body, &mut frame, &global, 0)?;
+    let ret = match exec_block(&func.body, &mut frame, &global, 0) {
+        Ok(ret) => ret,
+        Err(d) => {
+            // Snapshot without joining echo threads: joining here could
+            // block the failure path; detached-thread semantics are
+            // unchanged, only the output is now preserved.
+            let out = global.output.lock().unwrap().clone();
+            return (Err(d), out);
+        }
+    };
     let v = match ret {
         Some(v) => v,
         None => frame
@@ -364,12 +412,15 @@ pub fn run_v2_program(
     };
     if !leaked.is_empty() {
         leaked.sort();
-        return Err(crate::ai_safety::diagnostics::echo_unlistened(
-            "input.v2",
-            0,
-            0,
-            &leaked[0],
-        ));
+        return (
+            Err(crate::ai_safety::diagnostics::echo_unlistened(
+                "input.v2",
+                0,
+                0,
+                &leaked[0],
+            )),
+            out,
+        );
     }
     let n = v.as_int();
     if n < i32::MIN as i64 || n > i32::MAX as i64 {
@@ -377,11 +428,11 @@ pub fn run_v2_program(
         // preserved, matching v1's fallthrough; out-of-range ints are loud.
         // Strings parse to 0 via as_int; only real overflow errors.
         if matches!(v, Value::Str(_)) {
-            return Ok((0, out));
+            return (Ok(0), out);
         }
-        return Err(overflow_err("return"));
+        return (Err(overflow_err("return")), out);
     }
-    Ok((n as i32, out))
+    (Ok(n as i32), out)
 }
 
 fn exec_block(

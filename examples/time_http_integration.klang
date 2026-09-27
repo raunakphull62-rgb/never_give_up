@@ -1,0 +1,34 @@
+// examples/time_http_integration.klang — STDLIB-NET Phase 3 integration.
+//
+// Combines time + HTTP in one program: capture `time_now()`, issue a
+// real `http_get`, measure the request duration with
+// `time_elapsed()`, and print the response status, the measured
+// seconds, and a short body check. Returns 42 only when the request
+// succeeds (status 200), the body names the endpoint, and the clock
+// measurement is sane (non-negative).
+//
+// NEEDS OUTBOUND INTERNET (https://httpbin.org, same dependency as
+// the osio_http_public_* gate tests).
+//
+// Run: cargo run -- run examples/time_http_integration.klang main
+// Expected: prints 200, a small positive seconds value, and
+// "body ok"; returns 42.
+
+fn main() -> i32 {
+    let t0 = time_now()
+    let r = http_get("https://httpbin.org/get")
+    let e = time_elapsed(t0)
+    print(r["status"])
+    print(e)
+    if r["status"] != 200 {
+        return 1
+    }
+    if e < 0.0 {
+        return 2
+    }
+    if r["body"].contains("httpbin.org") {
+        print("body ok")
+        return 42
+    }
+    return 3
+}

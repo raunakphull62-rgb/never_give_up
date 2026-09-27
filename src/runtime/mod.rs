@@ -249,31 +249,40 @@ pub const MAX_CONCURRENT_TASKS: usize = 256;
 /// Run with explicit args + captured `print` output, preserving the
 /// runtime value's actual type for display (`Value::render` keeps `42.0`
 /// as `42.0`; the `i32` channel below would truncate it to `42`).
-pub fn run_with_output_value(
+///
+/// The accumulated output is returned alongside the outcome even on
+/// failure, so callers can show what the program printed before it
+/// failed (HEAVY-TEST-1: this output used to be silently dropped on
+/// `Err`, hiding how far a failing program got).
+pub fn run_with_output_value_partial(
     module: &MirModule,
     entry: &str,
     args: &[Value],
     stubs: &HashMap<String, i32>,
-) -> Result<(Value, Vec<String>), Diagnostic> {
+) -> (Result<Value, Diagnostic>, Vec<String>) {
     // Entry arity must match exactly (calling-convention safety), mirroring
     // the JIT backend. The CLI always passes zero args, so missing params
-    // are an arity error, not silent zeros.
+    // are an arity error, not silent zeros. No program output can exist
+    // yet at this point, so the failure carries empty output.
     if let Some(f) = module.find(entry) {
         if args.len() != f.params.len() {
-            return Err(Diagnostic::error(
-                "E-ARITY",
-                &format!(
-                    "entry `{entry}` takes {} args, got {}",
-                    f.params.len(),
-                    args.len()
-                ),
-                "runtime",
-                0,
-                0,
-                "call arity must match the callee parameter list",
-                &["pass the right number of arguments"],
-                "calls/arity",
-            ));
+            return (
+                Err(Diagnostic::error(
+                    "E-ARITY",
+                    &format!(
+                        "entry `{entry}` takes {} args, got {}",
+                        f.params.len(),
+                        args.len()
+                    ),
+                    "runtime",
+                    0,
+                    0,
+                    "call arity must match the callee parameter list",
+                    &["pass the right number of arguments"],
+                    "calls/arity",
+                )),
+                Vec::new(),
+            );
         }
     }
     let ctx = ExecCtx {
@@ -284,9 +293,22 @@ pub fn run_with_output_value(
             .collect(),
         output: Arc::new(Mutex::new(Vec::new())),
     };
-    let v = exec_function(&ctx, entry, args, 0, &CancelToken::default())?;
+    let r = exec_function(&ctx, entry, args, 0, &CancelToken::default());
     let out = ctx.output.lock().unwrap().clone();
-    Ok((v, out))
+    (r, out)
+}
+
+/// Run with explicit args + captured `print` output, preserving the
+/// runtime value's actual type for display (`Value::render` keeps `42.0`
+/// as `42.0`; the `i32` channel below would truncate it to `42`).
+pub fn run_with_output_value(
+    module: &MirModule,
+    entry: &str,
+    args: &[Value],
+    stubs: &HashMap<String, i32>,
+) -> Result<(Value, Vec<String>), Diagnostic> {
+    let (r, out) = run_with_output_value_partial(module, entry, args, stubs);
+    r.map(|v| (v, out))
 }
 
 /// Run with explicit args + captured `print` output.
@@ -902,6 +924,8 @@ fn is_builtin(name: &str) -> bool {
             | "time_sleep"
             | "time_now"
             | "time_elapsed"
+            | "http_get"
+            | "http_post"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -914,13 +938,32 @@ fn is_builtin(name: &str) -> bool {
     )
 }
 
+/// Render an [`crate::stdlib::http::HttpResponse`] as the
+/// bracket-indexed map Klang programs see: `resp["status"]` (int),
+/// `resp["body"]` (str), `resp["headers"]` (map of lowercased
+/// name → value, e.g. `resp["headers"]["content-type"]`).
+fn http_response_map(r: &crate::stdlib::http::HttpResponse) -> Value {
+    Value::Map(vec![
+        ("status".to_string(), Value::Int(i64::from(r.status))),
+        ("body".to_string(), Value::Str(r.body.clone())),
+        (
+            "headers".to_string(),
+            Value::Map(
+                r.headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
 fn exec_builtin(
     func: &str,
     args: &[String],
     values: &mut HashMap<String, Value>,
     stubs: &HashMap<String, i64>,
-) -> Result<Value, Diagnostic> {
-    let get = |name: &String| lookup(values, stubs, name).unwrap_or(Value::Int(0));
+) -> Result<Value, Diagnostic> {    let get = |name: &String| lookup(values, stubs, name).unwrap_or(Value::Int(0));
     match func {
         "len" => {
             if args.len() != 1 {
@@ -1177,6 +1220,37 @@ fn exec_builtin(
                 }
             };
             Ok(Value::Float(crate::stdlib::time::elapsed(since)))
+        }
+        "http_get" => {
+            if args.len() != 1 {
+                return Err(runtime_err("http_get() takes 1 argument"));
+            }
+            let url = get(&args[0]).render();
+            let r = crate::stdlib::http::get(&url)?;
+            Ok(http_response_map(&r))
+        }
+        "http_post" => {
+            if args.len() != 3 {
+                return Err(runtime_err("http_post() takes 3 arguments"));
+            }
+            let url = get(&args[0]).render();
+            let body = get(&args[1]).render();
+            let headers = match get(&args[2]) {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        out.push(v.render());
+                    }
+                    out
+                }
+                _ => {
+                    return Err(runtime_err(
+                        "http_post() needs an array of strings third",
+                    ))
+                }
+            };
+            let r = crate::stdlib::http::post(&url, &body, &headers)?;
+            Ok(http_response_map(&r))
         }
         "__echo_create" => {
             if args.len() != 1 {

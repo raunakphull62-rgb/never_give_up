@@ -2496,9 +2496,10 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
     let arity = match func {
         "len" | "pop" | "keys" => 1,
         "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
+        "http_post" => 3,
         "str" | "int" | "float" => 1,
         "assert" => 1,
-        "read_file" | "exists" | "env" | "remove_file" => 1,
+        "read_file" | "exists" | "env" | "remove_file" | "http_get" => 1,
         "regex_is_match" | "regex_find" => 2,
         "time_sleep" | "time_elapsed" => 1,
         "time_now" => 0,
@@ -2667,6 +2668,29 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Float
         }
+        "http_get" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_get()` url", "str", &args[0]));
+            }
+            Ty::Map
+        }
+        "http_post" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_post()` url", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_post()` body", "str", &args[1]));
+            }
+            if !matches!(&args[2], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(
+                    file,
+                    "`http_post()` headers",
+                    "array",
+                    &args[2],
+                ));
+            }
+            Ty::Map
+        }
         _ => Ty::Unknown,
     }
 }
@@ -2792,6 +2816,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "time_sleep"
             | "time_now"
             | "time_elapsed"
+            | "http_get"
+            | "http_post"
     )
 }
 

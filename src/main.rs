@@ -619,8 +619,8 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    match klang::runtime::run_with_output_value(&mir, &entry, &[], &HashMap::new()) {
-        Ok((v, out)) => {
+    match klang::runtime::run_with_output_value_partial(&mir, &entry, &[], &HashMap::new()) {
+        (Ok(v), out) => {
             for line in &out {
                 println!("print: {line}");
             }
@@ -647,7 +647,12 @@ fn run_file_mode(args: &[String]) {
             }
             println!("run {entry}() = {}", v.render());
         }
-        Err(d) => {
+        (Err(d), out) => {
+            // HEAVY-TEST-1: flush whatever the program printed before it
+            // failed — the diagnostic alone hides how far execution got.
+            for line in &out {
+                println!("print: {line}");
+            }
             println!("run: FAIL");
             println!("{}", d.to_json());
             std::process::exit(1);
@@ -978,14 +983,19 @@ fn run_v2_mode(path: &str, entry: String) {
     // Real execution (pillars 2-5, no stubs).
     let prog2 = prog.clone();
     let entry2 = entry.clone();
-    match klang::with_deep_stack(move || klang::runtime::v2::run_v2_program(&prog2, &entry2)) {
-        Ok((v, out)) => {
+    match klang::with_deep_stack(move || klang::runtime::v2::run_v2_program_partial(&prog2, &entry2)) {
+        (Ok(v), out) => {
             for line in &out {
                 println!("print: {line}");
             }
             println!("run {entry}() = {v}");
         }
-        Err(d) => {
+        (Err(d), out) => {
+            // HEAVY-TEST-1 (v2 mirror): flush whatever printed before the
+            // failure, same as the v1 run path above.
+            for line in &out {
+                println!("print: {line}");
+            }
             println!("run: FAIL");
             println!("{}", d.to_json());
             std::process::exit(1);

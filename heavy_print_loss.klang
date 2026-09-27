@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    print("before failure")
+    print(read_file("/tmp/heavy_missing_xyz_12345.txt"))
+    return 0
+}
