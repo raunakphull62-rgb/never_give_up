@@ -49,15 +49,15 @@ klang check hello.klang
 klang run hello.klang
 ```
 
-A successful run prints the program output (`42`) and the entry function’s return value (`run main() = 42`). The `run` command also prints the MIR listing before execution. The entry point defaults to `main`; pass another function name after the file to choose a different entry point.
+A successful run prints only the program output (`42`). The entry function's integer return value becomes the process exit code (never printed): `return 42` exits 42. Pass `--verbose` (or `-v`) for the old full dump including the MIR listing and the `run main() = 42` line. The entry point defaults to `main`; pass another function name after the file to choose a different entry point.
 
 ## Command-line reference
 
 | Command | Behavior |
 |---|---|
 | `klang check <file.klang>` | Parse and type-check source; print diagnostics on failure. |
-| `klang run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter. |
-| `klang run --quiet\|-q <file.klang> [entry]` | Execute with only program output (raw `print` lines plus the `run entry() = value` result line); failures still show the full diagnostic. |
+| `klang run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter; prints only program output, exit code is the return value. |
+| `klang run --verbose\|-v <file.klang> [entry]` | Full dump (MIR listing, `print:` lines, `run entry() = value`); `--quiet\|-q` is a no-op alias. |
 | `klang run <file.klang> [entry] --backend-jit` | Execute with the optional JIT backend; its supported surface is integer-only. |
 | `klang build <file.klang>` | Check and print MIR; this command does not emit a native executable. |
 | `klang fmt <file.klang>` | Print canonical formatting. |

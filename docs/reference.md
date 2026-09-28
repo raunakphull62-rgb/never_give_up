@@ -128,7 +128,7 @@ Free functions and methods:
 | `str(x)` / `int(x)` / `float(x)` | 1 | conversions (`int(4.9)`→4, `float(2)`→2.0) |
 | `keys(m)` | 1 | map→array of keys |
 | `assert(c)` | 1 | bool/int; failure is `E-RUNTIME` at run |
-| `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND` (paths outside the temp dir are still `E-RUNTIME` via the unsafe-path guard) |
+| `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND` (paths outside the temp dir are still `E-RUNTIME` via the unsafe-path guard). It rejects `..` and absolute paths, and it does not protect against symlinks. |
 | `run_process(cmd, args)` | 2 | argv-array spawn, no shell; returns map `stdout`/`stderr`/`exit_code`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
 | `regex_is_match(pat, text)` / `regex_find(pat, text)` | 2 / 2 | regex search; `find` returns map `matched`/`match`/`groups`/`named`; no match is a normal result, bad pattern is `E-REGEX-INVALID-PATTERN` |
 | `time_sleep(s)` / `time_now()` / `time_elapsed(since)` | 1 / 0 / 1 | blocking sleep (fractional seconds ok, int widens), Unix-epoch clock, same-clock elapsed; returns int/float/float; bad duration is `E-TIME-INVALID` |

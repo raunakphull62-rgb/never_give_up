@@ -43,6 +43,11 @@ def run_klang(cmd, src, entry=None):
         argv = [BIN, cmd, path]
         if entry is not None:
             argv.append(entry)
+        if cmd == "run":
+            # RUN-DEFAULT-1: default `run` prints only program output;
+            # docs assertions need the verbose dump (`print:` lines +
+            # `run e() = v`), so request it explicitly.
+            argv.append("--verbose")
         r = subprocess.run(
             argv,
             capture_output=True,
@@ -116,7 +121,8 @@ def main():
                     failures.append(f"{label}: run-fail sample must check clean, got:\n{r.stdout}")
                     continue
                 r = run_klang("run", src, "main")
-                if "run: FAIL" not in r.stdout or f'"{want}"' not in r.stdout:
+                combined = r.stdout + r.stderr
+                if "run: FAIL" not in combined or f'"{want}"' not in combined:
                     failures.append(f"{label}: expected run-fail {want}, got:\n{r.stdout}\n{r.stderr}")
     print(f"verified {total} samples: {counts}")
     if failures:

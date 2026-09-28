@@ -1,0 +1,5 @@
+fn base(n: i32) -> i32 {
+    if n == 0 { return 7 }
+    return 9
+}
+fn main() -> i32 { return base(0) }

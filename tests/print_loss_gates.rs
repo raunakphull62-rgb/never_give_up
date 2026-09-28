@@ -102,7 +102,7 @@ fn klang_bin() -> String {
     env!("CARGO_BIN_EXE_klang").to_string()
 }
 
-fn run_cli(path: &str, entry: &str) -> (String, i32) {
+fn run_cli_split(path: &str, entry: &str) -> (String, String, i32) {
     let output = std::process::Command::new(klang_bin())
         .arg("run")
         .arg(path)
@@ -110,8 +110,17 @@ fn run_cli(path: &str, entry: &str) -> (String, i32) {
         .output()
         .expect("klang binary runs");
     let code = output.status.code().unwrap_or(-1);
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        code,
+    )
+}
+
+fn run_cli(path: &str, entry: &str) -> (String, i32) {
+    let (out, err, code) = run_cli_split(path, entry);
+    let mut combined = out;
+    combined.push_str(&err);
     (combined, code)
 }
 
@@ -119,21 +128,19 @@ fn run_cli(path: &str, entry: &str) -> (String, i32) {
 fn cli_repro_prints_before_fail() {
     // The checked-in repro, through the real binary: the user must see
     // the print AND the failure, in that order — the exact sequence the
-    // bug report requires.
+    // bug report requires. RUN-DEFAULT-1: raw print on stdout, diagnostic
+    // on stderr.
     let repro = concat!(env!("CARGO_MANIFEST_DIR"), "/heavy_print_loss.klang");
     assert!(
         std::path::Path::new(repro).exists(),
         "repro file must exist: {repro}"
     );
-    let (out, code) = run_cli(repro, "main");
-    assert_eq!(code, 1, "failing run exits 1, got:\n{out}");
-    let print_pos = out.find("print: before failure").expect("print shown:\n{out}");
-    let fail_pos = out.find("run: FAIL").expect("FAIL shown:\n{out}");
-    assert!(
-        print_pos < fail_pos,
-        "print must come before FAIL:\n{out}"
-    );
-    assert!(out.contains("E-IO-NOT-FOUND"), "diagnostic shown:\n{out}");
+    let (out, err, code) = run_cli_split(repro, "main");
+    assert_eq!(code, 1, "failing run exits 1, stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains("before failure"), "print on stdout:\n{out}");
+    assert!(!out.contains("run: FAIL"), "FAIL on stderr, not stdout:\n{out}");
+    assert!(err.contains("run: FAIL"), "FAIL on stderr:\n{err}");
+    assert!(err.contains("E-IO-NOT-FOUND"), "diagnostic on stderr:\n{err}");
 }
 
 #[test]
@@ -149,13 +156,13 @@ fn cli_multiple_prints_before_fail_in_order() {
         ),
     )
     .unwrap();
-    let (out, code) = run_cli(&prog_path.to_string_lossy(), "main");
-    assert_eq!(code, 1, "got:\n{out}");
-    let a = out.find("print: alpha").expect("first print:\n{out}");
-    let b = out.find("print: beta").expect("second print:\n{out}");
-    let f = out.find("run: FAIL").expect("FAIL:\n{out}");
-    assert!(a < b && b < f, "prints in order before FAIL:\n{out}");
-    assert!(out.contains("E-IO-NOT-FOUND"), "diagnostic:\n{out}");
+    let (out, err, code) = run_cli_split(&prog_path.to_string_lossy(), "main");
+    assert_eq!(code, 1, "stdout:\n{out}\nstderr:\n{err}");
+    let a = out.find("alpha").expect("first print on stdout:\n{out}");
+    let b = out.find("beta").expect("second print on stdout:\n{out}");
+    assert!(a < b, "prints in order:\n{out}");
+    assert!(err.contains("run: FAIL"), "FAIL on stderr:\n{err}");
+    assert!(err.contains("E-IO-NOT-FOUND"), "diagnostic on stderr:\n{err}");
 }
 
 #[test]
@@ -188,10 +195,9 @@ fn v2_cli_prints_before_fail() {
         "schema Profile \"1\" { name: str, age: i32 }\nfn main() -> i32 {\n    print(\"v2 before\")\n    let bad = tune<Profile>({name: \"bob\", age: \"not a number\"})\n    print(bad)\n    return 0\n}\n",
     )
     .unwrap();
-    let (out, code) = run_cli(&prog_path.to_string_lossy(), "main");
-    assert_eq!(code, 1, "got:\n{out}");
-    let p = out.find("print: v2 before").expect("print shown:\n{out}");
-    let f = out.find("run: FAIL").expect("FAIL shown:\n{out}");
-    assert!(p < f, "print must come before FAIL:\n{out}");
-    assert!(out.contains("E-SCHEMA-INVALID"), "diagnostic:\n{out}");
+    let (out, err, code) = run_cli_split(&prog_path.to_string_lossy(), "main");
+    assert_eq!(code, 1, "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains("v2 before"), "print on stdout:\n{out}");
+    assert!(err.contains("run: FAIL"), "FAIL on stderr:\n{err}");
+    assert!(err.contains("E-SCHEMA-INVALID"), "diagnostic on stderr:\n{err}");
 }

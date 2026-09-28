@@ -1,0 +1,8 @@
+fn depth(n: i32) -> i32 {
+    if n == 0 {
+        0
+    } else {
+        1 + depth(n - 1)
+    }
+}
+fn main() -> i32 { return depth(10) }

@@ -3267,3 +3267,164 @@ features (e.g. `run --quiet` fails on it with `cannot read --quiet`
 `sh`/`powershell` blocks only — `verify_docs.py` scans ```klang
 blocks, so the count is unchanged by construction). Docs-only phase:
 no `src/`/`tests/` changes.
+
+## Corrections (INSTALL-1 follow-up, this session — code-verified, Part 1)
+
+What was wrong (six items, all in Phase E output):
+
+1. **Termux install path wrong.** The doc said the musl asset "also
+   works under Termux/Android" then told the user to run
+   `mv klang /usr/local/bin/klang`. That directory does not exist in
+   Termux; the correct step is `mv klang $PREFIX/bin/klang` with no
+   `sudo`.
+2. **Version string wrong.** `Cargo.toml` said `0.1.0`, so the doc's
+   own `klang --version` check printed `klang 0.1.0` against the
+   `v0.3.0` release.
+3. **Missing `sudo`.** The Linux x86_64 and macOS sections moved the
+   binary into `/usr/local/bin` with bare `mv`.
+4. **Missing prerequisites / wrong downloader.** macOS had no
+   `brew install wget` line (wget is not preinstalled on macOS);
+   Windows used PowerShell `Invoke-WebRequest` + `Expand-Archive`
+   instead of `wget` + `unzip`, with no statement that neither ships
+   natively on Windows.
+5. **Unmarked unverified commands.** The macOS and Windows commands
+   were not executed by the doc's author (Linux-only environment),
+   but the doc itself said nothing — the honesty note lived only in
+   this AUDIT entry.
+6. **Guard misnamed by implication.** SECAUDIT-1 proved live that a
+   symlink inside the temp dir is followed, so the file builtins have
+   a lexical path guard, not a sandbox.
+
+What changed:
+
+- `docs/install.md` — split into five sections. Linux x86_64 and
+  Linux aarch64 (musl) use `sudo mv klang /usr/local/bin/klang`;
+  Android (Termux) reuses the same musl asset with
+  `mv klang $PREFIX/bin/klang` (no sudo) plus a note that Termux has
+  no `/usr/local/bin`. macOS gained a `brew install wget`
+  prerequisite line. Windows now uses `wget` + `unzip` with an
+  explicit prerequisite line (both assumed via Git Bash or WSL;
+  Windows ships neither natively). macOS, Windows, Linux aarch64,
+  and Termux sections each state in plain words that their commands
+  were not executed by the author of the doc; the Termux section
+  additionally records the owner-verified hand install (see below).
+  Tag references stay `v0.3.0` — Part 2 moves them to `v0.4.0`.
+  (Linux x86_64's `sudo mv` is a one-word change to the Phase E
+  verbatim-verified section above; it is re-run verbatim in Part 2.)
+- `Cargo.toml` (`version = "0.1.0"` → `"0.4.0"`) + the resulting
+  `Cargo.lock` klang entry (`0.1.0` → `0.4.0`, from the build, not
+  hand-edited). `.github/workflows/release.yml` deliberately
+  untouched (cannot run that workflow locally).
+- `SPEC.md` §5 toolchain comment (`klang 0.1.0` → `klang 0.4.0`) —
+  direct consequence of the bump; the `klang.toml` example
+  (`version = "0.1.0"`) is manifest example data, left as-is.
+- `docs/reference.md` file-builtins row — appended the plain
+  sentence: "It rejects `..` and absolute paths, and it does not
+  protect against symlinks." (The existing temp-dir parenthetical
+  already documents the temp-dir carve-out, so both stand.)
+- `npm-package/` — NOT edited (report only, see below).
+
+Version-string test search (before changing): no test asserts the
+binary version. `rg` over `src/` + `tests/` for
+`0.1.0|--version|SERVER_VERSION` hits only example manifest data
+(`tests/package_gates.rs`, `tests/v2_package_gates.rs`,
+`src/package/*` defaults — all manifest fixtures, unrelated to the
+binary) and `src/mcp.rs:27 SERVER_VERSION = "0.1.0"` (the MCP
+protocol server version, distinct from `CARGO_PKG_VERSION`; no test
+pins its value; left unchanged as out of scope). `klang --version`
+reads `env!("CARGO_PKG_VERSION")` (`src/main.rs:86`), so the
+`Cargo.toml` bump is the complete fix.
+
+File-guard wording search: case-insensitive `rg "sandbox"` over
+`README.md`, `SPEC.md`, `docs/` returns **zero hits** — no prose
+there ever called it a sandbox (the word survives only in `AUDIT.md`
+history, `tests/sandbox_gates.rs`, and Rust identifiers, all
+explicitly out of scope: no renames, history untouched). The only
+doc describing what the guard protects against was
+`docs/reference.md:131` ("unsafe-path guard"), which now carries
+the symlink sentence. `SPEC.md` §4 and `docs/os-interop.md` list the
+builtins without describing the guard — nothing to amend there.
+
+Report-only (not edited): `npm-package/build.sh` TARGETS still lists
+`darwin-x64` (`x86_64-apple-darwin` → `klang-darwin-x64`, and it is in
+the default build set), and `npm-package/klang-darwin-x64/` exists
+(`package.json` + `README.md`, no `bin/` — pure scaffold, same for
+`klang-darwin-arm64/`). CI (`release.yml` matrix) builds no Intel Mac
+and `docs/install.md` documents none. Publishing the npm scaffold
+as-is would ship a platform no CI builds. Stated here; nothing
+changed.
+
+CI suggestion (not implemented — workflow not runnable locally): add
+a step to `.github/workflows/release.yml` (or a pre-release job)
+that fails the build when the pushed git tag and the `Cargo.toml`
+version differ (e.g. tag `vX.Y.Z` requires `version = "X.Y.Z"`).
+That mismatch is exactly what shipped `klang 0.1.0` inside `v0.3.0`.
+
+Commands run (this environment, `CARGO_TARGET_DIR=/tmp/klang-target`
+throughout because the repo `target/` is a no-exec mount; a first
+`cargo build` without it failed `Permission denied` as expected and
+its stray `target/` artifacts + the touched tracked
+`target/.rustc_info.json` were removed/restored, so `git status`
+shows only the four intended files):
+
+```
+CARGO_TARGET_DIR=/tmp/klang-target cargo build 2>&1 | tail -3
+  → Finished `dev` profile [unoptimized + debuginfo] target(s) in 55.68s (10 pre-existing lib warnings)
+./target/debug/klang --version  → (via /tmp/klang-target/debug/klang)
+  → klang 0.4.0
+CARGO_TARGET_DIR=/tmp/klang-target cargo test 2>&1 | grep "test result:"   # full log saved, exit 0
+  → SUM passed=384 failed=0 (55 suites; run twice, both 384/0)
+grep -rc "#\[test\]" src/ tests/ --include="*.rs" | awk -F: '{s+=$2} END {print s}'
+  → 384
+python3 scripts/verify_docs.py
+  → verified 57 samples: {'check-ok': 0, 'run': 29, 'check-fail': 19, 'run-fail': 9}
+  → all docs samples verified, 0 UNVERIFIED markers
+```
+
+Commands NOT run (stated here and, new, in the doc itself): the
+macOS section (`brew install wget` + install), the Windows section
+(`wget` + `unzip` + `mv`), the Linux aarch64 section (no aarch64
+hardware here — asset names/formats verified real against
+`release.yml`, commands not executed). Termux was **owner-verified,
+not author-verified**: the owner installed the same musl asset by
+hand on a physical Android device on 2026-09-25 with v0.3.0 (wget,
+tar, chmod, `mv klang $PREFIX/bin/klang`, `klang run` all
+succeeded); it was not re-run in this environment.
+
+Honesty note on the runs: one intermediate piped `cargo test` during
+this session printed `SUM passed=331 failed=1`; its output was not
+saved so the failing test was not identified (likely transient —
+candidates are the network-dependent `osio_http_gates`
+(live httpbin.org) and timing-sensitive `osio_time_gates`). The two
+subsequent full runs with saved logs both show `384/0`, `exit 0`,
+and the grep count `384` matches. No code was changed between these
+runs (only `docs/` + version-bump files differ from HEAD).
+
+Part 2 gate: waiting on the owner to publish the `v0.4.0` tag. Then:
+confirm via the GitHub API (published, not draft, four assets),
+`v0.3.0` → `v0.4.0` in `docs/install.md` against the real asset
+names, run the Linux x86_64 section verbatim (wget size line,
+`klang --version` = 0.4.0, `klang run --quiet` smoke), restore the
+pre-existing binary, update this entry, stop.
+
+## Corrections follow-up: MCP `SERVER_VERSION` (this session)
+
+`src/mcp.rs:27` hardcoded `SERVER_VERSION = "0.1.0"` and reported it
+to MCP clients (`serverInfo.version`, line 889) while
+`klang --version` (from `CARGO_PKG_VERSION`) said `0.4.0` — the same
+version-skew class as the `Cargo.toml` item above, one layer deeper.
+Fix (one line, no test changes): `pub const SERVER_VERSION: &str =
+env!("CARGO_PKG_VERSION");` so it always follows `Cargo.toml`.
+Test search first: no test asserts `"0.1.0"` for the MCP server —
+`tests/mcp_gates.rs` pins `protocolVersion` and `serverInfo.name`
+only, never `serverInfo.version` — so nothing to fix on the test
+side. Live handshake after rebuild:
+
+```
+→ {"jsonrpc":"2.0","id":"1","method":"initialize","params":{...}}
+← {"jsonrpc":"2.0","id":"1","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"klang","version":"0.4.0"}}}
+```
+
+Regression: `SUM passed=384 failed=0` (55 suites, `exit 0`),
+`GREP sum=384` — matching, ≥384; `tests/mcp_gates.rs` 9/9
+unchanged. `cargo build` clean (10 pre-existing lib warnings only).

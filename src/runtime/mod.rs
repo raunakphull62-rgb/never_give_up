@@ -241,10 +241,24 @@ pub fn run(
     Ok(v)
 }
 
-/// Max concurrent child tasks per function frame. Each `spawn` is an OS
-/// thread (default 8 MiB stack): unbounded spawning exhausts host memory.
+/// Max concurrent child tasks per function frame. Each `spawn` runs on its
+/// own thread with [`SPAWN_STACK_BYTES`] of stack: unbounded spawning
+/// exhausts host memory.
 /// `range()` is capped at 100k; task spawning gets an analogous bound.
 pub const MAX_CONCURRENT_TASKS: usize = 256;
+
+/// Stack size for spawned task threads (v1 `spawn` and v2 echo workers).
+///
+/// The interpreter recurses natively per Klang call (release ~2.4 KB/frame
+/// measured; debug worst-case ~47 KB v1 / ~114 KB v2), so the Rust default
+/// 2 MiB spawn stack overflows at ~850 frames release (~40 debug) before
+/// the 1024 call-depth guard can fire. 8 MiB lets a spawned
+/// `countdown(1000)` succeed and `countdown(2000)` fail with clean
+/// `E-RUNTIME` in release, with ~3x margin over the measured ~2.5 MB for
+/// 1000 frames. 256 tasks × 8 MiB is 2 GiB of reserved virtual address
+/// space; resident memory stays small (see RSS check below) because stacks
+/// commit on demand.
+pub const SPAWN_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Run with explicit args + captured `print` output, preserving the
 /// runtime value's actual type for display (`Value::render` keeps `42.0`
@@ -381,7 +395,7 @@ fn exec_function(
     depth: usize,
     parent: &CancelToken,
 ) -> Result<Value, Diagnostic> {
-    if depth > 64 {
+    if depth > 1024 {
         return Err(depth_limit_err());
     }
     // No task-entry checkpoint on purpose: a spawned-but-unscheduled task
@@ -502,9 +516,15 @@ fn exec_function(
                 let child = ctx.clone();
                 let func = func.clone();
                 let token = current(&groups, parent);
-                let h = std::thread::spawn(move || {
-                    call_value(&child, &func, &arg_vals, depth + 1, &token)
-                });
+                let h = std::thread::Builder::new()
+                    .name(format!("klang-spawn-{handle}"))
+                    .stack_size(SPAWN_STACK_BYTES)
+                    .spawn(move || {
+                        call_value(&child, &func, &arg_vals, depth + 1, &token)
+                    })
+                    .map_err(|e| {
+                        concurrent_err(&format!("failed to spawn task `{handle}`: {e}"))
+                    })?;
                 pending.insert(handle.clone(), h);
                 pc += 1;
             }
@@ -576,15 +596,21 @@ fn exec_function(
                 pc += 1;
             }
             MirOp::Const { into, value } => {
-                values.insert(into.clone(), Value::Int(*value));
+                let v = Value::Int(*value);
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::ConstFloat { into, bits } => {
-                values.insert(into.clone(), Value::Float(f64::from_bits(*bits)));
+                let v = Value::Float(f64::from_bits(*bits));
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::ConstStr { into, value } => {
-                values.insert(into.clone(), Value::Str(value.clone()));
+                let v = Value::Str(value.clone());
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::Copy { into, from } => {
@@ -752,7 +778,9 @@ fn exec_function(
                 for e in elems {
                     arr.push(lookup(&values, &ctx.stubs, e).unwrap_or(Value::Int(0)));
                 }
-                values.insert(into.clone(), Value::Array(arr));
+                let v = Value::Array(arr);
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::MapNew { into, entries } => {
@@ -763,7 +791,9 @@ fn exec_function(
                         lookup(&values, &ctx.stubs, v).unwrap_or(Value::Int(0)),
                     ));
                 }
-                values.insert(into.clone(), Value::Map(map));
+                let v = Value::Map(map);
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::Index { into, base, index } => {
@@ -818,13 +848,12 @@ fn exec_function(
                         lookup(&values, &ctx.stubs, v).unwrap_or(Value::Int(0)),
                     ));
                 }
-                values.insert(
-                    into.clone(),
-                    Value::Struct {
-                        name: name.clone(),
-                        fields: fvals,
-                    },
-                );
+                let v = Value::Struct {
+                    name: name.clone(),
+                    fields: fvals,
+                };
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::Len { into, of } => {
@@ -835,7 +864,9 @@ fn exec_function(
                     Value::Map(m) => m.len() as i64,
                     _ => return Err(runtime_err("len() needs an array, map or string")),
                 };
-                values.insert(into.clone(), Value::Int(n));
+                let v = Value::Int(n);
+                values.insert(into.clone(), v.clone());
+                last = v;
                 pc += 1;
             }
             MirOp::Print { value } => {

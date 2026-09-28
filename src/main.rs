@@ -468,10 +468,21 @@ fn run_file_mode(args: &[String]) {
     }
     if cmd == "run-v2" {
         if rest.is_empty() {
-            eprintln!("usage: run-v2 <file.v2> [entry]");
+            eprintln!("usage: run-v2 <file.v2> [entry] [--verbose|-v]");
             std::process::exit(2);
         }
-        run_v2_mode(&rest[0], rest.get(1).cloned().unwrap_or_else(|| "main".to_string()));
+        let verbose = has_verbose_flag(rest);
+        let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+        if positional.is_empty() {
+            eprintln!("usage: run-v2 <file.v2> [entry] [--verbose|-v]");
+            std::process::exit(2);
+        }
+        let entry = positional
+            .get(1)
+            .copied()
+            .cloned()
+            .unwrap_or_else(|| "main".to_string());
+        run_v2_mode(positional[0], entry, verbose);
         return;
     }
     // Plain `run` on v2 files: `klang run <file.v2>` and
@@ -480,17 +491,29 @@ fn run_file_mode(args: &[String]) {
     // without the flag keep the v1 path below untouched.
     if cmd == "run" {
         let (is_v2_flag, run_files) = split_run_lang(rest);
-        if is_v2_flag || run_files.first().map(|p| p.ends_with(".v2")).unwrap_or(false) {
-            if run_files.is_empty() {
+        // Positional args with all flags (`--verbose`/`-v`, `--quiet`/`-q`,
+        // `--backend-jit`) removed, so flags may come before or after the
+        // file/entry without being mistaken for them.
+        let positional: Vec<&String> = run_files
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .collect();
+        if is_v2_flag
+            || positional
+                .first()
+                .map(|p| p.ends_with(".v2"))
+                .unwrap_or(false)
+        {
+            if positional.is_empty() {
                 eprintln!("usage: run --lang v2 <file.v2> [entry]");
                 std::process::exit(2);
             }
-            let entry = run_files
+            let entry = positional
                 .get(1)
-                .filter(|s| !s.starts_with("--"))
+                .copied()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            run_v2_mode(&run_files[0], entry);
+            run_v2_mode(positional[0], entry, has_verbose_flag(rest));
             return;
         }
     }
@@ -521,10 +544,10 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
+            "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
         eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
-        eprintln!("       run --quiet|-q <file.klang> [entry]  (only program output, no pipeline dump)");
+        eprintln!("       run [--verbose|-v] <file.klang> [entry]  (default: only program output; exit code is main's return)");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -564,14 +587,15 @@ fn run_file_mode(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "main".to_string());
     let use_jit = rest.iter().any(|a| a == "--backend-jit");
-    // QUIET-1 (option (a)): `run --quiet` / `run -q` suppresses the
-    // pipeline preamble (file/parse/check/mir) so only program output
-    // shows. Additive flag only — the default output is byte-identical
-    // to before (scripts/verify_docs.py parses the verbose shape).
-    // Scoped to `run`: `check`/`build`/v2 keep verbose behavior.
-    let quiet = cmd == "run" && rest.iter().any(|a| a == "--quiet" || a == "-q");
+    // RUN-DEFAULT-1: `run` prints only the program's own output by default
+    // and the entry return value becomes the process exit code (never
+    // printed). `--verbose`/`-v` restores the old full dump (`file:` /
+    // `parse:` / `check:` / `mir:`, `print:`-prefixed lines, `run e() = v`).
+    // `--quiet`/`-q` is accepted as a no-op alias so old scripts keep
+    // working; it changes nothing.
+    let verbose = has_verbose_flag(rest);
     // For `run`, flags may come before or after the file/entry
-    // (`run --quiet prog.klang` == `run prog.klang main --quiet`).
+    // (`run --verbose prog.klang` == `run prog.klang main --verbose`).
     // Entry names never start with `-`, so non-flag args are path/entry
     // in order. Other subcommands keep the exact historical indexing.
     let (run_path, run_entry): (&str, String) = if cmd == "run" {
@@ -581,7 +605,7 @@ fn run_file_mode(args: &[String]) {
             .map(String::as_str)
             .collect();
         if plain.is_empty() {
-            eprintln!("usage: run --quiet|-q <file.klang> [entry]  (only program output, no pipeline dump)");
+            eprintln!("usage: run [--verbose|-v] <file.klang> [entry]  (default: only program output)");
             std::process::exit(2);
         }
         (
@@ -591,9 +615,15 @@ fn run_file_mode(args: &[String]) {
     } else {
         (path.as_str(), entry.clone())
     };
-    let prog = match load_with_imports(run_path, quiet) {
+    // Errors during `run` go to stderr so stdout carries only program
+    // output: `klang run bad.klang 2>/dev/null` prints nothing.
+    // `check`/`build` keep the legacy stdout behavior that
+    // scripts/verify_docs.py parses.
+    let loud_stdout = cmd != "run";
+    let dump = verbose || loud_stdout;
+    let prog = match load_with_imports(run_path, !dump) {
         Ok(prog) => {
-            if !quiet {
+            if dump {
                 println!(
                     "parse: OK ({} functions, {} structs, {} enums)",
                     prog.functions.len(),
@@ -607,21 +637,33 @@ fn run_file_mode(args: &[String]) {
             prog
         }
         Err(d) => {
-            println!("parse: FAIL");
-            println!("{d}");
+            if loud_stdout {
+                println!("parse: FAIL");
+                println!("{d}");
+            } else {
+                eprintln!("parse: FAIL");
+                eprintln!("{d}");
+            }
             std::process::exit(1);
         }
     };
     match TypedHIR::check_with_file(prog.clone(), run_path) {
         Ok(_) => {
-            if !quiet {
+            if dump {
                 println!("check: OK (0 diagnostics)");
             }
         }
         Err(diags) => {
-            println!("check: FAIL ({} diagnostics)", diags.len());
-            for d in &diags {
-                println!("{}", d.to_json());
+            if loud_stdout {
+                println!("check: FAIL ({} diagnostics)", diags.len());
+                for d in &diags {
+                    println!("{}", d.to_json());
+                }
+            } else {
+                eprintln!("check: FAIL ({} diagnostics)", diags.len());
+                for d in &diags {
+                    eprintln!("{}", d.to_json());
+                }
             }
             std::process::exit(1);
         }
@@ -630,7 +672,7 @@ fn run_file_mode(args: &[String]) {
         return;
     }
     let mir = klang::mir::lower(&prog);
-    if !quiet {
+    if dump {
         println!("mir:\n{}", klang::codegen::emit_listing(&mir));
     }
     if cmd == "build" {
@@ -643,18 +685,22 @@ fn run_file_mode(args: &[String]) {
         match klang::jit::run_jit(&mir, &run_entry, &[]) {
             Ok((v, out)) => {
                 for line in &out {
-                    // QUIET-1: quiet prints raw program output, no prefix.
-                    if quiet {
-                        println!("{line}");
-                    } else {
+                    if verbose {
                         println!("print: {line}");
+                    } else {
+                        println!("{line}");
                     }
                 }
-                println!("run {run_entry}() = {v} [jit]");
+                if verbose {
+                    println!("run {run_entry}() = {v} [jit]");
+                }
+                // Exit code is the low 8 bits (OS wrapping): 256 -> 0,
+                // -1 -> 255. No clamping.
+                std::process::exit(v as i32);
             }
             Err(e) => {
-                println!("run: JIT-FAIL");
-                println!("{e}");
+                eprintln!("run: JIT-FAIL");
+                eprintln!("{e}");
                 std::process::exit(1);
             }
         }
@@ -663,17 +709,14 @@ fn run_file_mode(args: &[String]) {
     match klang::runtime::run_with_output_value_partial(&mir, &run_entry, &[], &HashMap::new()) {
         (Ok(v), out) => {
             for line in &out {
-                // QUIET-1: quiet prints raw program output, no prefix.
-                if quiet {
-                    println!("{line}");
-                } else {
+                if verbose {
                     println!("print: {line}");
+                } else {
+                    println!("{line}");
                 }
             }
-            // Render through the value's actual type tag (`Value::render`
-            // keeps `42.0` as `42.0`); the old `i32` channel truncated
-            // every `f64` return to an integer. Out-of-range `Int` returns
-            // stay loud `E-OVERFLOW`, matching `run_with_output`.
+            // Out-of-range `Int` returns stay loud `E-OVERFLOW`, matching
+            // `run_with_output`.
             if let klang::runtime::Value::Int(n) = &v {
                 if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
                     let d = klang::diagnostics::Diagnostic::error(
@@ -686,27 +729,31 @@ fn run_file_mode(args: &[String]) {
                         &["use smaller operands", "check bounds before operating"],
                         "arithmetic/overflow",
                     );
-                    println!("run: FAIL");
-                    println!("{}", d.to_json());
+                    eprintln!("run: FAIL");
+                    eprintln!("{}", d.to_json());
                     std::process::exit(1);
                 }
             }
-            println!("run {run_entry}() = {}", v.render());
+            if verbose {
+                println!("run {run_entry}() = {}", v.render());
+            }
+            std::process::exit(exit_code_for_value(&v));
         }
         (Err(d), out) => {
             // HEAVY-TEST-1: flush whatever the program printed before it
             // failed — the diagnostic alone hides how far execution got.
-            // (QUIET-1: quiet strips the `print: ` prefix here too, so
-            // quiet output is uniformly raw program lines + diagnostics.)
+            // Program lines go to stdout (`print:`-prefixed in verbose,
+            // raw by default); the diagnostic goes to stderr so
+            // `2>/dev/null` shows only program output.
             for line in &out {
-                if quiet {
-                    println!("{line}");
-                } else {
+                if verbose {
                     println!("print: {line}");
+                } else {
+                    println!("{line}");
                 }
             }
-            println!("run: FAIL");
-            println!("{}", d.to_json());
+            eprintln!("run: FAIL");
+            eprintln!("{}", d.to_json());
             std::process::exit(1);
         }
     }
@@ -741,8 +788,9 @@ fn load_with_imports(entry: &str, quiet: bool) -> Result<klang::ast::Program, St
                 klang::diagnostics::sanitize_for_terminal(&path)
             )
         })?;
-        // QUIET-1: suppress the pipeline preamble for `run --quiet`/`-q`.
-        // Every other caller passes quiet=false (see run_file_mode).
+        // RUN-DEFAULT-1: the `file:` preamble shows only with `--verbose`.
+        // The `quiet` arg means "suppress preamble"; callers pass
+        // `!verbose` (see run_file_mode).
         if !quiet {
             println!(
                 "file: {} ({} bytes)",
@@ -967,6 +1015,25 @@ fn split_run_lang(rest: &[String]) -> (bool, Vec<String>) {
     (lang.as_deref() == Some("v2"), files)
 }
 
+/// RUN-DEFAULT-1: `--verbose`/`-v` restores the old full dump.
+/// `--quiet`/`-q` is a no-op alias (accepted, changes nothing) so existing
+/// scripts keep working.
+fn has_verbose_flag(rest: &[String]) -> bool {
+    rest.iter().any(|a| a == "--verbose" || a == "-v")
+}
+
+/// Map a v1 return value to a process exit code. `Int` becomes the exit
+/// code (the OS keeps the low 8 bits: 256 -> 0, -1 -> 255; never clamped).
+/// Any non-`Int` value (including fall-off-the-end `0` and `Float`/`Str`
+/// returns) exits 0. Out-of-range `Int` never reaches here (loud
+/// `E-OVERFLOW`, exit 1, at the call site).
+fn exit_code_for_value(v: &klang::runtime::Value) -> i32 {
+    match v {
+        klang::runtime::Value::Int(n) => *n as i32,
+        _ => 0,
+    }
+}
+
 /// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
 /// shared [`klang::mcp::v2_check_source`] front end and print the same
 /// `Diagnostic::to_json()` objects the MCP tool embeds.
@@ -992,7 +1059,10 @@ fn run_v2_check_mode(path: &str) {
 /// `klang run-v2 <file.v2> [entry]` (and `klang run <file.v2>` /
 /// `klang run --lang v2 <file.v2>`): parse, lower through MIR (pillar 1),
 /// then execute with the real v2 interpreter (pillars 2-5).
-fn run_v2_mode(path: &str, entry: String) {
+/// RUN-DEFAULT-1 applies here too: default prints only program output and
+/// exits with main's return; `--verbose` restores the parse/mir listing
+/// plus the `run entry() = v` line.
+fn run_v2_mode(path: &str, entry: String, verbose: bool) {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
         std::process::exit(1);
@@ -1001,18 +1071,20 @@ fn run_v2_mode(path: &str, entry: String) {
     let prog = match klang::with_deep_stack(move || klang::parser::v2::parse_v2_program(&src)) {
         Ok(prog) => prog,
         Err(d) => {
-            println!("parse: FAIL");
-            println!("{}", d.to_json());
+            eprintln!("parse: FAIL");
+            eprintln!("{}", d.to_json());
             std::process::exit(1);
         }
     };
-    println!(
-        "parse: OK ({} schemas, {} echo fns, {} flows, {} functions)",
-        prog.schemas.len(),
-        prog.echo_fns.len(),
-        prog.flows.len(),
-        prog.functions.len()
-    );
+    if verbose {
+        println!(
+            "parse: OK ({} schemas, {} echo fns, {} flows, {} functions)",
+            prog.schemas.len(),
+            prog.echo_fns.len(),
+            prog.flows.len(),
+            prog.functions.len()
+        );
+    }
     // Lower v2 program through MIR, invoking echo_lowering (pillar 1).
     // The listing below proves the lowering ran; execution itself uses the
     // real v2 interpreter so dep=/echo/tune semantics are genuine.
@@ -1034,9 +1106,11 @@ fn run_v2_mode(path: &str, entry: String) {
             )
         }
     });
-    println!("mir: OK ({} functions)", mir.functions.len());
-    for f in &mir.functions {
-        println!("  fn {} ({} params, {} instrs)", f.name, f.params.len(), f.instrs.len());
+    if verbose {
+        println!("mir: OK ({} functions)", mir.functions.len());
+        for f in &mir.functions {
+            println!("  fn {} ({} params, {} instrs)", f.name, f.params.len(), f.instrs.len());
+        }
     }
     // Real execution (pillars 2-5, no stubs).
     let prog2 = prog.clone();
@@ -1044,18 +1118,30 @@ fn run_v2_mode(path: &str, entry: String) {
     match klang::with_deep_stack(move || klang::runtime::v2::run_v2_program_partial(&prog2, &entry2)) {
         (Ok(v), out) => {
             for line in &out {
-                println!("print: {line}");
+                if verbose {
+                    println!("print: {line}");
+                } else {
+                    println!("{line}");
+                }
             }
-            println!("run {entry}() = {v}");
+            if verbose {
+                println!("run {entry}() = {v}");
+            }
+            // Low 8 bits wrap (256 -> 0); no clamping.
+            std::process::exit(v);
         }
         (Err(d), out) => {
-            // HEAVY-TEST-1 (v2 mirror): flush whatever printed before the
-            // failure, same as the v1 run path above.
+            // HEAVY-TEST-1 (v2 mirror): program lines to stdout
+            // (`print:`-prefixed in verbose); the diagnostic to stderr.
             for line in &out {
-                println!("print: {line}");
+                if verbose {
+                    println!("print: {line}");
+                } else {
+                    println!("{line}");
+                }
             }
-            println!("run: FAIL");
-            println!("{}", d.to_json());
+            eprintln!("run: FAIL");
+            eprintln!("{}", d.to_json());
             std::process::exit(1);
         }
     }

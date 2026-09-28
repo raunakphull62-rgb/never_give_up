@@ -441,7 +441,7 @@ fn exec_block(
     global: &V2Global,
     depth: usize,
 ) -> Result<Option<Value>, Diagnostic> {
-    if depth > 64 {
+    if depth > 1024 {
         return Err(rt_err("call depth exceeded (possible recursion)"));
     }
     let mut last = Value::Int(0);
@@ -537,9 +537,22 @@ fn exec_stmt(
                 if let Some(v) = exec_block(&s.then_block, frame, global, depth)? {
                     return Ok(Some(v));
                 }
+                // Fall-through tail value: the branch's `__last` becomes the
+                // outer block's `last` so `if/else` as the final statement
+                // yields the taken branch's value (mirrors v1 `last`).
+                if !s.then_block.stmts.is_empty() {
+                    if let Some(v) = frame.vars.get("__last").cloned() {
+                        *last = v;
+                    }
+                }
             } else if let Some(else_b) = &s.else_block {
                 if let Some(v) = exec_block(else_b, frame, global, depth)? {
                     return Ok(Some(v));
+                }
+                if !else_b.stmts.is_empty() {
+                    if let Some(v) = frame.vars.get("__last").cloned() {
+                        *last = v;
+                    }
                 }
             }
             Ok(None)
@@ -564,7 +577,7 @@ fn eval_expr(
     global: &V2Global,
     depth: usize,
 ) -> Result<Value, Diagnostic> {
-    if depth > 64 {
+    if depth > 1024 {
         return Err(rt_err("call depth exceeded (possible recursion)"));
     }
     match expr {
@@ -773,23 +786,27 @@ fn eval_call(
         let child_flows = frame.flows.clone();
         let child_body = edef.body.clone();
         let child_params = edef.params.clone();
-        let h = std::thread::spawn(move || -> Result<Value, Diagnostic> {
-            let mut eframe = Frame {
-                vars: HashMap::new(),
-                flows: child_flows,
-            };
-            for (p, v) in child_params.iter().zip(vals) {
-                eframe.vars.insert(p.clone(), v);
-            }
-            match exec_block(&child_body, &mut eframe, &child_global, depth + 1)? {
-                Some(v) => Ok(v),
-                None => Ok(eframe
-                    .vars
-                    .get("__last")
-                    .cloned()
-                    .unwrap_or(Value::Int(0))),
-            }
-        });
+        let h = std::thread::Builder::new()
+            .name(format!("klang-echo-{func}"))
+            .stack_size(super::SPAWN_STACK_BYTES)
+            .spawn(move || -> Result<Value, Diagnostic> {
+                let mut eframe = Frame {
+                    vars: HashMap::new(),
+                    flows: child_flows,
+                };
+                for (p, v) in child_params.iter().zip(vals) {
+                    eframe.vars.insert(p.clone(), v);
+                }
+                match exec_block(&child_body, &mut eframe, &child_global, depth + 1)? {
+                    Some(v) => Ok(v),
+                    None => Ok(eframe
+                        .vars
+                        .get("__last")
+                        .cloned()
+                        .unwrap_or(Value::Int(0))),
+                }
+            })
+            .map_err(|e| rt_err(&format!("failed to spawn echo task `{func}`: {e}")))?;
         global.handles.lock().unwrap().insert(hid.clone(), h);
         return Ok(Value::Str(hid));
     }

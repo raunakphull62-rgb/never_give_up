@@ -150,11 +150,11 @@ offsets (`source.as_bytes()`, `n = bytes.len()`).
 ## 5. Toolchain
 
 ```sh
-cargo run -- --version          # print version (klang 0.1.0) and exit
+cargo run -- --version          # print version (klang 0.4.0) and exit
 cargo run -- check <file>        # parse + type-check (JSON diagnostics)
 cargo run -- fmt <file> [--write]# canonical format (idempotent)
-cargo run -- run <file> [entry]  # parse + check + run (entry default main)
-cargo run -- run --quiet|-q <file> [entry]  # run with only program output (raw prints + result line); failures keep full diagnostics
+cargo run -- run <file> [entry]  # parse + check + run (entry default main); prints only program output, exit code is return value
+cargo run -- run --verbose|-v <file> [entry]  # full dump (MIR, print: lines, run e() = v); --quiet|-q is a no-op alias
 cargo run -- build <file>        # parse + check + MIR listing
 cargo run -- repair <file> [--max-iters N] [--scope function|file] [--dry-run]
                                  # repair-prompt inspector (see below)

@@ -43,13 +43,21 @@ Run it (check + lower + execute, entry defaults to `main`):
 
 ```sh
 cargo run -- run hello.klang
+# 14
+```
+
+`print(x)` writes to stdout. The entry function's integer return
+becomes the process exit code (never printed): `echo $?` shows `42`
+after the run above. A program that fails to check never runs:
+`run` stops after the diagnostics (JSON on stderr, exit 1). Pass
+`--verbose` (or `-v`) for the old full dump (`file:` / `parse:` /
+`check:` / MIR listing, `print:`-prefixed lines, `run main() = 42`):
+
+```sh
+cargo run -- run --verbose hello.klang
 # print: 14
 # run main() = 42
 ```
-
-`print(x)` writes to stdout and the entry function's integer return
-becomes the result line. A program that fails to check never runs:
-`run` stops after the diagnostics.
 
 ## CLI subcommands
 
@@ -70,9 +78,12 @@ What each one actually does:
   the full HIR suite: effects, names, types, enums, generics,
   structured concurrency. Exit 0 with `check: OK`, exit 1 with one
   JSON diagnostic object per error on stdout.
-- **`run`** does everything `check` does, prints the MIR listing,
-  then executes `entry` (default `main`) in the interpreter and
-  prints `print:` lines plus `run <entry>() = <int>`. `--backend-jit`
+- **`run`** does everything `check` does, then executes `entry` (default
+  `main`) in the interpreter and prints only the program's own output.
+  The return value becomes the process exit code (low 8 bits wrap, e.g.
+  256 → 0, -1 → 255; see limitations). `--verbose`/`-v` restores the
+  full dump (MIR listing, `print:` lines, `run <entry>() = <int>`);
+  `--quiet`/`-q` is a no-op alias. `--backend-jit`
   switches execution to the Cranelift JIT, which only supports
   integer code — the interpreter is the default and the reference.
 - **`build`** does everything `check` does and prints the MIR

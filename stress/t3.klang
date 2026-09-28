@@ -1,0 +1,5 @@
+fn f(n: i32) -> i32 {
+    if n == 0 { return 0 }
+    return 1 + f(n - 1)
+}
+fn main() -> i32 { return f(75) }
