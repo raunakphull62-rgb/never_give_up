@@ -193,3 +193,50 @@ fn plain_comparison_still_parses_as_comparison() {
     let prog = p.parse_program().expect("parses");
     assert!(klang::hir::TypedHIR::check(prog).is_ok());
 }
+
+#[test]
+fn qualified_explicit_generic_call_parses_checks_runs() {
+    // BUGHUNT-2 (closes HEAVY-TEST-4): `m::count<i32>(5)` used to
+    // misparse as comparisons with cascading nonsense diagnostics.
+    let (v, out) = run_src(
+        "mod m { pub fn count<T>(n: T) -> T { return n } } fn main() -> i32 { print(m::count<i32>(5)) return 0 }",
+        "main",
+    );
+    assert_eq!(out, vec!["5".to_string()]);
+    assert_eq!(v, 0);
+}
+
+#[test]
+fn qualified_explicit_generic_mismatch_names_param() {
+    // F13 inference-origin wording extends to qualified explicit args.
+    let mut p = Parser::new(
+        "mod m { pub fn same<T>(a: T, b: T) -> T { return a } } fn main() -> i32 { return m::same<i32>(1, \"x\") }",
+    );
+    let prog = p.parse_program().expect("parses");
+    let errs = klang::hir::TypedHIR::check(prog).expect_err("must fail");
+    let e = errs.iter().find(|d| d.code == "E-TYPE").expect("E-TYPE");
+    assert!(e.message.contains("explicit type argument"), "{}", e.message);
+}
+
+#[test]
+fn qualified_comparison_stays_comparison() {
+    // `m::count(a) < b` must remain a comparison, never an instantiation.
+    let (v, _) = run_src(
+        "mod m { pub fn count(n: i32) -> i32 { return n } } fn main() -> i32 { if m::count(1) < 2 { return 42 } return 0 }",
+        "main",
+    );
+    assert_eq!(v, 42);
+}
+
+#[test]
+fn qualified_explicit_generic_fmt_round_trip() {
+    // The new shape survives canonical formatting (and re-checks clean).
+    let src = "mod m { pub fn count<T>(n: T) -> T { return n } } fn main() -> i32 { print(m::count<i32>(5)) return 0 }";
+    let mut p = Parser::new(src);
+    let prog = p.parse_program().expect("parses");
+    let fmted = klang::fmt::fmt_program(&prog);
+    assert!(fmted.contains("m::count<i32>(5)"), "{fmted}");
+    let mut p2 = Parser::new(&fmted);
+    let prog2 = p2.parse_program().expect("re-parses");
+    assert!(klang::hir::TypedHIR::check(prog2).is_ok());
+}

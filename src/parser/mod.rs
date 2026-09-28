@@ -1933,6 +1933,7 @@ impl Parser {
                             enum_name: format!("{name}::{second}"),
                             variant,
                             args,
+                            type_args: Vec::new(),
                         });
                     }
                     if self.peek().kind == TokenKind::LBrace {
@@ -1948,6 +1949,44 @@ impl Parser {
                             fields,
                         });
                     }
+                    // Two-segment `m::f(args)` — or `m::f<T>(args)` with
+                    // explicit type arguments (BUGHUNT-2: the qualified
+                    // twin of the bare-name `<...>` backtracking above).
+                    // Commit only on the full `< Type (, Type)* > (`
+                    // shape; anything else stays a comparison, exactly
+                    // like the bare-name case (`m::f < 123` untouched).
+                    // (The `(` after `>` is consumed by `bump`, like the
+                    // bare-name arm — `parse_call_args_opt` would expect
+                    // to consume it itself, so the loop is inline here.)
+                    if self.peek().kind == TokenKind::Lt {
+                        match self.try_parse_generic_call_args()? {
+                            Some(type_args) => {
+                                self.bump();
+                                let mut args = Vec::new();
+                                if self.peek().kind != TokenKind::RParen {
+                                    loop {
+                                        args.push(self.parse_expr()?);
+                                        if self.peek().kind == TokenKind::Comma {
+                                            self.bump();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                                self.expect(&TokenKind::RParen, "`)`")?;
+                                let id = self.next_id();
+                                let _ = (s, e);
+                                return Ok(Expr::EnumCtor {
+                                    id,
+                                    enum_name: name,
+                                    variant: second,
+                                    args,
+                                    type_args,
+                                });
+                            }
+                            None => {}
+                        }
+                    }
                     let args = self.parse_call_args_opt()?;
                     let id = self.next_id();
                     let _ = (s, e);
@@ -1956,6 +1995,7 @@ impl Parser {
                         enum_name: name,
                         variant: second,
                         args,
+                        type_args: Vec::new(),
                     });
                 }
                 if self.peek().kind == TokenKind::LParen {

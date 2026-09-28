@@ -57,6 +57,7 @@ A successful run prints the program output (`42`) and the entry function’s ret
 |---|---|
 | `klang check <file.klang>` | Parse and type-check source; print diagnostics on failure. |
 | `klang run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter. |
+| `klang run --quiet\|-q <file.klang> [entry]` | Execute with only program output (raw `print` lines plus the `run entry() = value` result line); failures still show the full diagnostic. |
 | `klang run <file.klang> [entry] --backend-jit` | Execute with the optional JIT backend; its supported surface is integer-only. |
 | `klang build <file.klang>` | Check and print MIR; this command does not emit a native executable. |
 | `klang fmt <file.klang>` | Print canonical formatting. |

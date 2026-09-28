@@ -274,13 +274,21 @@ fn fmt_expr(e: &Expr) -> String {
             enum_name,
             variant,
             args,
+            type_args,
             ..
         } => {
+            // BUGHUNT-2: render explicit `m::f<T>(args)` round-trip; plain
+            // ctors (empty type_args) render exactly as before.
+            let targs = if type_args.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", type_args.join(", "))
+            };
             if args.is_empty() {
-                format!("{enum_name}::{variant}")
+                format!("{enum_name}::{variant}{targs}")
             } else {
                 format!(
-                    "{enum_name}::{variant}({})",
+                    "{enum_name}::{variant}{targs}({})",
                     args.iter().map(fmt_expr).collect::<Vec<_>>().join(", ")
                 )
             }

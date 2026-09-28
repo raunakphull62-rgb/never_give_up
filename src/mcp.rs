@@ -433,6 +433,15 @@ pub fn tool_check(source: &str) -> Json {
 /// check (lex errors surface, otherwise clean — file-level v2 programs
 /// arrive after this milestone).
 pub fn v2_check_source(source: &str) -> Vec<Diagnostic> {
+    v2_check_source_with_file(source, "input.v2")
+}
+
+/// Whole-program v2 check with a real filename for diagnostics.
+/// Snippet paths (flow/echo/listen) behave exactly as before; full
+/// programs additionally parse and get check-time `tune`/`verify`
+/// validation (BUGHUNT-2: HEAVY-TEST-2) — constants rejected here with
+/// the same codes the runtime emits, dynamic values left to the runtime.
+pub fn v2_check_source_with_file(source: &str, file: &str) -> Vec<Diagnostic> {
     let trimmed = source.trim_start();
     if trimmed.starts_with("flow") {
         return match crate::parser::flow::parse_flow_decl(source, None) {
@@ -453,11 +462,24 @@ pub fn v2_check_source(source: &str) -> Vec<Diagnostic> {
         };
     }
     match crate::lexer::lex(source) {
-        Ok(_) => vec![],
-        Err(e) => vec![Diagnostic::parse_error(
-            "input.v2", e.offset, e.offset, &e.message,
-        )],
+        Ok(_) => {}
+        Err(e) => {
+            return vec![Diagnostic::parse_error(
+                file,
+                e.offset,
+                e.offset,
+                &e.message,
+            )]
+        }
     }
+    // Full-program path: parse, then check tune/verify constants.
+    // (Previously this returned clean for anything that merely lexed —
+    // even unknown schemas or unparseable programs.)
+    let prog = match crate::parser::v2::parse_v2_program(source) {
+        Ok(prog) => prog,
+        Err(d) => return vec![d],
+    };
+    crate::sema::v2_tune::check_program_tunes(&prog, file)
 }
 
 /// `klang_v2_check`: v2 source in, v2 diagnostics out (empty = clean).

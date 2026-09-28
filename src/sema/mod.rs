@@ -11,6 +11,8 @@ pub mod flow_capture;
 pub mod schema_check;
 /// `?T`/`T`/`!T` compatibility and `tune` proof creation.
 pub mod tuner;
+/// Check-time validation of `tune`/`verify` constants (BUGHUNT-2).
+pub mod v2_tune;
 
 use crate::diagnostics::Diagnostic;
 

@@ -1,4 +1,5 @@
-// stdlib/lexer.klang - byte-offset lexer for Klang source.
+// experiments/self-host-lexer.klang - byte-offset lexer for Klang source.
+// (Self-hosting experiment; not the Rust stdlib in src/stdlib/.)
 //
 // Contract: len(str) is byte length (SPEC 4, Rust String::len).
 // Token spans are byte offsets matching src/parser.rs.

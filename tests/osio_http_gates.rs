@@ -336,3 +336,44 @@ fn osio_http_arg_types_checked() {
     let err = klang::hir::TypedHIR::check(prog).expect_err("must fail");
     assert!(err.iter().any(|d| d.code == "E-TYPE"));
 }
+
+#[test]
+fn osio_http_header_errors_never_echo_values() {
+    // SECAUDIT-1: diagnostics persist in harness logs by design, so a
+    // secret-bearing header must never render into one. The name stays
+    // (debuggable); the value goes.
+    let src = "fn main() -> i32 { let r = http_post(\"http://127.0.0.1:9/echo\", \"x\", [\"Bearer s3cret-token-xyz\"]) return r[\"status\"] }";
+    let err = run_src(src, "main").expect_err("must fail");
+    assert_eq!(err.code, "E-NET-INVALID-HEADER", "got: {}", err.to_json());
+    assert!(
+        !err.to_json().contains("s3cret-token-xyz"),
+        "secret must not render: {}",
+        err.to_json()
+    );
+    // A malformed *named* header keeps the name but drops the value.
+    let src = "fn main() -> i32 { let r = http_post(\"http://127.0.0.1:9/echo\", \"x\", [\"X-Bad: a\nb-s3cret\"]) return r[\"status\"] }";
+    let err = run_src(src, "main").expect_err("must fail");
+    assert_eq!(err.code, "E-NET-INVALID-HEADER", "got: {}", err.to_json());
+    assert!(err.to_json().contains("X-Bad"), "name kept: {}", err.to_json());
+    assert!(
+        !err.to_json().contains("s3cret"),
+        "value dropped: {}",
+        err.to_json()
+    );
+}
+
+#[test]
+fn osio_http_url_userinfo_redacted() {
+    // SECAUDIT-1: `user:pass@` in a failing URL renders as `***@`;
+    // host and path stay for debugging.
+    let src = "fn main() -> i32 { let r = http_get(\"https://user:s3cret-pass@not a host/\") return r[\"status\"] }";
+    let err = run_src(src, "main").expect_err("must fail");
+    assert_eq!(err.code, "E-NET-INVALID-URL", "got: {}", err.to_json());
+    assert!(
+        !err.to_json().contains("s3cret-pass"),
+        "password must not render: {}",
+        err.to_json()
+    );
+    assert!(err.to_json().contains("***@"), "redaction marked: {}", err.to_json());
+    assert!(err.to_json().contains("not a host"), "host kept: {}", err.to_json());
+}

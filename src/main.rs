@@ -524,6 +524,7 @@ fn run_file_mode(args: &[String]) {
             "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
         );
         eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
+        eprintln!("       run --quiet|-q <file.klang> [entry]  (only program output, no pipeline dump)");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -563,16 +564,45 @@ fn run_file_mode(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "main".to_string());
     let use_jit = rest.iter().any(|a| a == "--backend-jit");
-    let prog = match load_with_imports(path) {
+    // QUIET-1 (option (a)): `run --quiet` / `run -q` suppresses the
+    // pipeline preamble (file/parse/check/mir) so only program output
+    // shows. Additive flag only — the default output is byte-identical
+    // to before (scripts/verify_docs.py parses the verbose shape).
+    // Scoped to `run`: `check`/`build`/v2 keep verbose behavior.
+    let quiet = cmd == "run" && rest.iter().any(|a| a == "--quiet" || a == "-q");
+    // For `run`, flags may come before or after the file/entry
+    // (`run --quiet prog.klang` == `run prog.klang main --quiet`).
+    // Entry names never start with `-`, so non-flag args are path/entry
+    // in order. Other subcommands keep the exact historical indexing.
+    let (run_path, run_entry): (&str, String) = if cmd == "run" {
+        let plain: Vec<&str> = rest
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .map(String::as_str)
+            .collect();
+        if plain.is_empty() {
+            eprintln!("usage: run --quiet|-q <file.klang> [entry]  (only program output, no pipeline dump)");
+            std::process::exit(2);
+        }
+        (
+            plain.first().copied().unwrap_or(rest[0].as_str()),
+            plain.get(1).copied().unwrap_or("main").to_string(),
+        )
+    } else {
+        (path.as_str(), entry.clone())
+    };
+    let prog = match load_with_imports(run_path, quiet) {
         Ok(prog) => {
-            println!(
-                "parse: OK ({} functions, {} structs, {} enums)",
-                prog.functions.len(),
-                prog.structs.len(),
-                prog.enums.len()
-            );
-            for f in &prog.functions {
-                println!("  fn {} @{} effects={:?}", f.name, f.id, f.effects);
+            if !quiet {
+                println!(
+                    "parse: OK ({} functions, {} structs, {} enums)",
+                    prog.functions.len(),
+                    prog.structs.len(),
+                    prog.enums.len()
+                );
+                for f in &prog.functions {
+                    println!("  fn {} @{} effects={:?}", f.name, f.id, f.effects);
+                }
             }
             prog
         }
@@ -582,8 +612,12 @@ fn run_file_mode(args: &[String]) {
             std::process::exit(1);
         }
     };
-    match TypedHIR::check_with_file(prog.clone(), path) {
-        Ok(_) => println!("check: OK (0 diagnostics)"),
+    match TypedHIR::check_with_file(prog.clone(), run_path) {
+        Ok(_) => {
+            if !quiet {
+                println!("check: OK (0 diagnostics)");
+            }
+        }
         Err(diags) => {
             println!("check: FAIL ({} diagnostics)", diags.len());
             for d in &diags {
@@ -596,7 +630,9 @@ fn run_file_mode(args: &[String]) {
         return;
     }
     let mir = klang::mir::lower(&prog);
-    println!("mir:\n{}", klang::codegen::emit_listing(&mir));
+    if !quiet {
+        println!("mir:\n{}", klang::codegen::emit_listing(&mir));
+    }
     if cmd == "build" {
         if use_jit {
             println!("note: --backend-jit only affects `run`; `build` stops at MIR");
@@ -604,12 +640,17 @@ fn run_file_mode(args: &[String]) {
         return;
     }
     if use_jit {
-        match klang::jit::run_jit(&mir, &entry, &[]) {
+        match klang::jit::run_jit(&mir, &run_entry, &[]) {
             Ok((v, out)) => {
                 for line in &out {
-                    println!("print: {line}");
+                    // QUIET-1: quiet prints raw program output, no prefix.
+                    if quiet {
+                        println!("{line}");
+                    } else {
+                        println!("print: {line}");
+                    }
                 }
-                println!("run {entry}() = {v} [jit]");
+                println!("run {run_entry}() = {v} [jit]");
             }
             Err(e) => {
                 println!("run: JIT-FAIL");
@@ -619,10 +660,15 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    match klang::runtime::run_with_output_value_partial(&mir, &entry, &[], &HashMap::new()) {
+    match klang::runtime::run_with_output_value_partial(&mir, &run_entry, &[], &HashMap::new()) {
         (Ok(v), out) => {
             for line in &out {
-                println!("print: {line}");
+                // QUIET-1: quiet prints raw program output, no prefix.
+                if quiet {
+                    println!("{line}");
+                } else {
+                    println!("print: {line}");
+                }
             }
             // Render through the value's actual type tag (`Value::render`
             // keeps `42.0` as `42.0`); the old `i32` channel truncated
@@ -645,13 +691,19 @@ fn run_file_mode(args: &[String]) {
                     std::process::exit(1);
                 }
             }
-            println!("run {entry}() = {}", v.render());
+            println!("run {run_entry}() = {}", v.render());
         }
         (Err(d), out) => {
             // HEAVY-TEST-1: flush whatever the program printed before it
             // failed — the diagnostic alone hides how far execution got.
+            // (QUIET-1: quiet strips the `print: ` prefix here too, so
+            // quiet output is uniformly raw program lines + diagnostics.)
             for line in &out {
-                println!("print: {line}");
+                if quiet {
+                    println!("{line}");
+                } else {
+                    println!("print: {line}");
+                }
             }
             println!("run: FAIL");
             println!("{}", d.to_json());
@@ -662,7 +714,7 @@ fn run_file_mode(args: &[String]) {
 
 /// Load a file plus its transitive `import`s, prefixing each file's `NodeId`
 /// paths so identity stays unique and parent-prefixed after merging.
-fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
+fn load_with_imports(entry: &str, quiet: bool) -> Result<klang::ast::Program, String> {
     use std::collections::{HashSet, VecDeque};
     let mut merged = klang::ast::Program {
         mods: vec![],
@@ -689,11 +741,15 @@ fn load_with_imports(entry: &str) -> Result<klang::ast::Program, String> {
                 klang::diagnostics::sanitize_for_terminal(&path)
             )
         })?;
-        println!(
-            "file: {} ({} bytes)",
-            klang::diagnostics::sanitize_for_terminal(&path),
-            src.len()
-        );
+        // QUIET-1: suppress the pipeline preamble for `run --quiet`/`-q`.
+        // Every other caller passes quiet=false (see run_file_mode).
+        if !quiet {
+            println!(
+                "file: {} ({} bytes)",
+                klang::diagnostics::sanitize_for_terminal(&path),
+                src.len()
+            );
+        }
         let mut p = Parser::new_with_file(&src, &path);
         let prog = p.parse_program().map_err(|d| d.to_json())?;
         let dir = std::path::Path::new(&path)
@@ -919,7 +975,9 @@ fn run_v2_check_mode(path: &str) {
         eprintln!("cannot read {path}: {e}");
         std::process::exit(1);
     });
-    match klang::with_deep_stack(move || klang::mcp::v2_check_source(&src)) {
+    // Owned for the 'static deep-stack worker.
+    let file = path.to_string();
+    match klang::with_deep_stack(move || klang::mcp::v2_check_source_with_file(&src, &file)) {
         diags if diags.is_empty() => println!("check: OK (0 diagnostics)"),
         diags => {
             println!("check: FAIL ({} diagnostics)", diags.len());

@@ -8,6 +8,7 @@ not invented syntax.
 
 - [Getting started](getting-started.md) — build from source, first
   program, CLI subcommands.
+- [Install](install.md) — prebuilt binaries per platform.
 - [Language tour](tour.md) — guided walkthrough with runnable examples.
 - [Language reference](reference.md) — precise per-construct rules and
   every diagnostic code with a minimal triggering example.
@@ -19,7 +20,10 @@ not invented syntax.
   pulled from the audit's triaged findings.
 
 Related internal docs (design/verification history, not user docs):
-`../SPEC.md`, `../architecture.md`, `../AUDIT.md`.
+`../SPEC.md`, `../AUDIT.md`, and the historical planning records now
+kept in this folder (`architecture.md`, `features.md`,
+`integration.md`, `master_prompt.md`, `planning.md`, `prd.md`,
+`roadmap.md`).
 
 ## Sample-verification discipline
 

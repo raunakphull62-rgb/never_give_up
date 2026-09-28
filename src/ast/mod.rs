@@ -523,6 +523,12 @@ pub enum Expr {
         enum_name: String,
         variant: String,
         args: Vec<Expr>,
+        /// Explicit `<...>` on two-segment `m::f<T>(args)` (BUGHUNT-2:
+        /// qualified generic calls). Empty unless the call site gave
+        /// type arguments; `rewrite_ctor` moves these onto the resolved
+        /// `Call`, and enum-typed ctors ignore them (runtime is
+        /// inference-determined, mirroring `Call`).
+        type_args: Vec<String>,
     },
     /// `match scrutinee { Enum::Variant(b...) => body, ... _ => body }`.
     Match {

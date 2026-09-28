@@ -610,14 +610,25 @@ fn rewrite_ctor(slot: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
             ctx.gate(&shape.head, is_pub, cur, &full);
             // Convert regardless of arity: HIR reports `E-ARITY` for a
             // wrong argument count, so the call site stays precise.
-            let (oid, otaken) = match slot {
-                Expr::EnumCtor { id, args, .. } => (id.clone(), std::mem::take(args)),
+            // Explicit `<...>` (BUGHUNT-2: `m::f<T>(args)`) rides along
+            // onto the Call for HIR's generic seeding.
+            let (oid, otaken, targs) = match slot {
+                Expr::EnumCtor {
+                    id,
+                    args,
+                    type_args,
+                    ..
+                } => (
+                    id.clone(),
+                    std::mem::take(args),
+                    std::mem::take(type_args),
+                ),
                 _ => unreachable!("ToCall is only decided from an EnumCtor"),
             };
             *slot = Expr::Call {
                 id: oid,
                 func: full,
-                type_args: Vec::new(),
+                type_args: targs,
                 args: otaken,
             };
         }

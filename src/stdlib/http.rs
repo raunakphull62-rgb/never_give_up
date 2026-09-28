@@ -39,7 +39,10 @@
 //! whatever URL the program passes — same trust model as
 //! `process::run` taking a real argv array. Real and unrestricted,
 //! no allowlist; credentials are just headers the caller provides
-//! (no secrets layer).
+//! (no secrets layer). Diagnostics never echo those credentials:
+//! URL userinfo is redacted to `***` and header errors name only the
+//! header (SECAUDIT-1 — verified live, since harness logs persist
+//! diagnostics by design).
 //!
 //! All I/O goes through the free functions here so both the
 //! interpreter (`runtime::exec_builtin`) and unit tests share one
@@ -47,6 +50,35 @@
 
 use crate::diagnostics::Diagnostic;
 use std::time::Duration;
+
+/// Redact URL userinfo (`scheme://user:pass@host` → `scheme://***@host`)
+/// for diagnostic messages. Diagnostics are persisted in harness logs
+/// by design, so credentials must never render into them; host, path,
+/// and query stay (needed to debug the failure).
+fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(auth_end);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://***@{host}{tail}"),
+        None => url.to_string(),
+    }
+}
+
+/// Name-only label for a bad header entry: the value (often an
+/// `Authorization` bearer token or similar secret) must never render
+/// into a diagnostic. Colon-less entries report shape, not content.
+fn header_label(entry: &str) -> String {
+    match entry.split_once(':') {
+        Some((name, _)) => format!("header {:?}", name.trim()),
+        None => format!(
+            "header entry of {} bytes with no colon separator",
+            entry.len()
+        ),
+    }
+}
 
 /// Per-attempt TCP/TLS connect timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,7 +93,7 @@ const GLOBAL_TIMEOUT: Duration = Duration::from_secs(60);
 fn net_unreachable(op: &str, url: &str, err: &ureq::Error) -> Diagnostic {
     Diagnostic::error(
         "E-NET-UNREACHABLE",
-        &format!("{op}({url}) failed: {err}"),
+        &format!("{op}({}) failed: {err}", redact_url(url)),
         "runtime",
         0,
         0,
@@ -76,7 +108,7 @@ fn net_unreachable(op: &str, url: &str, err: &ureq::Error) -> Diagnostic {
 fn net_invalid_url(op: &str, url: &str, err: &ureq::Error) -> Diagnostic {
     Diagnostic::error(
         "E-NET-INVALID-URL",
-        &format!("{op}({url}) failed: invalid URL: {err}"),
+        &format!("{op}({}) failed: invalid URL: {err}", redact_url(url)),
         "runtime",
         0,
         0,
@@ -133,23 +165,24 @@ pub fn map_error(op: &str, url: &str, err: &ureq::Error) -> Diagnostic {
 /// the real HTTP token rules up front (via the `http` crate's own
 /// parsers) so `ureq` can never fail later on input we accepted.
 fn parse_header(op: &str, entry: &str) -> Result<(String, String), Diagnostic> {
+    let label = header_label(entry);
     let (name, value) = entry.split_once(':').ok_or_else(|| {
         net_invalid_header(
             op,
-            entry,
+            &label,
             "expected \"Name: Value\" with a colon separator",
         )
     })?;
     let name = name.trim();
     let value = value.trim();
     if name.is_empty() {
-        return Err(net_invalid_header(op, entry, "header name is empty"));
+        return Err(net_invalid_header(op, &label, "header name is empty"));
     }
     if let Err(e) = name.parse::<ureq::http::header::HeaderName>() {
-        return Err(net_invalid_header(op, entry, &e.to_string()));
+        return Err(net_invalid_header(op, &label, &e.to_string()));
     }
     if let Err(e) = value.parse::<ureq::http::header::HeaderValue>() {
-        return Err(net_invalid_header(op, entry, &e.to_string()));
+        return Err(net_invalid_header(op, &label, &e.to_string()));
     }
     Ok((name.to_string(), value.to_string()))
 }

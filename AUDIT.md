@@ -2742,3 +2742,528 @@ single-expression match arms (used `if`/`else` chains, F19);
   for the fixing round.
 
 ## Regression (this pass): `SUM passed=354 failed=0`, `GREP sum=354` — unchanged (no `src/` edits, docs-only + 1 repro file).
+
+---
+
+# QUIET-1 — quiet output mode for `klang run` (code-verified)
+
+PRD Phase A. Baseline at session start: `SUM passed=362 failed=0`,
+`GREP sum=362` (354 + the 8 `print_loss_gates` tests from the
+HEAVY-TEST-1 fix round).
+
+## Decision: option (a) — `klang run --quiet` / `-q` flag
+
+Option (b) (quiet by default) was rejected on evidence, not taste:
+`scripts/verify_docs.py` parses the verbose `run` shape (it greps
+`check: OK` in stdout and extracts `print: ` lines), so flipping the
+default would break the docs harness and every AUDIT'd verbose probe
+in this project's history. A repo-wide grep for tests asserting on
+CLI stdout found none (all suites drive the library directly except
+`print_loss_gates`/`quiet_gates`, which use substring matching) — but
+the docs script alone is the "existing consumer relying on the
+default" the PRD names. Additive flag, zero default-output change.
+
+## Quiet contract (pinned by tests, stated explicitly)
+
+- Suppressed: `file:`, `parse: OK` + fn list, `check: OK`, the `mir:`
+  dump. `check`, `build`, `run-v2`/`check-v2` keep verbose behavior
+  (flag is `run`-gated; `check --quiet` errors exactly as
+  `check --backend-jit` always has — unknown-flag-as-path, pre-existing
+  class, out of scope).
+- `print` lines go raw (no `print: ` prefix) — the python-like case.
+  The minimal result line is kept: `run {entry}() = {v}` (names a
+  non-default entry too).
+- Failures are never quieted: `run: FAIL` + full diagnostic JSON in
+  both modes; prior prints appear raw in quiet mode (composes with the
+  HEAVY-TEST-1 flush rather than conflicting with it).
+- Flags accepted before or after the file (`run --quiet prog.klang`
+  == `run prog.klang main --quiet`); `-q` is the short form. Bare
+  `klang run --quiet` (no file) is usage + exit 2, not a confusing
+  "cannot read".
+
+## Files changed
+
+- `src/main.rs` — `quiet` bool + flag-tolerant path/entry resolution
+  for `run` only (`run_path`/`run_entry`; repair/fmt indexing
+  untouched), preamble gating, raw-vs-prefixed print rendering
+  (interpreter + JIT arms), `load_with_imports(entry, quiet)` for the
+  `file:` line, usage text.
+- `tests/quiet_gates.rs` (new, 5 tests) — exact-bytes quiet output
+  (`hello\nrun main() = 0\n`), flag positions + short form, default
+  dump unchanged (all six markers), quiet failure (raw print before
+  FAIL + code, no preamble/prefix), custom-entry result line.
+- `README.md` + `SPEC.md` — one row/line each for the flag (no new
+  `@run` samples, docs count unchanged by construction).
+
+## Test results (real output)
+
+`cargo test --test quiet_gates` (with `CARGO_TARGET_DIR=/tmp/klang-target`):
+
+```
+running 5 tests
+test quiet_custom_entry_names_result_line ... ok
+test default_run_keeps_full_dump ... ok
+test quiet_failure_still_shows_diagnostic ... ok
+test quiet_flag_before_file_and_short_form ... ok
+test quiet_run_prints_only_program_output ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+```
+
+Live binary probes (`/tmp/klang-target/debug/klang`, program prints
+`hello`, returns 0):
+
+```
+=== klang run prog.klang main --quiet ===
+hello
+run main() = 0
+(EXIT=0)
+=== klang run prog.klang main (default, unchanged) ===
+file: /tmp/quiet_hello.klang (53 bytes)
+parse: OK (1 functions, 0 structs, 0 enums)
+  fn main @[0,0] effects=[]
+check: OK (0 diagnostics)
+mir:
+func main() @[0,0]:
+  ...
+print: hello
+run main() = 0
+(EXIT=0)
+```
+
+Quiet failure probe (`heavy_print_loss.klang`, exit 1):
+
+```
+before failure
+run: FAIL
+  "code": "E-IO-NOT-FOUND",
+```
+
+Full regression: `SUM passed=367 failed=0` (362 baseline + 5 new),
+`GREP sum=367` — matching, delta exactly +5.
+`scripts/verify_docs.py`: `verified 57 samples`,
+`all docs samples verified, 0 UNVERIFIED markers` (unchanged — default
+output untouched, doc edits add no samples). Note: one full-suite run
+during this phase reported `321 passed, 1 failed` with truncated
+output (only a partial suite count printed); the failing test name was
+not captured. Three subsequent consecutive full runs report `367/367`
+across 53 suites with zero FAILED/panic lines, plus a targeted
+`osio_http_gates` 10/10 rerun — the documented internet-dependent
+suite (`osio_http_public_*`, STDLIB-NET-1) is the suspected transient
+surface. Unreproduced; watched, not attributed to this change (the
+change surface is CLI-display-only; library behavior is untouched).
+
+---
+
+# CLEANUP-1 — repo and docs cleanup (code-verified, pure moves)
+
+PRD Phase B. Baseline at session start: `SUM passed=367 failed=0`
+(53 suites), `GREP sum=367`, docs 57/57 — all re-measured after the
+moves below with identical results (a pure reorganization changes no
+behavior).
+
+## 1. Root planning docs → `docs/` (moved, not rewritten)
+
+`git mv` (pure renames, interiors byte-identical) for 7 files:
+`architecture.md`, `features.md`, `integration.md`,
+`master_prompt.md`, `planning.md`, `prd.md`, `roadmap.md` → `docs/`.
+Root now holds only `README.md`, `SPEC.md`, `AUDIT.md`.
+`docs/README.md` index updated (`../architecture.md` →
+same-folder listing of all seven).
+
+Deviations from the PRD list, both stated with reasons:
+- `SPEC.md` stays at root. It is the live language spec (v0.5), not
+  a stale planning file, and its 3 ```klang blocks carry no
+  machine-checked directives (the first needs `import "lib.klang"`
+  to resolve). `docs/` membership would make `verify_docs.py` fail
+  on it — moving it means rewriting the spec or the harness, both
+  out of scope for a cleanup. `docs/README.md`'s existing
+  `../SPEC.md` link keeps working.
+- No deletions. All seven moved files are Stage-1/harness-era history
+  ("Warden" name, Kaggle/Ollama setup, pre-MCP repair draft) and read
+  stale against AUDIT.md's verified state — but none is an exact
+  duplicate of anything, so per the PRD's deletion rule they move
+  as-is. Their bare-filename cross-mentions (`features.md`,
+  `master_prompt.md`, …) moved together, so they stay mutually
+  resolvable; mentions of root `SPEC.md` from inside moved files are
+  frozen historical prose, deliberately not rewritten (same
+  "record what was believed when" rule AUDIT.md applies to
+  `prd.md`/`roadmap.md`/`integration.md`).
+- No `src`/test/doc-content reference needed updating: the only
+  in-repo pointer to the moved set is `docs/README.md:22` (fixed)
+  and a code comment in `src/repair/prompt.rs:10` (prose mention of
+  "SPEC.md", still accurate — the spec did not move).
+
+## 2. `tests/` subfolders — probed, NOT done (structural constraint)
+
+Empirical probe (`cargo 1.98.1`): a `tests/_probe_subdir/probe_test.rs`
+(with a passing test) is invisible to cargo — `cargo test --test
+probe_test` reports no such target and the test never runs (probe
+dir removed afterwards). Cargo auto-discovers only `tests/*.rs`
+directly; subfolders need 50 explicit `[[test]]` stanzas or
+`#[path]`-harness rewrites. Per the PRD's own escape clause, the
+plan adjusts: flat `tests/` is structurally imposed, and the churn
+(50 manifest stanzas, renamed test binaries, per-new-file manifest
+edits forever) outweighs the cosmetic gain. No test file moved; the
+prefix grouping (`v2_*`, `osio_*`, …) stands as the organization
+convention. No `Cargo.toml` changes.
+
+## 3. Top-level `stdlib/` → `experiments/self-host-lexer.klang`
+
+The name collided with the real Rust stdlib (`src/stdlib/`). The
+moved file is a 423-line self-hosting lexer experiment (`mod lexer`,
+byte-offset helpers) with zero references anywhere in the repo
+(verified by grep: the only `lexer.klang` hit is an unrelated temp
+file in `tests/module_gates.rs`). Pure `git mv` + one header-comment
+line updated to the new path (now also states it is not
+`src/stdlib/`). Live `klang check` on the new path: `check: OK`.
+
+## 4. `npm-package/` — reported, NOT removed (per PRD)
+
+Real distribution scaffold, not leftover: `build.sh` cross-builds
+five platform binaries (linux-x64/arm64-musl, darwin-x64/arm64,
+win32-x64 — the musl static-link and osxcross/mingw notes match the
+platforms Phase E will need), `klang/package.json` is the npm
+wrapper with matching `optionalDependencies`, plus `postinstall.js`.
+Zero references from `.github/workflows/release.yml`, docs, or
+`Cargo.toml` — nothing in-repo drives it today, but it is the only
+npm distribution path in the tree. Verdict: load-bearing for
+distribution, safe to leave alone; removal needs an explicit call.
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+```
+suites=53 SUM passed=367 failed=0
+GREP sum=367
+verified 57 samples: {'check-ok': 0, 'run': 29, 'check-fail': 19, 'run-fail': 9}
+all docs samples verified, 0 UNVERIFIED markers
+```
+
+Identical to baseline on all three numbers (367/367/57) — moves only,
+no behavior change. `cargo build` likewise clean (only pre-existing
+`v2_lowering` warnings).
+
+---
+
+# BUGHUNT-2 — Phase C bug hunt (code-verified)
+
+PRD Phase C. Baseline at session start: `SUM passed=367 failed=0`
+(53 suites), `GREP sum=367`, docs 57/57.
+
+## Part 1 — existing findings
+
+### HEAVY-TEST-2 — DECIDED + FIXED: check-v2 validates tune/verify constants
+
+Decision (the design call the finding asked for): `check-v2`
+validates a `tune<T>()`/`verify<T>()` argument **iff it is a
+compile-time constant** (struct literal of literal fields, recursive).
+Rationale: the reported case is constant, so punting it to runtime is
+a real check/run inconsistency (F9 set the precedent that v1 missing
+struct fields are check-time errors); but a dynamic value (`Var`,
+`Call`, `listen()`, …) can never be checked statically, so those stay
+runtime-checked by construction. A literal-only hack with its own
+validator was rejected — instead the pass reuses
+`SchemaRegistry::check_boundary` (the same `Schema::validate` the
+runtime uses), so check and run cannot drift by construction.
+
+Pre-work discovery (read, not assumed): whole-program `check-v2`
+was lex-only — unknown schemas, bad literals, even unparseable
+programs all returned `check: OK`. The v2 semantic pieces
+(`sema::tuner`, `schema_check`, `flow_capture`, `echo_lifetime`) are
+wired to nothing but unit tests; no whole-program v2 check pass
+exists. The fix below closes the tune/verify slice only — flow
+capture, echo lifetimes, and resonance qualifier checking stay
+future work, stated here, not implied.
+
+What was built (`src/sema/v2_tune.rs`, new; `src/sema/mod.rs`;
+`src/mcp.rs` `v2_check_source_with_file`; `src/main.rs`
+`run_v2_check_mode` passes the real path):
+- Registry built from program schemas (same `str`/`i32`/`bool`
+  mapping as runtime startup; unknown field types emit the same
+  `E-SCHEMA-NOT-FOUND` the runtime emits).
+- Function + echo bodies walked recursively (nested tunes inside
+  calls/arithmetic/ifs/returns all visited; flow bodies are
+  string-held source, skipped — documented).
+- Unknown schema → `E-SCHEMA-NOT-FOUND`; bad constant →
+  `E-SCHEMA-INVALID`; dynamic value → skipped. New diagnostics carry
+  the real file path (F12-class threading for the new code; the
+  pre-existing `input.v2` placeholders in the v1-lex and v2-parse
+  layers are HEAVY-TEST-3 scope, untouched).
+- Runtime agreement verified, not assumed: the interpreter encodes
+  `Bool` as `Int(0/1)` and accepts both for `bool` fields, so the
+  constant conversion mirrors exactly that (`true`/`0`/`1` validate,
+  `2` fails); extra literal fields are ignored exactly as the
+  runtime ignores them (and a dynamic *extra* field no longer
+  suppresses checking of declared fields). No float literals exist
+  in the v2 grammar, so no float coercion exists to mirror.
+
+Live-verified agreement matrix (`klang check-v2` vs `klang run-v2`,
+same file both sides):
+- `tune<Profile>({name:"bob", age:"not a number"})`: check FAIL +
+  run FAIL, byte-identical message (``Profile@1:22e75951d5dbf9e9`
+  rejected `age`: want int, got str` — same identity hash, proving
+  one shared validator).
+- Good literal: check OK + run OK. Unknown schema:
+  `E-SCHEMA-NOT-FOUND` at check. Dynamic (`listen()` result): check
+  OK + run OK (prints the Struct). `verify` bad literal: FAIL both.
+  Missing field: `want int, got missing` both. Scalar
+  (`tune<S>(42)`): `want record, got int` both. `true`/`1` for bool:
+  clean both; `2`: identical FAIL both. Garbage program: `E-PARSE-V2`
+  (previously false-OK — full programs now parse in check-v2).
+
+Regression tests: `tests/v2_tune_check_gates.rs` (7 tests, pinning
+per-shape check/run agreement incl. message equality and the real
+file path). Existing `v2_mcp_gates` snippet-path tests unaffected
+(untouched code path).
+
+### HEAVY-TEST-3 — SCOPED OUT: needs its own PRD, not fixed here
+
+Verdict as the PRD's option anticipated: closing v2×OSIO interop
+means array literals + a v2 stdlib surface (which builtins, what
+resonance signatures, docs) across grammar, runtime, and reference —
+a design-sized task, not a patch. No partial wiring attempted (a
+half-wired builtin set would be worse than the current loud
+`E-PARSE-V2` boundary). Follow-up PRD should also take the two
+tagged-along items: the `input.v2`/`runtime` file-placeholder
+instances (F12 pattern) and whole-program flow/echo semantic checks.
+Untouched this pass: verified still true by re-grep
+(`run_process|time_sleep|http_get|read_file|regex` — zero hits in
+`src/runtime/v2.rs`; no `Array` in `src/parser/v2.rs`).
+
+## Part 2 — fresh adversarial pass (real programs, live binary)
+
+1. **Qualified explicit generics — FIXED (closes HEAVY-TEST-4).**
+   `m::count<i32>(5)` misparsed as comparisons (F15 documented it as
+   future work). Extended the F15 backtracking across `::`:
+   `ast::Expr::EnumCtor` gains `type_args` (empty = historical
+   behavior everywhere); the two-segment parser arm speculates
+   `<...>` identically to the bare-name arm (same full-shape commit,
+   `m::f < 123` still a comparison); `rewrite_ctor` moves the args
+   onto the resolved `Call` (HIR's generic seeding then applies
+   unchanged); `fmt` renders the new shape round-trip; enum-typed
+   ctors and MIR ignore them (runtime stays inference-determined).
+   Live: `check: OK`, `run` prints `5`; mismatch
+   `m::same<i32>(1,"x")` gets the F13 wording
+   (``T was inferred as i32 from explicit type argument 0``);
+   implicit qualified inference per-site works (`42`/`hi`);
+   three-segment `m::E::V<T>` deliberately untouched (still
+   comparison-fallback — stated boundary). Tests: +4 in
+   `tests/generic_gates.rs` (run, mismatch wording, comparison
+   guard, fmt round-trip).
+2. **verify-path + flow `dep=` call-site — probed, not implemented.**
+   `verify` shares the tune evaluator and is covered by the
+   HEAVY-TEST-2 pass + test above. `classify(10, dep=threshold=20)`
+   fails clean `E-PARSE-V2` at `dep` — the supported form stays
+   scope-captured deps (`classify(10)`); call-site dep override is
+   v2 grammar design work, listed as roadmap, left there.
+3. **Concurrency + HTTP — works.** Two `spawn`ed `http_get` tasks
+   against a local server: `check: OK`, prints `200` + `17`
+   (body length), `run main() = 42`, no deadlock. Mixed
+   success/failure siblings surface the single failure unwrapped
+   (`E-NET-UNREACHABLE`, exit 1, prompt termination) — matching the
+   documented task-group contract, not a new failure mode.
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+```
+--test v2_tune_check_gates: 7 passed; 0 failed
+--test generic_gates: 14 passed; 0 failed (10 existing + 4 new)
+Full: suites=54 SUM passed=378 failed=0 (367 baseline + 11 new)
+GREP sum=378 — matching, delta exactly +11.
+verify_docs.py: verified 57 samples, 0 UNVERIFIED (unchanged).
+```
+
+No `src/` changes beyond the two fixes above; `cargo build` clean
+(only pre-existing `v2_lowering` warnings).
+
+---
+
+# SECAUDIT-1 — Phase D security review (code-verified)
+
+PRD Phase D. Baseline at session start: `SUM passed=378 failed=0`
+(54 suites), `GREP sum=378`, docs 57/57. Method note: `cargo audit`
+is not installed here (and building it exceeds this pass); the
+85→118-crate lockfile was batch-queried against the OSV API instead
+(same approach as the earlier dependency scan, now re-run live).
+
+## Result table
+
+| # | Item checked | Finding |
+|---|---|---|
+| 1 | Dependency CVEs (118 third-party crates, OSV batch) | **1 hit → fixed** (salsa UAF, bumped) |
+| 2 | `process::run` argv-only design | **Clean** (single spawn site, no shell) |
+| 3 | File-path sandbox vs new adversarial paths | **Clean** (`..`/absolute/NUL all loud) + 1 **documented residual** (tmp symlinks followed, live-demonstrated) |
+| 4 | HTTP unrestricted capability (SSRF-adjacent) | **Flagged**: no allowlist by PRD design (stays); secret-echo in diagnostics **fixed** |
+| 5 | `unsafe` blocks (JIT transmutes) | **Clean** (unchanged shape, still flag-gated) |
+| 6 | Sensitive data in diagnostics | **2 leaks found → fixed** (header values, URL userinfo); file paths/int-parse/regex causes clean |
+
+## D1 — FIXED: RUSTSEC-2026-0308 (salsa use-after-free)
+
+OSV batch over all 118 non-klang lockfile entries returned exactly
+one hit: `salsa 0.28.4`, use-after-free in interned values/cached
+results reachable through safe APIs (categories
+memory-corruption/memory-exposure/code-execution; fixed in 0.28.5,
+advisory's fix PR salsa-rs#1329). Klang's exposure assessed by
+reading `src/db.rs`: one `#[salsa::input]`, two `#[salsa::tracked]`
+fns over that input, zero `#[salsa::interned]` structs, derived
+(structural) `Eq` impls only — neither advisory trigger (bad app
+`Eq`, interned-value misuse) is present in our code, and the CLI
+run path does not use the DB at all. Still fixed rather than
+argued-away (it is a soundness hole in a dependency we ship):
+`cargo update -p salsa` → `salsa`/`salsa-macro-rules`/`salsa-macros`
+0.28.4 → 0.28.5 (patch-only family bump). Rescan after the bump:
+**0 hits across 118 crates** (live output, this session).
+
+## D2 — clean: argv-only spawn confirmed
+
+The only process-spawn in `src/` is
+`std::process::Command::new(cmd).args(args)` (`src/stdlib/process.rs:92`);
+no `sh -c`, `cmd /c`, or string-joined command anywhere (grep
+verified). Unchanged since STDLIB-OSIO-2; no action.
+
+## D3 — sandbox holds; symlink residual live-demonstrated
+
+`reject_unsafe_path` guards all five file builtins (read/write/
+append/exists/remove — each call site read). New adversarial probes,
+all run live (`klang run`, exit codes observed):
+- `read_file("../../../etc/passwd")` and buried `sub/../../…` →
+  `E-RUNTIME "unsafe path"`, exit 1 (any `..` component rejects;
+  `components()` never normalizes a `..` away).
+- Absolute `/etc/hostname` → `E-RUNTIME "unsafe absolute path"`.
+- `\u0000` in a path (real NUL byte, `len` 8 proves it): lexical
+  guard passes (under tmp), OS layer fails loud `E-IO-FAILED`
+  ("NUL byte", real cause) — no panic, no fs touch.
+- **Residual (was F14 analysis, now live evidence):** a symlink
+  planted in tmp pointing at `/etc/hostname` reads THROUGH
+  (`print`ed the hostname); `write_file` through a tmp symlink
+  follows the link too. Planting the link already needs fs access,
+  and canonicalizing would break legitimately symlinked temp dirs
+  (macOS `/tmp → /private/tmp`) — so still documented, not changed.
+  `remove_file` on a symlink removes the LINK only (target intact,
+  verified) — safe semantics worth having pinned.
+- New tests: `tests/sandbox_gates.rs` (4 tests: buried+leading `..`,
+  NUL, link-follow pinned deliberately, unlink-link-only).
+
+## D4 — flagged: HTTP has no allowlist (by design, stays)
+
+Unchanged from the STDLIB-NET-1 decision and its docs statement:
+`http_get`/`http_post` fetch whatever URL they are given, so a
+Klang program can probe internal addresses from wherever it runs
+(SSRF-adjacent by construction, same trust class as `run_process`
+spawning anything). Restricting it needs product semantics (per-host
+policy? redirect rules?) — follow-up PRD material, not a patch.
+What WAS in scope and is fixed: the diagnostics echoed credentials
+(see D6).
+
+## D5 — clean: `unsafe` unchanged, still flag-gated
+
+All real `unsafe` is 5 transmutes in `src/jit.rs` (finalized
+Cranelift function pointers cast to matching `fn(i64…) -> i64`
+types, arity-checked before each call — the standard pattern, same
+shape as previously audited). JIT remains opt-in `--backend-jit`
+only (interpreter default); every other `unsafe` hit is the word in
+names/comments (`is_unsafe_import_path`, etc.). No change.
+
+## D6 — FIXED: diagnostics echoed secrets (2 leaks, live-demonstrated)
+
+Spot-check found two real leaks (both verified live before the fix
+with `s3cret`-marked values rendering verbatim into diagnostic
+JSON — JSON the MCP layer returns and repair logs persist):
+- A malformed header entry (`["Bearer s3cret-token-xyz"]`) rendered
+  whole into `E-NET-INVALID-HEADER`'s message.
+- A failing URL with userinfo (`https://user:s3cret-pass@…`)
+  rendered whole into `E-NET-INVALID-URL`'s message.
+- Fix (`src/stdlib/http.rs`): header errors name only the header
+  (`header "X-Bad"`; colon-less entries report byte-length, never
+  content); URL errors pass through `redact_url`
+  (`https://***@host/path`, query kept for debugging). Causes
+  already carried no secrets (verified: bad-value cause is
+  `failed to parse header value`). Clean elsewhere:
+  `int()`/`float()` parse failures never echo the input
+  (`int() cannot parse string`); file errors echo the path only;
+  `run_process` failures echo the command name only.
+- Live after-fix: secret strings absent, name/host/debuggability
+  retained (`header "X-Bad"`, `https://***@not a host/`).
+- New tests: +2 in `tests/osio_http_gates.rs` (header values and
+  userinfo absent from JSON; name/host/`***@` present). Pre-existing
+  header assertions (codes, "colon" wording) pass unchanged.
+
+## Test results (real output, `CARGO_TARGET_DIR=/tmp/klang-target`)
+
+```
+--test sandbox_gates: 4 passed; 0 failed (new file)
+--test osio_http_gates: 12 passed; 0 failed (10 existing + 2 new)
+Full: suites=55 SUM passed=384 failed=0 (378 baseline + 6 new)
+GREP sum=384 — matching, delta exactly +6.
+verify_docs.py: verified 57 samples, 0 UNVERIFIED (unchanged).
+```
+
+`cargo build` clean (only pre-existing `v2_lowering` warnings).
+OSV rescan post-fix: 0 hits / 118 crates.
+
+---
+
+# INSTALL-1 — Phase E install doc (code-verified)
+
+PRD Phase E. New file `docs/install.md` (+ one index bullet in
+`docs/README.md`): platform + exact commands only, no prose beyond
+that. Pinned tag `v0.3.0` — nothing hardcoded from memory:
+
+- `git tag` latest is `v0.3.0`; repo is
+  `github.com/raunakphull62-rgb/never_give_up` (from `git remote`).
+- `.github/workflows/release.yml` matrix builds exactly 4 targets:
+  `linux-x86_64` (gnu), `linux-aarch64-musl-termux` (musl cross,
+  static — the workflow header notes it doubles as the
+  Termux/Android build, NDK-free like ripgrep/fd), `windows-x86_64`
+  (msvc), `macos-aarch64-apple-silicon` (Intel Macs dropped for
+  runner queues). Packaging: `tar -czf klang-<name>.tar.gz klang`
+  on Unix, `7z a klang-<name>.zip klang.exe` on Windows — so the
+  doc uses `tar -xzf` for the three Unix assets and
+  `Expand-Archive` for the Windows `.zip` (real formats, not assumed).
+- GitHub Releases API for tag `v0.3.0`: published, not
+  draft/prerelease, with all four assets live
+  (`klang-linux-x86_64.tar.gz` 2770300 bytes,
+  `klang-linux-aarch64-musl-termux.tar.gz`,
+  `klang-macos-aarch64-apple-silicon.tar.gz`,
+  `klang-windows-x86_64.zip` — each with real download counts).
+  The PRD's "last confirmed" platform list is still accurate.
+
+## Verification (Linux x86_64, this environment, real output)
+
+The doc's exact commands run verbatim in a clean dir (pre-existing
+`/usr/local/bin/klang` backed up first, restored byte-identical
+after — `cmp` confirmed):
+
+```
+wget .../releases/download/v0.3.0/klang-linux-x86_64.tar.gz
+  → saved [2770300/2770300] (matches the API byte count exactly)
+tar -xzf klang-linux-x86_64.tar.gz
+chmod +x klang
+mv klang /usr/local/bin/klang
+klang --version
+  → klang 0.1.0
+```
+
+Smoke test of the installed release binary (a real program, not just
+`--version`):
+
+```
+klang run /tmp/installcheck/smoke.klang main
+  print: installed-ok
+  run main() = 42
+(EXIT=0)
+```
+
+Honesty notes: (1) the other three platforms' commands use
+verified-real asset names + their documented extraction formats but
+were not executed here (Linux-only environment) — the doc does not
+claim otherwise; (2) release `v0.3.0` predates uncommitted worktree
+features (e.g. `run --quiet` fails on it with `cannot read --quiet`
+— probed live), so the doc promises only what the release contains
+(`--version` + `run`, both proven above).
+
+## Regression (this phase)
+
+`suites=55 SUM passed=384 failed=0`, docs `57/57` (the new page has
+`sh`/`powershell` blocks only — `verify_docs.py` scans ```klang
+blocks, so the count is unchanged by construction). Docs-only phase:
+no `src/`/`tests/` changes.
