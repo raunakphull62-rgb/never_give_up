@@ -2499,6 +2499,8 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "http_post" => 3,
         "str" | "int" | "float" => 1,
         "assert" => 1,
+        "read_line" => 0,
+        "parse_int" | "parse_float" => 1,
         "read_file" | "exists" | "env" | "remove_file" | "http_get" => 1,
         "regex_is_match" | "regex_find" => 2,
         "time_sleep" | "time_elapsed" => 1,
@@ -2553,6 +2555,19 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "str" => Ty::Str,
         "int" => Ty::Int,
         "float" => Ty::Float,
+        "read_line" => Ty::Str,
+        "parse_int" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`parse_int()` text", "str", &args[0]));
+            }
+            Ty::Int
+        }
+        "parse_float" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`parse_float()` text", "str", &args[0]));
+            }
+            Ty::Float
+        }
         "keys" => {
             if !matches!(&args[0], Ty::Map | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`keys()` argument", "map", &args[0]));
@@ -2818,6 +2833,9 @@ pub fn is_builtin(name: &str) -> bool {
             | "time_elapsed"
             | "http_get"
             | "http_post"
+            | "read_line"
+            | "parse_int"
+            | "parse_float"
     )
 }
 

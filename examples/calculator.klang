@@ -1,0 +1,38 @@
+// examples/calculator.klang — stdin calculator (STDLIB-IO-1).
+//
+// Reads two integers, then an operator line (+ - * /). An empty operator
+// line (EOF) means +. Prints the result.
+//
+// Usage:
+//   printf '12\n5\n' | klang run examples/calculator.klang        # 17
+//   printf '10\n3\n*\n' | klang run examples/calculator.klang     # 30
+//   printf 'abc\n' | klang run examples/calculator.klang          # E-PARSE-INT, exit 1
+
+fn calc(a: i32, op: str, b: i32) -> i32 {
+    if op == "+" {
+        return a + b
+    }
+    if op == "-" {
+        return a - b
+    }
+    if op == "*" {
+        return a * b
+    }
+    if op == "/" {
+        return a / b
+    }
+    assert(false)
+    return 0
+}
+
+fn main() -> i32 {
+    let a = parse_int(read_line())
+    let b = parse_int(read_line())
+    let op = read_line()
+    if op == "" {
+        print(a + b)
+        return 0
+    }
+    print(calc(a, op, b))
+    return 0
+}

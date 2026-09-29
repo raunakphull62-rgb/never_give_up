@@ -40,6 +40,12 @@ pub mod time;
 /// `MockTransport` is the v2 echo test double and stays untouched.
 pub mod http;
 
+/// OS-interop stdin boundary: `read_line` / `parse_int` / `parse_float`
+/// with `E-PARSE-INT` / `E-PARSE-FLOAT` diagnostics (STDLIB-IO-1). Wired
+/// into the interpreter as the flat builtins
+/// `read_line()` / `parse_int(s)` / `parse_float(s)`.
+pub mod io;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {

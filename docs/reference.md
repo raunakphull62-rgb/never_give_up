@@ -125,7 +125,8 @@ Free functions and methods:
 | `len(x)` | 1 | str→bytes, array→elements, map→entries; else `E-TYPE` |
 | `push(a, v)` / `pop(a)` | 2 / 1 | variable target must be array |
 | `range(a, b)` | 2 | int bounds; returns array |
-| `str(x)` / `int(x)` / `float(x)` | 1 | conversions (`int(4.9)`→4, `float(2)`→2.0) |
+| `str(x)` / `int(x)` / `float(x)` | 1 | conversions (`int(4.9)`→4, `float(2)`→2.0). `int`/`float` accept strings too but fail with generic `E-RUNTIME`; prefer `parse_int`/`parse_float` for input |
+| `read_line()` / `parse_int(s)` / `parse_float(s)` | 0 / 1 / 1 | stdin line without the newline (`""` at EOF; CRLF becomes LF-free); strict decimal `i32` (`-` only, digits only) else `E-PARSE-INT`; finite `f64` decimal else `E-PARSE-FLOAT`. Offending text over 40 chars is redacted in the diagnostic. Under `klang mcp`, stdin belongs to the JSON-RPC loop, so `read_line()` always sees EOF. v2 has no stdin builtins (`read_line` is `E-UNDEFINED` there) |
 | `keys(m)` | 1 | map→array of keys |
 | `assert(c)` | 1 | bool/int; failure is `E-RUNTIME` at run |
 | `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND` (paths outside the temp dir are still `E-RUNTIME` via the unsafe-path guard). It rejects `..` and absolute paths, and it does not protect against symlinks. |
@@ -140,6 +141,25 @@ contains join`), map methods (`len keys contains`) — all arity-checked
 (`E-ARITY`), unknown methods on a known receiver are `E-TYPE`, and any
 method on an `unknown` receiver skips checking. Calling a method on an
 `int`/`bool`/struct/enum value is `E-TYPE`.
+
+Strict parsing without stdin (literals, so no input is consumed):
+
+```klang
+// @run prints: 17 | 3.5 ; return: 0
+fn main() -> i32 {
+    print(parse_int("-17") + 34)
+    print(parse_float("3.5"))
+    return 0
+}
+```
+
+Interactive input reads stdin (`echo 5 | klang run prog.klang`;
+`examples/calculator.klang` reads two integers and an operator line):
+
+```sh
+printf '12\n5\n' | klang run examples/calculator.klang
+# 17
+```
 
 ## 6. Enums and match
 

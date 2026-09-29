@@ -957,6 +957,9 @@ fn is_builtin(name: &str) -> bool {
             | "time_elapsed"
             | "http_get"
             | "http_post"
+            | "read_line"
+            | "parse_int"
+            | "parse_float"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1081,6 +1084,34 @@ fn exec_builtin(
                     .map(Value::Float)
                     .map_err(|_| runtime_err("float() cannot parse string")),
                 _ => Err(runtime_err("float() needs a number or string")),
+            }
+        }
+        "read_line" => {
+            if !args.is_empty() {
+                return Err(runtime_err("read_line() takes 0 arguments"));
+            }
+            Ok(Value::Str(crate::stdlib::io::read_line()))
+        }
+        "parse_int" => {
+            if args.len() != 1 {
+                return Err(runtime_err("parse_int() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Str(s) => crate::stdlib::io::parse_int_str(&s).map(Value::Int),
+                Value::Int(v) => Ok(Value::Int(v)),
+                Value::Float(v) => Ok(Value::Int(v as i64)),
+                _ => Err(runtime_err("parse_int() needs a string")),
+            }
+        }
+        "parse_float" => {
+            if args.len() != 1 {
+                return Err(runtime_err("parse_float() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Str(s) => crate::stdlib::io::parse_float_str(&s).map(Value::Float),
+                Value::Float(v) => Ok(Value::Float(v)),
+                Value::Int(v) => Ok(Value::Float(v as f64)),
+                _ => Err(runtime_err("parse_float() needs a string")),
             }
         }
         "keys" => {

@@ -931,6 +931,10 @@ fn run_repair_mode(path: &str, rest: &[String]) {
 /// CLI's deep-stack worker (see `main`), like every other subcommand.
 fn run_mcp_mode() {
     use std::io::{BufRead, Write};
+    // Programs executed via `klang_run` share this process: reserve stdin
+    // for the JSON-RPC loop so a `read_line()` call sees EOF ("") instead
+    // of stealing protocol bytes off this stream.
+    klang::stdlib::io::reserve_stdin_for_mcp();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
