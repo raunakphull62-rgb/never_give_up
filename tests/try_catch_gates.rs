@@ -244,3 +244,27 @@ fn try_catch_with_tasks_needs_self_contained_regions() {
         "E-TASK-CANCEL",
     );
 }
+
+#[test]
+fn spawn_before_await_after_with_try_between() {
+    // The natural pattern is unaffected: handles owned outside the
+    // `try` join outside it; only region-crossing is rejected.
+    let (v, out) = run_src(
+        "fn one() -> i32 { return 1 } fn main() -> i32 async { task_group { let h = spawn one() try { print(10 / 1) } catch e { print(e[\"code\"]) } print(await h) return 0 } }",
+    );
+    assert_eq!(out, vec!["10".to_string(), "1".to_string()]);
+    assert_eq!(v, 0);
+}
+
+#[test]
+fn catch_binding_shadows_like_block_let() {
+    // Shadowing an outer variable in the handler overwrites it at
+    // runtime — exactly like a `let` shadowing inside an `if` body
+    // (pre-existing language semantics, not try-specific).
+    let (v, out) = run_src(
+        "fn main() -> i32 { let e = \"outer\" try { parse_int(\"bad\") } catch e { print(e[\"code\"]) } print(e) return 0 }",
+    );
+    assert_eq!(out[0], "E-PARSE-INT".to_string());
+    assert!(out[1].contains("E-PARSE-INT"), "handler map won: {}", out[1]);
+    assert_eq!(v, 0);
+}

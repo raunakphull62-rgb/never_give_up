@@ -81,8 +81,11 @@ fn main() -> i32 {
   propagates; task cancellation (`E-CANCELLED`) is never caught.
   `return` works inside both regions; `break`/`continue` targeting a
   loop outside the `try` is `E-LOOP`. Spawns inside a region must be
-  awaited in the same region (loop-body discipline). v2 has no
-  `try`/`catch`; `--backend-jit` rejects it loudly like other
+  awaited in the same region (loop-body discipline); the natural shape
+  is spawn before the `try` and await after it. Task handles awaited
+  inside a `try` do not satisfy the group (await outside instead), so
+  a failed `await` aborts its group rather than landing in `catch`.
+  v2 has no `try`/`catch`; `--backend-jit` rejects it loudly like other
   non-integer code.
 
 ## 4. Operators
