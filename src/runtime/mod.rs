@@ -961,6 +961,7 @@ fn is_builtin(name: &str) -> bool {
             | "parse_int"
             | "parse_float"
             | "format"
+            | "insert"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1123,6 +1124,25 @@ fn exec_builtin(
                 parts.push(get(a).render());
             }
             Ok(Value::Str(parts.join(" ")))
+        }
+        "insert" => {
+            if args.len() != 3 {
+                return Err(runtime_err("insert() takes 3 arguments"));
+            }
+            // Index == len appends (like `push`); past-the-end or
+            // negative is a loud error, never a silent clamp or hole.
+            let idx = get(&args[1]).as_int();
+            let v = get(&args[2]);
+            match values.get_mut(&args[0]) {
+                Some(Value::Array(arr)) => {
+                    if idx < 0 || (idx as usize) > arr.len() {
+                        return Err(runtime_err("insert() index out of bounds"));
+                    }
+                    arr.insert(idx as usize, v);
+                    Ok(Value::Int(arr.len() as i64))
+                }
+                _ => Err(runtime_err("insert() needs an array variable first")),
+            }
         }
         "keys" => {
             if args.len() != 1 {
@@ -1523,6 +1543,22 @@ fn exec_method(
                     _ => Err(runtime_err("pop() needs an array variable")),
                 }
             }
+            "insert" => {
+                if args.len() != 2 {
+                    return Err(runtime_err("insert() takes 2 arguments"));
+                }
+                match values.get_mut(base_name) {
+                    Some(Value::Array(arr)) => {
+                        let idx = args[0].as_int();
+                        if idx < 0 || (idx as usize) > arr.len() {
+                            return Err(runtime_err("insert() index out of bounds"));
+                        }
+                        arr.insert(idx as usize, args[1].clone());
+                        Ok(Value::Int(arr.len() as i64))
+                    }
+                    _ => Err(runtime_err("insert() needs an array variable")),
+                }
+            }
             "contains" => {
                 arity(1)?;
                 match base {
@@ -1709,6 +1745,19 @@ fn index_value(base: &Value, iv: &Value) -> Result<Value, Diagnostic> {
                 .ok_or_else(|| runtime_err("string index out of bounds"))
         }
         Value::Map(m) => {
+            // Integer index is positional: the i-th key in insertion
+            // order (same order as `keys()`). This is what `for k in m`
+            // lowers to (integer-indexed iteration over `len(m)`).
+            // Any other index is a key lookup, as before.
+            if let Value::Int(i) = iv {
+                if *i < 0 {
+                    return Err(runtime_err("negative index"));
+                }
+                return m
+                    .get(*i as usize)
+                    .map(|(k, _)| Value::Str(k.clone()))
+                    .ok_or_else(|| runtime_err("map index out of bounds"));
+            }
             let key = match iv {
                 Value::Str(k) => k.clone(),
                 other => other.render(),

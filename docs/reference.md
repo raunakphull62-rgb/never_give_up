@@ -70,8 +70,10 @@ fn main() -> i32 {
   (`E-LOOP` outside one).
 - `if`/`while` conditions must be `bool` or `int` (`E-TYPE`
   otherwise). `for i in a..b` needs integer bounds; `for x in xs`
-  needs an array or string (a map is `E-TYPE`); the `..` loop variable
-  is `i32`, the `in` element is dynamic.
+  needs an array, map, or string (anything else is `E-TYPE`); a map
+  yields its keys in insertion order (same order as `keys()`), so
+  `for k in m { print(m[k]) }` prints each value. The `..` loop
+  variable is `i32`, the `in` element is dynamic.
 
 ## 4. Operators
 
@@ -111,10 +113,16 @@ fn main() -> i32 {
   representation.
 - Arrays (`[1, 2]`), indexing (`a[i]`, integer or dynamic index),
   element assignment (`a[0] = 40`), maps (`{"k": v}`, `m[k]`,
-  `m[k] = v`). Bad index/base combinations are `E-TYPE`; a missing
-  map key fails at run time (`E-RUNTIME`), never at check time.
-- `push`/`pop` (free functions and array methods) must mutate a
-  variable, not a temporary (`[1,2].push(3)` is `E-TYPE`).
+  `m[k] = v`). An integer index on a map yields its i-th key in
+  insertion order (`m[0]` is the first key; out of range is
+  `E-RUNTIME`); any other index is a key lookup. Bad index/base
+  combinations are `E-TYPE`; a missing map key fails at run time
+  (`E-RUNTIME`), never at check time.
+- `push`/`pop`/`insert` (free functions and array methods) must
+  mutate a variable, not a temporary (`[1,2].push(3)` is `E-TYPE`).
+  `insert(a, i, v)` / `a.insert(i, v)` inserts at position `i`
+  (shifting right; `i == len(a)` appends, anything past that or
+  negative is `E-RUNTIME`) and returns the new length.
 - String `s[i]` is character-based; `len(s)` is byte length.
   `s.chars()` yields single-character strings.
 
@@ -124,6 +132,7 @@ Free functions and methods:
 |---|---|---|
 | `len(x)` | 1 | str→bytes, array→elements, map→entries; else `E-TYPE` |
 | `push(a, v)` / `pop(a)` | 2 / 1 | variable target must be array |
+| `insert(a, i, v)` | 3 | insert `v` at `i` (shifts right; `i == len` appends); returns new length; OOB is `E-RUNTIME` |
 | `range(a, b)` | 2 | int bounds; returns array |
 | `str(x)` / `int(x)` / `float(x)` | 1 | conversions (`int(4.9)`→4, `float(2)`→2.0). `int`/`float` accept strings too but fail with generic `E-RUNTIME`; prefer `parse_int`/`parse_float` for input |
 | `format(...)` | 0+ | variadic string builder: renders each value like `str()`/`print` (whole floats keep `.0`) and joins with a single space; `format()` is `""`. Any value type is accepted. Works in `run` and `run-v2` (v2 programs cannot hold an `f64` yet — no float literals there — so float args only arise under `run`). Rejected loudly by `--backend-jit` like other `str` builtins |
@@ -137,7 +146,7 @@ Free functions and methods:
 | `http_get(url)` / `http_post(url, body, headers)` | 1 / 3 | sync HTTP via ureq (10s connect / 60s backstop); returns map `status`/`body`/`headers` (lowercased names); error statuses are normal results; transport failures are `E-NET-UNREACHABLE`, bad URLs `E-NET-INVALID-URL`, bad header entries `E-NET-INVALID-HEADER` |
 
 String methods (`upper lower trim chars len split contains
-starts_with ends_with replace`), array methods (`len push pop
+starts_with ends_with replace`), array methods (`len push pop insert
 contains join`), map methods (`len keys contains`) — all arity-checked
 (`E-ARITY`), unknown methods on a known receiver are `E-TYPE`, and any
 method on an `unknown` receiver skips checking. Calling a method on an

@@ -824,21 +824,20 @@ fn check_block(
                     &mut awaited_here,
                     defined,
                 );
-                // Maps are rejected: MIR lowers `for-in` to integer-indexed
-                // iteration, and indexing a map with `0`, `1`, ... always
-                // fails at runtime with "missing map key". Use `keys()` +
-                // indexing or iterate an array/str instead.
+                // Maps iterate over keys in insertion order (same order as
+                // `keys()`): MIR lowers `for-in` to integer-indexed
+                // iteration and an integer index on a map yields its
+                // i-th key, so `for k in m` just works. This matches
+                // SPEC §2 (`it` must be array/map/str); the `in` element
+                // stays dynamic (`Ty::Unknown`, below) either way.
                 match &iter_ty {
-                    Ty::Array | Ty::Str | Ty::Unknown => {}
-                    Ty::Map => {
-                        diags.push(type_mismatch(
-                            file,
-                            "for-in iterable",
-                            "array/str",
-                            &iter_ty,
-                        ));
-                    }
-                    other => diags.push(type_mismatch(file, "for-in iterable", "array/str", other)),
+                    Ty::Array | Ty::Str | Ty::Map | Ty::Unknown => {}
+                    other => diags.push(type_mismatch(
+                        file,
+                        "for-in iterable",
+                        "array/map/str",
+                        other,
+                    )),
                 }
                 cx.loop_depth += 1;
                 let mut body_defined = defined.clone();
@@ -1472,10 +1471,10 @@ fn check_expr(
                     ));
                     return Ty::Unknown;
                 }
-                // `push`/`pop` mutating a temporary (`push([1,2], 3)`,
+                // `push`/`pop`/`insert` mutating a temporary (`push([1,2], 3)`,
                 // `[1,2].push(3)`) silently no-ops at runtime (mutates a
                 // discarded temp). Require a variable receiver.
-                if (func == "push" || func == "pop") && !args.is_empty() {
+                if (func == "push" || func == "pop" || func == "insert") && !args.is_empty() {
                     match &args[0] {
                         Expr::Var { .. } => {}
                         _ => {
@@ -1849,9 +1848,9 @@ fn check_expr(
                     defined,
                 ));
             }
-            if method == "push" || method == "pop" {
-                // `arr.push`/`arr.pop` mutate in place: require a variable
-                // receiver, not a temporary (`[1,2].push(3)` no-ops).
+            if method == "push" || method == "pop" || method == "insert" {
+                // `arr.push`/`arr.pop`/`arr.insert` mutate in place: require
+                // a variable receiver, not a temporary (`[1,2].push(3)`).
                 match base.as_ref() {
                     Expr::Var { .. } => {}
                     _ => {
@@ -2501,6 +2500,7 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
     let arity = match func {
         "len" | "pop" | "keys" => 1,
         "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
+        "insert" => 3,
         "http_post" => 3,
         "str" | "int" | "float" => 1,
         "assert" => 1,
@@ -2541,6 +2541,17 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             if !matches!(&args[0], Ty::Array | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`push()` target", "array", &args[0]));
             }
+            Ty::Int
+        }
+        "insert" => {
+            if !matches!(&args[0], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`insert()` target", "array", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`insert()` index", "i32", &args[1]));
+            }
+            // Any value can be inserted (mirrors `push`, which does not
+            // check its element type either). Returns the new length.
             Ty::Int
         }
         "pop" => {
@@ -2755,9 +2766,10 @@ fn check_method_call(
             }
         },
         Ty::Array => match method {
-            "len" | "push" | "pop" | "contains" | "join" => {
+            "len" | "push" | "pop" | "contains" | "join" | "insert" => {
                 let want = match method {
                     "push" | "contains" | "join" => 1,
+                    "insert" => 2,
                     _ => 0,
                 };
                 if args.len() != want {
@@ -2765,7 +2777,7 @@ fn check_method_call(
                     return Ty::Unknown;
                 }
                 match method {
-                    "len" | "push" => Ty::Int,
+                    "len" | "push" | "insert" => Ty::Int,
                     "contains" => Ty::Bool,
                     "join" => Ty::Str,
                     _ => Ty::Unknown,
@@ -2842,6 +2854,7 @@ pub fn is_builtin(name: &str) -> bool {
             | "parse_int"
             | "parse_float"
             | "format"
+            | "insert"
     )
 }
 
