@@ -1,0 +1,16 @@
+// examples/format.klang — string formatting via format(...) (FOUNDATION-1 Phase 2).
+//
+// Builds one string from an i32, an f64, and a str without manual
+// concatenation: format(...) renders each value like str()/print and
+// joins the parts with a single space.
+//
+// Usage:
+//   klang run examples/format.klang   # age: 42 pi: 3.5 name: klang
+
+fn main() -> i32 {
+    let age = 42
+    let pi = 3.5
+    let name = "klang"
+    print(format("age:", age, "pi:", pi, "name:", name))
+    return 0
+}

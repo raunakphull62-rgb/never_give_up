@@ -2493,6 +2493,11 @@ fn equality_ok(l: &Ty, r: &Ty) -> bool {
 }
 
 fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagnostic>) -> Ty {
+    // `format(...)` is variadic (any count including zero): every value
+    // renders via the same rule as `str()`/`print`, joined with one space.
+    if func == "format" {
+        return Ty::Str;
+    }
     let arity = match func {
         "len" | "pop" | "keys" => 1,
         "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
@@ -2836,6 +2841,7 @@ pub fn is_builtin(name: &str) -> bool {
             | "read_line"
             | "parse_int"
             | "parse_float"
+            | "format"
     )
 }
 

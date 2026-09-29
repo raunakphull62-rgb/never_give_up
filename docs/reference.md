@@ -126,6 +126,7 @@ Free functions and methods:
 | `push(a, v)` / `pop(a)` | 2 / 1 | variable target must be array |
 | `range(a, b)` | 2 | int bounds; returns array |
 | `str(x)` / `int(x)` / `float(x)` | 1 | conversions (`int(4.9)`→4, `float(2)`→2.0). `int`/`float` accept strings too but fail with generic `E-RUNTIME`; prefer `parse_int`/`parse_float` for input |
+| `format(...)` | 0+ | variadic string builder: renders each value like `str()`/`print` (whole floats keep `.0`) and joins with a single space; `format()` is `""`. Any value type is accepted. Works in `run` and `run-v2` (v2 programs cannot hold an `f64` yet — no float literals there — so float args only arise under `run`). Rejected loudly by `--backend-jit` like other `str` builtins |
 | `read_line()` / `parse_int(s)` / `parse_float(s)` | 0 / 1 / 1 | stdin line without the newline (`""` at EOF; CRLF becomes LF-free); strict decimal `i32` (`-` only, digits only) else `E-PARSE-INT`; finite `f64` decimal else `E-PARSE-FLOAT`. Offending text over 40 chars is redacted in the diagnostic. Under `klang mcp`, stdin belongs to the JSON-RPC loop, so `read_line()` always sees EOF. v2 has no stdin builtins (`read_line` is `E-UNDEFINED` there) |
 | `keys(m)` | 1 | map→array of keys |
 | `assert(c)` | 1 | bool/int; failure is `E-RUNTIME` at run |
@@ -159,6 +160,17 @@ Interactive input reads stdin (`echo 5 | klang run prog.klang`;
 ```sh
 printf '12\n5\n' | klang run examples/calculator.klang
 # 17
+```
+
+Building one output string from several values (`examples/format.klang`
+interpolates an `i32`, an `f64`, and a `str` with no manual `+`/`str()`):
+
+```klang
+// @run prints: age: 42 pi: 3.5 name: klang ; return: 0
+fn main() -> i32 {
+    print(format("age:", 42, "pi:", 3.5, "name:", "klang"))
+    return 0
+}
 ```
 
 ## 6. Enums and match

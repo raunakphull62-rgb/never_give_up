@@ -960,6 +960,7 @@ fn is_builtin(name: &str) -> bool {
             | "read_line"
             | "parse_int"
             | "parse_float"
+            | "format"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1113,6 +1114,15 @@ fn exec_builtin(
                 Value::Int(v) => Ok(Value::Float(v as f64)),
                 _ => Err(runtime_err("parse_float() needs a string")),
             }
+        }
+        "format" => {
+            // Variadic (zero args allowed): render each value exactly like
+            // `str()`/`print` (`Value::render`) and join with one space.
+            let mut parts = Vec::with_capacity(args.len());
+            for a in args {
+                parts.push(get(a).render());
+            }
+            Ok(Value::Str(parts.join(" ")))
         }
         "keys" => {
             if args.len() != 1 {

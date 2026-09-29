@@ -852,6 +852,15 @@ fn eval_call(
         }
         let v = eval_expr(&args[0], frame, global, depth)?;
         Ok(Value::Int(v.as_int()))
+    } else if func == "format" {
+        // Variadic like v1 (zero args allowed): same render rule, one-space
+        // join. v2 programs cannot hold an f64 today (no float literals),
+        // so float args simply never arise here yet.
+        let mut parts = Vec::with_capacity(args.len());
+        for a in args {
+            parts.push(eval_expr(a, frame, global, depth)?.render());
+        }
+        Ok(Value::Str(parts.join(" ")))
     } else {
         Err(Diagnostic::error(
             "E-UNDEFINED",
