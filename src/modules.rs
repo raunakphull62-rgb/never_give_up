@@ -415,6 +415,10 @@ fn rewrite_stmt(s: &mut Stmt, cur: Option<&str>, ctx: &mut Ctx) {
             rewrite_block(&mut fi.body, cur, ctx);
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::TryCatch(t) => {
+            rewrite_block(&mut t.body, cur, ctx);
+            rewrite_block(&mut t.handler, cur, ctx);
+        }
         Stmt::Expr(e) => rewrite_expr(e, cur, ctx),
     }
 }

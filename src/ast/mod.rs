@@ -227,6 +227,11 @@ fn prefix_stmt(s: &mut Stmt, file_idx: u32) {
         }
         Stmt::Break(b) => prefix_id(&mut b.id, file_idx),
         Stmt::Continue(c) => prefix_id(&mut c.id, file_idx),
+        Stmt::TryCatch(t) => {
+            prefix_id(&mut t.id, file_idx);
+            prefix_block(&mut t.body, file_idx);
+            prefix_block(&mut t.handler, file_idx);
+        }
         Stmt::Expr(e) => prefix_expr(e, file_idx),
     }
 }
@@ -390,6 +395,7 @@ pub enum Stmt {
     ForIn(ForInStmt),
     Break(BreakStmt),
     Continue(ContinueStmt),
+    TryCatch(TryCatchStmt),
     Expr(Expr),
 }
 
@@ -407,6 +413,7 @@ impl Stmt {
             Stmt::ForIn(s) => &s.id,
             Stmt::Break(s) => &s.id,
             Stmt::Continue(s) => &s.id,
+            Stmt::TryCatch(s) => &s.id,
             Stmt::Expr(e) => e.id(),
         }
     }
@@ -465,6 +472,17 @@ pub struct BreakStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContinueStmt {
     pub id: NodeId,
+}
+
+/// `try { ... } catch e { ... }`: run `body`; on a runtime error bind
+/// `var` to a `{code, message}` map and run `handler` instead.
+/// `break`/`continue` cannot target a loop outside the `try`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryCatchStmt {
+    pub id: NodeId,
+    pub var: String,
+    pub body: Block,
+    pub handler: Block,
 }
 
 /// `if cond { ... } else { ... }`.

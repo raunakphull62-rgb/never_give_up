@@ -231,6 +231,7 @@ fn op_name(op: &MirOp) -> &'static str {
         MirOp::JumpIfFalse { .. } => "JumpIfFalse",
         MirOp::Jump { .. } => "Jump",
         MirOp::Return { .. } => "Return",
+        MirOp::Try { .. } => "Try",
     }
 }
 

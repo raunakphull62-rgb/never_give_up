@@ -74,6 +74,16 @@ fn main() -> i32 {
   yields its keys in insertion order (same order as `keys()`), so
   `for k in m { print(m[k]) }` prints each value. The `..` loop
   variable is `i32`, the `in` element is dynamic.
+- `try { ... } catch e { ... }` catches a runtime error from the body
+  (including nested calls) and continues: `e` binds a
+  `{code, message}` map mirroring the diagnostic (`e["code"]` is e.g.
+  `"E-PARSE-INT"`). Success skips the handler; a handler failure
+  propagates; task cancellation (`E-CANCELLED`) is never caught.
+  `return` works inside both regions; `break`/`continue` targeting a
+  loop outside the `try` is `E-LOOP`. Spawns inside a region must be
+  awaited in the same region (loop-body discipline). v2 has no
+  `try`/`catch`; `--backend-jit` rejects it loudly like other
+  non-integer code.
 
 ## 4. Operators
 
@@ -178,6 +188,23 @@ interpolates an `i32`, an `f64`, and a `str` with no manual `+`/`str()`):
 // @run prints: age: 42 pi: 3.5 name: klang ; return: 0
 fn main() -> i32 {
     print(format("age:", 42, "pi:", 3.5, "name:", "klang"))
+    return 0
+}
+```
+
+Recovering from a runtime error (`examples/try_catch.klang` catches a
+bad `parse_int` and continues instead of failing):
+
+```klang
+// @run prints: 0 ; return: 0
+fn main() -> i32 {
+    let n = 0
+    try {
+        n = parse_int("abc")
+    } catch e {
+        n = 0
+    }
+    print(n)
     return 0
 }
 ```

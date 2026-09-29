@@ -445,7 +445,7 @@ fn check_function(
             resolve_body_ty(&p.ty, &f.type_params, enums, structs),
         );
     }
-    let mut cx = Ctx { loop_depth: 0 };
+    let mut cx = Ctx::default();
     check_block(
         file,
         &f.body,
@@ -485,6 +485,10 @@ struct PendingSpawn {
 #[derive(Debug, Clone, Default)]
 struct Ctx {
     loop_depth: usize,
+    /// `loop_depth` at each enclosing `try` entry, innermost last.
+    /// `break`/`continue` inside a `try` must target a loop that also
+    /// started inside it: slice execution cannot jump across slices.
+    try_loop_depths: Vec<usize>,
 }
 
 /// Walk a block. `group_stack` holds the pending-spawn list of each enclosing
@@ -699,6 +703,24 @@ fn check_block(
                         &["move it inside a loop", "remove it"],
                         "control/loop",
                     ));
+                } else if cx
+                    .try_loop_depths
+                    .last()
+                    .is_some_and(|entry| cx.loop_depth <= *entry)
+                {
+                    // The target loop encloses the `try`: the jump would
+                    // have to cross a slice boundary at runtime, which
+                    // cannot work — restructure so the loop is inside.
+                    diags.push(Diagnostic::error(
+                        "E-LOOP",
+                        "break/continue cannot cross a `try` boundary",
+                        file,
+                        0,
+                        0,
+                        "break and continue only jump within their own `try` region",
+                        &["move the loop inside the `try`", "remove it"],
+                        "control/loop",
+                    ));
                 }
             }
             Stmt::While(w) => {
@@ -866,6 +888,62 @@ fn check_block(
                         }
                     }
                 }
+            }
+            Stmt::TryCatch(t) => {
+                // Task discipline mirrors loop bodies: spawns inside a
+                // region must be awaited inside the same region; awaits
+                // inside never satisfy an outer group (the handler may
+                // not run, and the body may fail partway).
+                cx.try_loop_depths.push(cx.loop_depth);
+                let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
+                let mut body_defined = defined.clone();
+                let body_awaited = check_block(
+                    file,
+                    &t.body,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    depth + 1,
+                    group_stack,
+                    &mut body_defined,
+                    cx,
+                );
+                if let Some(pending) = group_stack.last() {
+                    for p in pending.iter().skip(pending_before) {
+                        if !body_awaited.contains(&p.handle) {
+                            diags.push(Diagnostic::task_leak(file, p.span.0, p.span.1, &p.handle));
+                        }
+                    }
+                }
+                let handler_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
+                let mut handler_defined = defined.clone();
+                // The catch binding is a `{code, message}` map.
+                handler_defined.insert(t.var.clone(), Ty::Map);
+                let handler_awaited = check_block(
+                    file,
+                    &t.handler,
+                    caller,
+                    sigs,
+                    structs,
+                    struct_fields,
+                    enums,
+                    diags,
+                    depth + 1,
+                    group_stack,
+                    &mut handler_defined,
+                    cx,
+                );
+                if let Some(pending) = group_stack.last() {
+                    for p in pending.iter().skip(handler_before) {
+                        if !handler_awaited.contains(&p.handle) {
+                            diags.push(Diagnostic::task_leak(file, p.span.0, p.span.1, &p.handle));
+                        }
+                    }
+                }
+                cx.try_loop_depths.pop();
             }
             Stmt::If(s) => {
                 if expr_contains_await(&s.cond) && group_stack.is_empty() {
@@ -2994,6 +3072,10 @@ fn stmt_uses_tasks(s: &crate::ast::Stmt) -> bool {
         Stmt::ForRange(fr) => fr.body.stmts.iter().any(stmt_uses_tasks),
         Stmt::ForIn(fi) => {
             expr_contains_await(&fi.iter) || fi.body.stmts.iter().any(stmt_uses_tasks)
+        }
+        Stmt::TryCatch(t) => {
+            t.body.stmts.iter().any(stmt_uses_tasks)
+                || t.handler.stmts.iter().any(stmt_uses_tasks)
         }
         Stmt::Break(_) | Stmt::Continue(_) => false,
     }

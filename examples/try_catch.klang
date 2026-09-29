@@ -1,0 +1,20 @@
+// examples/try_catch.klang — recoverable errors (FOUNDATION-1 Phase 4).
+//
+// try/catch catches a runtime error from a call and continues execution:
+// the catch binding is a {code, message} map mirroring the diagnostic.
+//
+// Usage:
+//   printf '41\n' | klang run examples/try_catch.klang    # 42
+//   printf 'abc\n' | klang run examples/try_catch.klang   # bad input: E-PARSE-INT / 0
+
+fn main() -> i32 {
+    let n = 0
+    try {
+        n = parse_int(read_line()) + 1
+    } catch e {
+        print(format("bad input:", e["code"]))
+        n = 0
+    }
+    print(n)
+    return 0
+}

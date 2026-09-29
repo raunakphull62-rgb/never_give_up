@@ -19,7 +19,7 @@ pub mod v2;
 use crate::ast::{
     AssignStmt, AssignTarget, Block, BreakStmt, ContinueStmt, Effect, EnumDecl, EnumVariant, Expr,
     ForInStmt, ForRangeStmt, FunctionDecl, IfStmt, LetStmt, MatchArm, ModDecl, NodeId, Param,
-    PrintStmt, Program, ReturnStmt, Stmt, StructDecl, TaskGroup, WhileStmt,
+    PrintStmt, Program, ReturnStmt, Stmt, StructDecl, TaskGroup, TryCatchStmt, WhileStmt,
 };
 use crate::diagnostics::Diagnostic;
 
@@ -35,6 +35,8 @@ pub enum TokenKind {
     Fn,
     Let,
     Return,
+    Try,
+    Catch,
     TaskGroup,
     Spawn,
     Await,
@@ -569,6 +571,8 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
                     "fn" => TokenKind::Fn,
                     "let" => TokenKind::Let,
                     "return" => TokenKind::Return,
+                    "try" => TokenKind::Try,
+                    "catch" => TokenKind::Catch,
                     "task_group" => TokenKind::TaskGroup,
                     "spawn" => TokenKind::Spawn,
                     "await" => TokenKind::Await,
@@ -826,6 +830,8 @@ impl Parser {
                 | (TokenKind::Await, TokenKind::Await)
                 | (TokenKind::If, TokenKind::If)
                 | (TokenKind::Else, TokenKind::Else)
+                | (TokenKind::Try, TokenKind::Try)
+                | (TokenKind::Catch, TokenKind::Catch)
                 | (TokenKind::Print, TokenKind::Print)
                 | (TokenKind::While, TokenKind::While)
                 | (TokenKind::For, TokenKind::For)
@@ -1157,6 +1163,7 @@ impl Parser {
             TokenKind::If => Ok(Stmt::If(self.parse_if()?)),
             TokenKind::Print => Ok(Stmt::Print(self.parse_print()?)),
             TokenKind::While => Ok(Stmt::While(self.parse_while()?)),
+            TokenKind::Try => Ok(Stmt::TryCatch(self.parse_try()?)),
             TokenKind::For => self.parse_for(),
             TokenKind::Break => {
                 let _ = self.bump();
@@ -1309,6 +1316,23 @@ impl Parser {
         let body = self.parse_block_with_id()?;
         self.exit_scope();
         Ok(WhileStmt { id, cond, body })
+    }
+
+    fn parse_try(&mut self) -> Result<TryCatchStmt, Diagnostic> {
+        self.expect(&TokenKind::Try, "`try`")?;
+        let id = self.next_id();
+        self.enter_scope(&id);
+        let body = self.parse_block_with_id()?;
+        self.expect(&TokenKind::Catch, "`catch`")?;
+        let (var, _, _) = self.expect_ident("catch binding name")?;
+        let handler = self.parse_block_with_id()?;
+        self.exit_scope();
+        Ok(TryCatchStmt {
+            id,
+            var,
+            body,
+            handler,
+        })
     }
 
     fn parse_for(&mut self) -> Result<Stmt, Diagnostic> {

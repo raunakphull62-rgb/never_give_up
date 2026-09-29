@@ -100,6 +100,15 @@ pub fn emit_listing(module: &MirModule) -> String {
                 }
                 MirOp::Jump { target } => format!("  jump -> {target}"),
                 MirOp::Return { value } => format!("  return {value}"),
+                MirOp::Try {
+                    code_var,
+                    body,
+                    handler,
+                } => format!(
+                    "  try catch {code_var} ({} body, {} handler)",
+                    body.len(),
+                    handler.len()
+                ),
             };
             out.push_str(&format!("  [{i}] ; origin {}\n{line}\n", ins.origin));
         }

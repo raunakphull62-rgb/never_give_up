@@ -33,7 +33,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 use crate::diagnostics::Diagnostic;
-use crate::mir::{MirModule, MirOp};
+use crate::mir::{MirInstr, MirModule, MirOp};
 
 /// Cooperative cancellation token for one task group. Clones share one
 /// flag across threads: the awaiter sets it when a sibling fails, tasks
@@ -364,7 +364,7 @@ fn fail_group(
     token: &CancelToken,
     pending: &mut HashMap<String, JoinHandle<Result<Value, Diagnostic>>>,
     first: Diagnostic,
-) -> Result<Value, Diagnostic> {
+) -> Result<ExecFlow, Diagnostic> {
     token.cancel();
     let mut failures = vec![first];
     // Sorted handles keep group order deterministic across runs.
@@ -387,7 +387,34 @@ fn fail_group(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// How an instruction slice finished: ran to the end (`Done`) or hit
+/// `return` (`Returned`). Slices are `try` bodies/handlers sharing the
+/// caller's scope; a `return` inside one returns from the whole function.
+enum ExecFlow {
+    Done(Value),
+    Returned(Value),
+}
+
+/// Validate jump targets up front: `break`/`continue` outside a loop
+/// lower to `Jump { target: usize::MAX }` (HIR rejects, but `lower` is
+/// public). Out-of-range targets must be `Err`, never a host panic, and
+/// the JIT maps past-the-end to `end` so both backends agree.
+fn validate_jumps(instrs: &[MirInstr]) -> Result<(), Diagnostic> {
+    for ins in instrs {
+        match &ins.op {
+            MirOp::Jump { target } | MirOp::JumpIfFalse { target, .. } => {
+                if *target > instrs.len() {
+                    return Err(runtime_err(
+                        "invalid jump target (unlowered break/continue?)",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn exec_function(
     ctx: &ExecCtx,
     name: &str,
@@ -408,22 +435,6 @@ fn exec_function(
     })?;
     let instrs = f.instrs.clone();
     let params = f.params.clone();
-    // Validate jump targets up front: `break`/`continue` outside a loop
-    // lower to `Jump { target: usize::MAX }` (HIR rejects, but `lower` is
-    // public). Out-of-range targets must be `Err`, never a host panic, and
-    // the JIT maps past-the-end to `end` so both backends agree.
-    for ins in &instrs {
-        match &ins.op {
-            MirOp::Jump { target } | MirOp::JumpIfFalse { target, .. } => {
-                if *target > instrs.len() {
-                    return Err(runtime_err(
-                        "invalid jump target (unlowered break/continue?)",
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
     let mut values: HashMap<String, Value> = HashMap::new();
     for (param, val) in params.iter().zip(args.iter()) {
         values.insert(param.clone(), val.clone());
@@ -445,6 +456,54 @@ fn exec_function(
     let mut groups: Vec<(String, CancelToken)> = Vec::new();
     let mut group_depth: usize = 0;
     let mut pending: HashMap<String, JoinHandle<Result<Value, Diagnostic>>> = HashMap::new();
+    match run_instrs(
+        ctx,
+        name,
+        &instrs,
+        &mut values,
+        &mut groups,
+        &mut group_depth,
+        &mut pending,
+        depth,
+        parent,
+    )? {
+        ExecFlow::Done(v) => {
+            // Fall-off-the-end with live tasks means a group was never
+            // left (unchecked MIR): join (never detach) then fail closed.
+            if !pending.is_empty() {
+                let mut rest: Vec<String> = pending.keys().cloned().collect();
+                rest.sort();
+                for h in rest {
+                    if let Some(jh) = pending.remove(&h) {
+                        let _ = jh.join();
+                    }
+                }
+                return Err(Diagnostic::task_leak("runtime", 0, 0, "task group"));
+            }
+            Ok(v)
+        }
+        // `return` already joined-or-failed at its own site below.
+        ExecFlow::Returned(v) => Ok(v),
+    }
+}
+
+/// Execute one instruction slice sharing the caller's scope (`values`,
+/// task-group stack, pending handles). The whole-function stream and
+/// each `try` body/handler run through here, so error capture, task
+/// handles, and group tokens behave identically in all three.
+#[allow(clippy::too_many_lines)]
+fn run_instrs(
+    ctx: &ExecCtx,
+    name: &str,
+    instrs: &[MirInstr],
+    mut values: &mut HashMap<String, Value>,
+    mut groups: &mut Vec<(String, CancelToken)>,
+    mut group_depth: &mut usize,
+    mut pending: &mut HashMap<String, JoinHandle<Result<Value, Diagnostic>>>,
+    depth: usize,
+    parent: &CancelToken,
+) -> Result<ExecFlow, Diagnostic> {
+    validate_jumps(instrs)?;
     let mut pc: usize = 0;
     let mut last = Value::Int(0);
     // Innermost group token, else the inherited one: a spawned task runs
@@ -459,12 +518,12 @@ fn exec_function(
         let instr = &instrs[pc];
         match &instr.op {
             MirOp::EnterGroup { group } => {
-                group_depth += 1;
+                *group_depth += 1;
                 groups.push((format!("{group}"), CancelToken::default()));
                 pc += 1;
             }
             MirOp::LeaveGroup { .. } => {
-                group_depth = group_depth.saturating_sub(1);
+                *group_depth = group_depth.saturating_sub(1);
                 groups.pop();
                 // Structured concurrency: no task may outlive its group.
                 // HIR guarantees `pending` is empty here; if unchecked MIR
@@ -484,7 +543,7 @@ fn exec_function(
                 pc += 1;
             }
             MirOp::Spawn { handle, func, args } => {
-                if group_depth == 0 {
+                if *group_depth == 0 {
                     return Err(Diagnostic::spawn_outside_group("runtime", 0, 0));
                 }
                 if pending.len() >= MAX_CONCURRENT_TASKS {
@@ -907,7 +966,58 @@ fn exec_function(
                     return Err(Diagnostic::task_leak("runtime", 0, 0, "return"));
                 }
                 let v = lookup(&values, &ctx.stubs, value).unwrap_or(last.clone());
-                return Ok(v);
+                return Ok(ExecFlow::Returned(v));
+            }
+            MirOp::Try { code_var, body, handler } => {
+                // Same scope, same task state: body assignments persist,
+                // spawns join through the shared pending map, group tokens
+                // resolve through the shared stack.
+                match run_instrs(
+                    ctx,
+                    name,
+                    body,
+                    &mut *values,
+                    &mut *groups,
+                    &mut *group_depth,
+                    &mut *pending,
+                    depth,
+                    parent,
+                ) {
+                    Ok(ExecFlow::Done(v)) => {
+                        last = v;
+                        pc += 1;
+                    }
+                    Ok(ExecFlow::Returned(v)) => return Ok(ExecFlow::Returned(v)),
+                    // Cooperative cancellation is not an error to recover
+                    // from: re-raise so task groups keep draining.
+                    Err(d) if d.is_cancelled() => return Err(d),
+                    Err(d) => {
+                        values.insert(
+                            code_var.clone(),
+                            Value::Map(vec![
+                                ("code".to_string(), Value::Str(d.code.clone())),
+                                ("message".to_string(), Value::Str(d.message.clone())),
+                            ]),
+                        );
+                        match run_instrs(
+                            ctx,
+                            name,
+                            handler,
+                            &mut *values,
+                            &mut *groups,
+                            &mut *group_depth,
+                            &mut *pending,
+                            depth,
+                            parent,
+                        )? {
+                            ExecFlow::Done(v) => {
+                                last = v;
+                                pc += 1;
+                            }
+                            ExecFlow::Returned(v) => return Ok(ExecFlow::Returned(v)),
+                        }
+                    }
+                }
             }
         }
     }
@@ -916,19 +1026,7 @@ fn exec_function(
     // `fn fetch_a() -> i32 throws {}` rely on the stub table via
     // `call_value`, not on this path). HIR accepts this; the JIT mirrors
     // it via a dominating `last` variable seeded with 0.
-    // Any live `pending` here means a group was never left (unchecked MIR):
-    // join (never detach) then fail closed.
-    if !pending.is_empty() {
-        let mut rest: Vec<String> = pending.keys().cloned().collect();
-        rest.sort();
-        for h in rest {
-            if let Some(jh) = pending.remove(&h) {
-                let _ = jh.join();
-            }
-        }
-        return Err(Diagnostic::task_leak("runtime", 0, 0, "task group"));
-    }
-    Ok(last)
+    Ok(ExecFlow::Done(last))
 }
 
 fn is_builtin(name: &str) -> bool {

@@ -223,6 +223,12 @@ fn fmt_stmt(s: &Stmt, depth: usize) -> String {
         ),
         Stmt::Break(_) => "break".to_string(),
         Stmt::Continue(_) => "continue".to_string(),
+        Stmt::TryCatch(t) => format!(
+            "try {{\n{}}} catch {} {{\n{}}}",
+            fmt_block(&t.body, depth + 1),
+            t.var,
+            fmt_block(&t.handler, depth + 1)
+        ),
         Stmt::Expr(e) => fmt_expr(e),
     }
 }

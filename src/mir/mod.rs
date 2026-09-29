@@ -206,6 +206,17 @@ pub enum MirOp {
     Return {
         value: String,
     },
+    /// `try { body } catch var { handler }`: run `body` inline in the
+    /// caller's scope; on a runtime error bind `var` to a
+    /// `{code, message}` map and run `handler` instead. Both slices use
+    /// slice-relative jump targets (lowered into fresh vectors, so all
+    /// loop/break patching stays inside the slice); `break`/`continue`
+    /// crossing into an outer loop is rejected at check time.
+    Try {
+        code_var: String,
+        body: Vec<MirInstr>,
+        handler: Vec<MirInstr>,
+    },
 }
 
 /// One lowered function.
@@ -1099,6 +1110,31 @@ fn lower_block(
                     &g.id,
                     MirOp::LeaveGroup {
                         group: g.id.clone(),
+                    },
+                );
+            }
+            Stmt::TryCatch(t) => {
+                // Fresh instruction vectors (slice-relative targets) and a
+                // fresh loop stack: `break`/`continue` inside either slice
+                // can only target loops inside the same slice (crossing is
+                // an `E-LOOP` at check time). The `tmp` counter stays
+                // shared so generated names never collide with the outer
+                // stream. Spawns lower to thread handles owned by the
+                // caller's pending map at runtime, so awaiting across the
+                // boundary still joins the right thread.
+                let mut body = Vec::new();
+                let mut body_loops = Vec::new();
+                lower_block(&t.body.stmts, &mut body, tmp, &mut body_loops);
+                let mut handler = Vec::new();
+                let mut handler_loops = Vec::new();
+                lower_block(&t.handler.stmts, &mut handler, tmp, &mut handler_loops);
+                push(
+                    instrs,
+                    &t.id,
+                    MirOp::Try {
+                        code_var: t.var.clone(),
+                        body,
+                        handler,
                     },
                 );
             }
