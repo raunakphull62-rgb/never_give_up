@@ -100,6 +100,13 @@ fn parse_float_err(text: &str) -> Diagnostic {
 /// Read one line from process stdin, without the trailing newline.
 /// Returns `""` at EOF (indistinguishable from an empty line, by design).
 /// When stdin is reserved for the MCP server, returns `""` immediately.
+///
+/// On a live TTY with no piped input this blocks waiting for a line, like
+/// Python's `input()` — that is expected for `klang run`, not a hang:
+/// Ctrl+D sends EOF (`""`) and Ctrl+C (SIGINT) interrupts the read.
+/// Library-level callers (e.g. `cargo test`) must not rely on inheriting
+/// an open TTY; spawn the CLI with piped stdin closed for deterministic
+/// EOF instead.
 pub fn read_line() -> String {
     if stdin_reserved_for_mcp() {
         return String::new();

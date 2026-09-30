@@ -8,8 +8,40 @@
 //! works normally. The JIT rejects `Try` loudly (int-only backend).
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::process::Stdio;
 
 use klang::parser::Parser;
+
+fn klang_bin() -> String {
+    env!("CARGO_BIN_EXE_klang").to_string()
+}
+
+/// Run the CLI with `stdin_data` fed to process stdin. Stdin is closed
+/// after the write so reads past the data see EOF deterministically,
+/// regardless of what stdin the `cargo test` process itself inherited.
+fn run_cli_with_stdin(args: &[&str], stdin_data: &str) -> (String, String, i32) {
+    let mut child = std::process::Command::new(klang_bin())
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("klang binary runs");
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(stdin_data.as_bytes())
+        .expect("stdin write");
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("wait");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
 
 fn parse(src: &str) -> klang::ast::Program {
     let mut p = Parser::new(src);
@@ -84,23 +116,34 @@ fn catch_binding_is_scoped_to_handler() {
 
 #[test]
 fn example_file_runs() {
-    let src = std::fs::read_to_string(concat!(
+    let example = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/examples/try_catch.klang"
-    ))
-    .expect("example must exist");
-    let prog = parse(&src);
-    assert!(klang::hir::TypedHIR::check(prog.clone()).is_ok());
-    let mir = klang::mir::lower(&prog);
-    let (code, out) =
-        klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new()).expect("runs");
-    // No stdin at library level: read_line sees EOF (""), parse fails,
-    // handler runs — the caught-error path, deterministically.
-    assert_eq!(code, 0);
-    assert_eq!(
-        out,
-        vec!["bad input: E-PARSE-INT".to_string(), "0".to_string()]
     );
+    assert!(
+        std::path::Path::new(example).exists(),
+        "example must exist"
+    );
+    // BUG-D: never call `run_with_output` directly here. The library
+    // inherits the test process's real stdin, which is an open (blocking)
+    // TTY in an interactive shell — `read_line()` waits forever for input
+    // that never comes, and Ctrl+C/Ctrl+D go to the cargo harness, not the
+    // blocked thread. Going through the real CLI with piped stdin closed
+    // gives explicit EOF deterministically: empty input takes the
+    // caught-error path.
+    let (out, err, code) = run_cli_with_stdin(&["run", example], "");
+    assert_eq!(code, 0, "stdout:\n{out}\nstderr:\n{err}");
+    assert_eq!(
+        out, "bad input: E-PARSE-INT\n0\n",
+        "EOF takes the caught-error path, got:\n{out}"
+    );
+    assert!(err.is_empty(), "stderr:\n{err}");
+    // Success path with real input (matches the example header usage:
+    // `printf '41\n' | klang run examples/try_catch.klang` prints 42).
+    let (out, err, code) = run_cli_with_stdin(&["run", example], "41\n");
+    assert_eq!(code, 0, "stdout:\n{out}\nstderr:\n{err}");
+    assert_eq!(out, "42\n", "got:\n{out}");
+    assert!(err.is_empty(), "stderr:\n{err}");
 }
 
 // ---- errors from nested calls are caught too ----
