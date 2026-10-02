@@ -127,7 +127,7 @@ fn stage6_contracts_fixits_lsp_repair() {
         .expect("leak diag");
     let fixes = klang::contracts::FixIt::for_diagnostic(diag);
     assert!(!fixes.is_empty());
-    let lsp = klang::lsp::diagnostic_to_lsp(diag);
+    let lsp = klang::lsp::diagnostic_to_lsp_json(diag, bad);
     assert!(lsp.contains("E-TASK-CANCEL"));
     let mut n = 0u32;
     assert!(klang::contracts::repair_loop(3, |_| {

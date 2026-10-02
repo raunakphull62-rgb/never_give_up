@@ -2,6 +2,7 @@
 
 pub mod ai_safety;
 pub mod ast;
+pub mod async_pool;
 pub mod codegen;
 pub mod closures;
 pub mod contracts;
@@ -20,6 +21,7 @@ pub mod modules;
 pub mod ownership;
 pub mod package;
 pub mod parser;
+pub mod registry;
 pub mod repair;
 pub mod runtime;
 pub mod sema;

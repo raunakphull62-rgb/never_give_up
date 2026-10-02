@@ -345,7 +345,7 @@ pub struct MatchArm {
     pub id: NodeId,
     pub enum_name: Option<String>,
     pub variant: Option<String>,
-    pub bindings: Vec<String>,
+    pub bindings: Vec<MatchBinding>,
     pub stmts: Vec<Stmt>,
     pub guard: Option<Expr>,
     pub body: Expr,
@@ -355,6 +355,58 @@ impl MatchArm {
     /// True for the `_` wildcard arm.
     pub fn is_wildcard(&self) -> bool {
         self.variant.is_none()
+    }
+
+    /// True when any binding position holds a nested pattern.
+    pub fn has_nested_pattern(&self) -> bool {
+        self.bindings.iter().any(|b| b.has_nested())
+    }
+}
+
+/// One element of a match pattern's binding list. Each element occupies
+/// exactly one payload position, so arity is still a plain count compare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchBinding {
+    /// `_`: ignore this payload field (binds nothing; reading `_` as a
+    /// value is `E-UNDEFINED` unless an outer binding named `_` exists).
+    Ignore,
+    /// `name`: bind this payload field to a variable.
+    Bind(String),
+    /// `Enum::Variant(sub...)`: this field must be that variant (tag
+    /// check with fallthrough on mismatch); destructure recursively.
+    /// `enum_name` is always qualified at parse (`E` or `m::E`).
+    Nested {
+        enum_name: String,
+        variant: String,
+        bindings: Vec<MatchBinding>,
+    },
+}
+
+impl MatchBinding {
+    /// True for a nested pattern element (or, recursively, one that
+    /// contains one — a `Nested` always counts).
+    pub fn has_nested(&self) -> bool {
+        match self {
+            MatchBinding::Ignore | MatchBinding::Bind(_) => false,
+            MatchBinding::Nested { .. } => true,
+        }
+    }
+
+    /// Every variable name this element (recursively) binds.
+    pub fn bound_names(&self, out: &mut Vec<String>) {
+        match self {
+            MatchBinding::Ignore => {}
+            MatchBinding::Bind(n) => {
+                if !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+            MatchBinding::Nested { bindings, .. } => {
+                for b in bindings {
+                    b.bound_names(out);
+                }
+            }
+        }
     }
 }
 

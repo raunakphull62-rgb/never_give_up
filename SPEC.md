@@ -87,12 +87,31 @@ fn area(s: Shape) -> i32 {
 }
 ```
 
-- Declared `enum Name { Variant, Other(x: i32), ... }` (tuple-style
-  payloads `Variant(x: i32)`; bare `Variant` for no payload).
-  Construction: `Shape::Circle(10)` (bare variants still take `()`
-  at construction: `Shape::Point()`).
+- Declared `enum Name { Variant, Other(x: i32), ... }` (named
+  payloads `Variant(x: i32)`, or tuple payloads `Variant(i32, str)`
+  with synthesized `f0..fN` names; mixing named and bare fields in one
+  variant is `E-PARSE`; bare `Variant` for no payload).
+  Construction is always positional: `Shape::Circle(10)` (bare
+  variants still take `()` at construction: `Shape::Point()`).
+- Payloads may name the enum itself, directly or mutually
+  (`Cons(x: i32, xs: List)`): names resolve nominally (never silent
+  `Unknown` erasure), values nest without bound (the runtime value is
+  already heap-indirected), and recursive traversal honors the
+  1024-frame depth cap (`E-RUNTIME`, never a native overflow). A
+  mistyped recursive payload is `E-TYPE`. Generic self-reference keeps
+  the existing nominal erasure (best-effort, like all generic enums).
 - `match scrutinee { Enum::Variant(bindings...) => expr, ... }`,
-  arms comma-separated, `_ => ...` wildcard. An arm body is either a
+  arms comma-separated, `_ => ...` wildcard. Each binding position is
+  `name` (bind), `_` (ignore — binds nothing; reading `_` is
+  `E-UNDEFINED`), or a nested `Enum::Variant(sub...)` pattern (tag
+  check with fallthrough on mismatch, then recursive destructure; a
+  bare identifier always binds, so nested patterns must be qualified).
+  Binding is positional and count-exact (`E-ARITY` on mismatch — no
+  silent prefix binding); a nested pattern on a statically
+  non-matching field type is `E-TYPE`. Nested arms never satisfy
+  exhaustiveness alone (conservative, like guards) and follow the same
+  duplicate rules (nested-after-plain is reachable; plain-after-nested
+  same shape is `E-MATCH-DUPLICATE`). An arm body is either a
   single expression or a `{ ... }` block of statements ending in a
   trailing expression that yields the arm's value (same statement
   semantics as an `if` block body: `let`/assignment/`print`/`return`/
@@ -224,6 +243,7 @@ cargo run -- repair <file> [--max-iters N] [--scope function|file] [--dry-run]
                                  # repair-prompt inspector (see below)
 cargo run -- mcp                 # MCP server on stdio: klang_check,
                                  # klang_run, klang_fmt, klang_scope_plan
+cargo run -- lsp                  # LSP server on stdio (see below)
 ```
 
 `fmt` rules: 4-space indent, one statement per line, binary ops fully
@@ -261,6 +281,18 @@ check clean).
 - `match/*` diagnostics scope to the function whose body contains the
   `match`, not to every function that merely mentions the enum.
 
+`lsp` (v1): stdio JSON-RPC server with LSP `Content-Length` framing.
+Diagnostics-as-you-type only: the open buffer is checked through the
+exact `klang check` pipeline (loader with the buffer as entry source,
+same checker, same `Diagnostic::to_json()` objects carried in each
+LSP `data` field) with REAL line/character positions from byte spans
+(UTF-16 units, clamped). Whole-file re-check per settled change with a
+100 ms debounce (`examples/eval.klang` re-checks at ~39 ms p95, far
+under the ~200 ms budget that would force the Salsa path instead).
+Hover and go-to-definition are planned v2 (loud `MethodNotFound`, never
+a hang). Tested in `tests/lsp_gates.rs` (raw request/response proof of
+a type error's line/column).
+
 ## 6. Packages
 
 `klang.toml`:
@@ -280,6 +312,36 @@ mylib = "./mylib.klang"
 Lockfile: `write_lock` / `parse_lock` one `"<file> <hex>"` line per
 file (FNV-1a of bytes). `verify_lock` reports hash mismatches and
 missing files. Tested in `tests/package_gates.rs`.
+
+Registry packages (v1, local-verified; Render deploy is docs-only —
+see `render.yaml` + `docs/deploy-registry.md`):
+
+```toml
+[dependencies]
+mylib = "./mylib.klang"              # local path dep (as before)
+calc = "registry:calc@1.0.0"         # exact registry pin (X.Y.Z only)
+```
+
+- Service: `klang-registry` (Rust, std-only networking) serving the
+  index + content-addressed archives; file-backed storage, single admin
+  bearer token, no TLS in-process, no overwrite of published versions.
+- CLI: `klang publish` (packs `*.klang` + `klang.toml`, uploads),
+  `klang add name@version` (pins + fetches), `klang fetch`
+  (`--registry URL` / `KLANG_REGISTRY` select the server; `--offline`
+  forbids network). `run`/`check`/`build` fetch automatically when
+  online.
+- Resolution: `import "pkg/file.klang"` falls back to the pinned
+  vendor dir (`.klang_pkgs/<pkg>/<version>/`) when no local file
+  matches — local files always win, no new import syntax.
+- Integrity: SHA-256 over the archive, recorded at publish,
+  re-verified on every download, pinned in `klang.lock`
+  (`package <name> <version> <sha256>`). Drift on either side fails
+  loudly (`E-IMPORT`); the lock — not the vendor cache — is the trust
+  anchor. Tested in `tests/registry_gates.rs`.
+- Explicit v1 scope: exact pins only (no ranges/`latest` in manifests),
+  self-contained packages (no transitive registry deps), no
+  yanking/deletion, no private packages, no web UI,
+  first-come-first-served names.
 
 ## 7. What is here from v0.2 (audited, code-verified)
 
@@ -331,8 +393,12 @@ is a known constraint, not a crash bug. Pinned by
 
 No full-value machine-code backend (int-only Cranelift JIT behind
 `--backend-jit`; interpreter is the default), no real borrow
-checker (Managed mode only), no async I/O runtime, no registry/network
-packages, no LSP server (only a JSON renderer), no debugger/profiler, no
-recursive/nested enum payloads needing indirection,
-no tuple-variant syntax or partial destructuring. See `roadmap.md` for
-sequencing and `AUDIT.md` for the Phase 0 evidence table.
+checker (Managed mode only), no true async I/O runtime
+(`http_get_async`/`http_post_async` run the identical exchange on a
+bounded thread pool while the caller parks — simulated async, honestly
+labeled, network-only, callable only from `async` fns
+(`E-EFFECT-MISMATCH`); file/stdin/process/sleep stay blocking),
+no hover/go-to-definition yet (LSP v1 is diagnostics-as-you-type only),
+no debugger/profiler.
+See `roadmap.md` for sequencing and `AUDIT.md` for the Phase 0 evidence
+table.

@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{AssignTarget, Block, Effect, Expr, FunctionDecl, MatchArm, Program, Stmt};
+use crate::ast::{AssignTarget, Block, Effect, Expr, FunctionDecl, MatchArm, MatchBinding, Program, Stmt};
 use crate::diagnostics::Diagnostic;
 
 pub const FILE: &str = "input.warden";
@@ -254,9 +254,21 @@ impl TypedHIR {
         // parameter annotations can resolve to nominal enum types).
         let mut enums: EnumTable = HashMap::new();
         let mut enum_names: Vec<String> = Vec::new();
+        // Pass 1 (FOUNDATION-3: recursive payloads): seed every enum name
+        // with an empty variant map so self- and mutually-recursive
+        // payloads (`Cons(x: i32, xs: List)`) resolve nominally instead of
+        // silently erasing to `Unknown`. Names only — payloads still
+        // resolve in declaration order below, so all non-recursive
+        // behavior is unchanged.
         for e in &program.enums {
             enum_names.push(e.name.clone());
             check_type_params_dup(file, &e.name, &e.type_params, &mut diags);
+            enums.entry(e.name.clone()).or_insert_with(HashMap::new);
+        }
+        // Pass 2: resolve variant payloads (now seeing all enum names,
+        // including the enum being built and later-declared ones).
+        let mut populated: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for e in &program.enums {
             let mut variants: HashMap<String, Vec<Ty>> = HashMap::new();
             for v in &e.variants {
                 if variants.contains_key(&v.name) {
@@ -285,7 +297,7 @@ impl TypedHIR {
                         .collect(),
                 );
             }
-            if enums.contains_key(&e.name) {
+            if !populated.insert(e.name.clone()) {
                 diags.push(duplicate(file, &format!("duplicate enum `{}`", e.name)));
             }
             enums.insert(e.name.clone(), variants);
@@ -768,11 +780,22 @@ fn check_block(
                     .map(|s| s.return_ty.clone())
                     .unwrap_or(Ty::Unknown);
                 if !assignable(&got, &want) {
-                    diags.push(type_mismatch(
+                    // FOUNDATION-3 Part 2C enabler: the return statement
+                    // carries a real byte span (`r.span`), so the
+                    // mismatch points at the failing `return` instead of
+                    // 0,0. Same code/message/cause/fixes/rule as
+                    // `type_mismatch` — only the span is real. Other
+                    // expression-level type errors remain 0,0 (stated
+                    // limitation: expressions carry `NodeId`, not spans).
+                    diags.push(Diagnostic::error(
+                        "E-TYPE",
+                        &format!("`{}` return: want {}, got {}", caller.name, want.name(), got.name()),
                         file,
-                        &format!("`{}` return", caller.name),
-                        &want.name(),
-                        &got,
+                        r.span.0,
+                        r.span.1,
+                        "operand types do not match the operator",
+                        &["convert the value first", "check the operand types"],
+                        "types/mismatch",
                     ));
                 }
             }
@@ -1737,6 +1760,31 @@ fn check_expr(
                             ));
                         }
                     }
+                }
+                // FOUNDATION-3 Part 2A: simulated-async network calls
+                // require the `async` effect (E-EFFECT-MISMATCH
+                // otherwise). The pool parks the caller, so calling from
+                // a sync fn would silently serialize group drains; the
+                // gate makes async usage visible in the signature.
+                // Fan-out helpers spawned from within a task_group
+                // satisfy this via their own `async` annotation —
+                // lexical group containment is NOT required at the call
+                // site, since a spawned helper runs within the group's
+                // lifetime dynamically. `cancel` stays unchecked.
+                if (func == "http_get_async" || func == "http_post_async")
+                    && !has_effect(&caller.effects, Effect::Async)
+                {
+                    let (s, en) = caller.name_span;
+                    diags.push(Diagnostic::error(
+                        "E-EFFECT-MISMATCH",
+                        &format!("`{}` calls `{func}` without `async`", caller.name),
+                        file,
+                        s,
+                        en,
+                        "simulated-async network calls require visible `async` effect in caller signature",
+                        &["declare `async` in the function signature"],
+                        "effects/visibility",
+                    ));
                 }
                 return check_builtin_call(file, func, &arg_tys, diags);
             }
@@ -2760,6 +2808,98 @@ fn check_arm_body(
     )
 }
 
+/// Every variable name a pattern binding list (recursively) binds.
+/// `_` binds nothing.
+fn arm_bound_names(bindings: &[MatchBinding]) -> Vec<String> {
+    let mut out = Vec::new();
+    for b in bindings {
+        b.bound_names(&mut out);
+    }
+    out
+}
+
+/// Bind one pattern element against one payload type, recursing into
+/// nested patterns. Unknown nested targets bind `Unknown` (dynamic code
+/// falls through at runtime on tag mismatch); statically impossible
+/// nests (a field known to be a different enum, or a non-enum) are loud
+/// `E-TYPE`, mirroring the top-level cross-enum rule.
+fn bind_pattern(
+    file: &str,
+    b: &MatchBinding,
+    w: &Ty,
+    arm_defined: &mut HashMap<String, Ty>,
+    enums: &EnumTable,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let bind_unknowns = |b: &MatchBinding, arm_defined: &mut HashMap<String, Ty>| {
+        let mut names = Vec::new();
+        b.bound_names(&mut names);
+        for n in names {
+            arm_defined.insert(n, Ty::Unknown);
+        }
+    };
+    match b {
+        MatchBinding::Ignore => {}
+        MatchBinding::Bind(name) => {
+            // Payloads of generic type parameters erase to dynamic at
+            // the use site (same rule as field access): the arm cannot
+            // know the instantiation.
+            match w {
+                Ty::Param(_) => arm_defined.insert(name.clone(), Ty::Unknown),
+                _ => arm_defined.insert(name.clone(), w.clone()),
+            };
+        }
+        MatchBinding::Nested {
+            enum_name,
+            variant,
+            bindings,
+        } => match enums.get(enum_name) {
+            None => {
+                diags.push(undefined(file, enum_name));
+                bind_unknowns(b, arm_defined);
+            }
+            Some(variants) => match variants.get(variant) {
+                None => {
+                    diags.push(undefined(file, &format!("{enum_name}::{variant}")));
+                    bind_unknowns(b, arm_defined);
+                }
+                Some(payloads) => {
+                    let clash = match w {
+                        Ty::Enum(other) => other != enum_name,
+                        Ty::Unknown | Ty::Param(_) => false,
+                        _ => true,
+                    };
+                    if clash {
+                        diags.push(type_mismatch(
+                            file,
+                            "match pattern",
+                            &format!("field of `{enum_name}`"),
+                            w,
+                        ));
+                        bind_unknowns(b, arm_defined);
+                        return;
+                    }
+                    if bindings.len() != payloads.len() {
+                        diags.push(match_binding_arity(
+                            file,
+                            enum_name,
+                            variant,
+                            payloads.len(),
+                            bindings.len(),
+                        ));
+                    }
+                    for (sb, sw) in bindings.iter().zip(payloads.iter()) {
+                        bind_pattern(file, sb, sw, arm_defined, enums, diags);
+                    }
+                    for sb in bindings.iter().skip(payloads.len()) {
+                        bind_unknowns(sb, arm_defined);
+                    }
+                }
+            },
+        },
+    }
+}
+
 /// Check a `match` expression: arm shapes, binding types, branch result
 /// agreement, and exhaustiveness over the scrutinee enum's variants.
 /// Returns the common result type (`Unknown` when nothing is known).
@@ -2820,8 +2960,8 @@ fn check_match(
                             &format!("variant of `{ename}`"),
                             &Ty::Enum(aname.to_string()),
                         ));
-                        for b in &arm.bindings {
-                            arm_defined.insert(b.clone(), Ty::Unknown);
+                        for b in arm_bound_names(&arm.bindings) {
+                            arm_defined.insert(b, Ty::Unknown);
                         }
                     } else if let Some(wants) = variants.get(avar) {
                         if arm.bindings.len() != wants.len() {
@@ -2834,27 +2974,26 @@ fn check_match(
                             ));
                         }
                         for (b, w) in arm.bindings.iter().zip(wants.iter()) {
-                            // Payloads of generic type parameters erase to
-                            // dynamic at the use site (same rule as field
-                            // access): the arm cannot know the instantiation.
-                            match w {
-                                Ty::Param(_) => arm_defined.insert(b.clone(), Ty::Unknown),
-                                _ => arm_defined.insert(b.clone(), w.clone()),
-                            };
+                            bind_pattern(file, b, w, &mut arm_defined, enums, diags);
                         }
                         for b in arm.bindings.iter().skip(wants.len()) {
-                            arm_defined.insert(b.clone(), Ty::Unknown);
+                            let mut names = Vec::new();
+                            b.bound_names(&mut names);
+                            for n in names {
+                                arm_defined.insert(n, Ty::Unknown);
+                            }
                         }
-                        // Only an unguarded arm covers its variant: when the
-                        // guard is false matching falls through, so a
-                        // guarded arm alone never satisfies exhaustiveness.
-                        if arm.guard.is_none() {
+                        // Only a plain arm covers its variant: a guard may
+                        // be false and a nested pattern may mismatch, so
+                        // both fall through and never satisfy
+                        // exhaustiveness alone.
+                        if arm.guard.is_none() && !arm.has_nested_pattern() {
                             covered.insert(avar.to_string());
                         }
                     } else {
                         diags.push(undefined(file, &format!("{ename}::{avar}")));
-                        for b in &arm.bindings {
-                            arm_defined.insert(b.clone(), Ty::Unknown);
+                        for b in arm_bound_names(&arm.bindings) {
+                            arm_defined.insert(b, Ty::Unknown);
                         }
                     }
                 }
@@ -2891,11 +3030,13 @@ fn check_match(
                 }
             }
             // Duplicate arms and arms after `_` are dead code: diagnose.
-            // Only unguarded arms cover: a guarded arm may fall through
-            // when its guard is false, so a later same-pattern arm is
-            // still reachable (no duplicate), and arms after a guarded
-            // wildcard still run (no unreachable). An arm after an
-            // UNGUARDED wildcard never runs, guarded or not.
+            // Only plain arms cover: a guarded arm may fall through when
+            // its guard is false and a nested-pattern arm may fall through
+            // on nested-tag mismatch, so later same-pattern arms are still
+            // reachable (no duplicate), and arms after a guarded wildcard
+            // still run (no unreachable). An arm after an UNGUARDED
+            // wildcard never runs, guarded or not; an arm after a plain
+            // (unguarded, non-nested) same pattern never runs.
             {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut seen_wildcard = false;
@@ -2923,7 +3064,7 @@ fn check_match(
                             arm.enum_name.as_deref().unwrap_or(""),
                             arm.variant.as_deref().unwrap_or("")
                         );
-                        if arm.guard.is_none() {
+                        if arm.guard.is_none() && !arm.has_nested_pattern() {
                             if !seen.insert(key.clone()) {
                                 diags.push(Diagnostic::error(
                                     "E-MATCH-DUPLICATE",
@@ -2937,8 +3078,9 @@ fn check_match(
                                 ));
                             }
                         } else if seen.contains(&key) {
-                            // A guarded arm after an unguarded same pattern
-                            // never runs (the earlier arm always takes it).
+                            // A guarded or nested-pattern arm after a plain
+                            // same pattern never runs (the earlier arm
+                            // always takes it).
                             diags.push(Diagnostic::error(
                                 "E-MATCH-DUPLICATE",
                                 &format!("duplicate match arm `{key}`"),
@@ -2979,8 +3121,8 @@ fn check_match(
                     if !known {
                         diags.push(undefined(file, &format!("{aname}::{avar}")));
                     }
-                    for b in &arm.bindings {
-                        arm_defined.insert(b.clone(), Ty::Unknown);
+                    for b in arm_bound_names(&arm.bindings) {
+                        arm_defined.insert(b, Ty::Unknown);
                     }
                 }
                 let body_ty = check_arm_body(
@@ -3008,8 +3150,8 @@ fn check_match(
             diags.push(type_mismatch(file, "match scrutinee", "enum", other));
             for arm in arms {
                 let mut arm_defined = defined.clone();
-                for b in &arm.bindings {
-                    arm_defined.insert(b.clone(), Ty::Unknown);
+                for b in arm_bound_names(&arm.bindings) {
+                    arm_defined.insert(b, Ty::Unknown);
                 }
                 check_arm_body(
                     file,
@@ -3054,12 +3196,12 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "len" | "pop" | "keys" => 1,
         "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
         "insert" => 3,
-        "http_post" => 3,
+        "http_post" | "http_post_async" => 3,
         "str" | "int" | "float" => 1,
         "assert" => 1,
         "read_line" => 0,
         "parse_int" | "parse_float" => 1,
-        "read_file" | "exists" | "env" | "remove_file" | "http_get" => 1,
+        "read_file" | "exists" | "env" | "remove_file" | "http_get" | "http_get_async" => 1,
         "regex_is_match" | "regex_find" => 2,
         "time_sleep" | "time_elapsed" => 1,
         "time_now" => 0,
@@ -3252,23 +3394,23 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Float
         }
-        "http_get" => {
+        "http_get" | "http_get_async" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
-                diags.push(type_mismatch(file, "`http_get()` url", "str", &args[0]));
+                diags.push(type_mismatch(file, &format!("`{func}()` url"), "str", &args[0]));
             }
             Ty::Map
         }
-        "http_post" => {
+        "http_post" | "http_post_async" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
-                diags.push(type_mismatch(file, "`http_post()` url", "str", &args[0]));
+                diags.push(type_mismatch(file, &format!("`{func}()` url"), "str", &args[0]));
             }
             if !matches!(&args[1], Ty::Str | Ty::Unknown) {
-                diags.push(type_mismatch(file, "`http_post()` body", "str", &args[1]));
+                diags.push(type_mismatch(file, &format!("`{func}()` body"), "str", &args[1]));
             }
             if !matches!(&args[2], Ty::Array | Ty::Unknown) {
                 diags.push(type_mismatch(
                     file,
-                    "`http_post()` headers",
+                    &format!("`{func}()` headers"),
                     "array",
                     &args[2],
                 ));
@@ -3403,6 +3545,8 @@ pub fn is_builtin(name: &str) -> bool {
             | "time_elapsed"
             | "http_get"
             | "http_post"
+            | "http_get_async"
+            | "http_post_async"
             | "read_line"
             | "parse_int"
             | "parse_float"

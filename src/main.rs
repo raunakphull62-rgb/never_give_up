@@ -291,7 +291,7 @@ fn real_main() {
     );
     println!(
         "stage-6 lsp: {}",
-        klang::lsp::diagnostic_to_lsp(&leak_diags[0])
+        klang::lsp::diagnostic_to_lsp_json(&leak_diags[0], LEAK)
     );
     let mut attempts = 0u32;
     assert!(klang::contracts::repair_loop(3, |_| {
@@ -448,13 +448,51 @@ fn run_file_mode(args: &[String]) {
     // first arg means `run <file> [entry]`.
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
         Some("check") | Some("check-v2") | Some("fmt") | Some("run") | Some("run-v2") | Some("build")
-        | Some("repair") | Some("mcp") => (args[0].as_str(), &args[1..]),
+        | Some("repair") | Some("mcp") | Some("lsp") | Some("publish") | Some("add") | Some("fetch") => {
+            (args[0].as_str(), &args[1..])
+        }
         _ => ("run", args),
     };
     if cmd == "mcp" {
         run_mcp_mode();
         return;
     }
+    if cmd == "lsp" {
+        run_lsp_mode();
+        return;
+    }
+    if cmd == "publish" || cmd == "add" || cmd == "fetch" {
+        run_registry_mode(cmd, rest);
+        return;
+    }
+    // `--registry URL` takes a value: strip it (both `--registry URL`
+    // and `--registry=URL`) before positional parsing so the URL is
+    // never mistaken for a file or entry name. Other commands parse
+    // their own flags and are untouched.
+    let reg_cli_base = fetch_registry_base(rest);
+    let rest_owned: Vec<String>;
+    let rest: &[String] = if cmd == "run" || cmd == "check" || cmd == "build" {
+        let mut filtered = Vec::new();
+        let mut skip_next = false;
+        for a in rest {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if a == "--registry" {
+                skip_next = true;
+                continue;
+            }
+            if a.starts_with("--registry=") {
+                continue;
+            }
+            filtered.push(a.clone());
+        }
+        rest_owned = filtered;
+        &rest_owned
+    } else {
+        rest
+    };
     // Explicit v2 mode: `check --lang v2 <file>` or `check-v2 <file>`.
     // v1 files never silently use v2 semantics: the mode is always chosen
     // by the caller, never inferred.
@@ -532,7 +570,7 @@ fn run_file_mode(args: &[String]) {
             // plain check on the file. Recurse once on flag-free args.
             if files.is_empty() {
                 eprintln!(
-                    "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--write]"
+                    "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch> <file.klang> [entry] [--backend-jit|--write]"
                 );
                 std::process::exit(2);
             }
@@ -544,10 +582,12 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|run-v2|build|repair|mcp> <file.klang> [entry] [--backend-jit|--verbose|-v]"
+            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
         eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
-        eprintln!("       run [--verbose|-v] <file.klang> [entry]  (default: only program output; exit code is main's return)");
+        eprintln!("       run [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
+        eprintln!("       publish [--dir PATH] [--registry URL]  (KLANG_REGISTRY_TOKEN)");
+        eprintln!("       add <name@version> [--registry URL] | fetch [--registry URL] [--offline]");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -621,6 +661,12 @@ fn run_file_mode(args: &[String]) {
     // scripts/verify_docs.py parses.
     let loud_stdout = cmd != "run";
     let dump = verbose || loud_stdout;
+    // Registry gate: projects with registry deps fetch first (a no-op
+    // for every project without them — no network, no behavior change).
+    if cmd == "run" || cmd == "check" || cmd == "build" {
+        let offline = rest.iter().any(|a| a == "--offline");
+        ensure_registry_deps(run_path, offline, &reg_cli_base);
+    }
     let prog = match load_with_imports(run_path, !dump) {
         Ok(prog) => {
             if dump {
@@ -757,6 +803,195 @@ fn run_file_mode(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// `klang publish|add|fetch`: registry package management (FOUNDATION-3
+/// Part 2B). `--registry URL` overrides `KLANG_REGISTRY` which overrides
+/// the localhost default; publish auth comes from `KLANG_REGISTRY_TOKEN`
+/// (env preferred) or `--token` (overrides env).
+fn run_registry_mode(cmd: &str, rest: &[String]) {
+    fn flag_val(rest: &[String], names: &[&str]) -> Option<String> {
+        let mut it = rest.iter().peekable();
+        while let Some(a) = it.next() {
+            for n in names {
+                if a == n {
+                    match it.next() {
+                        Some(v) if !v.starts_with("--") => return Some(v.clone()),
+                        _ => {
+                            eprintln!("{n} needs a value");
+                            std::process::exit(2);
+                        }
+                    }
+                } else if let Some(v) = a.strip_prefix(&format!("{n}=")) {
+                    if v.is_empty() {
+                        eprintln!("{n} needs a value");
+                        std::process::exit(2);
+                    }
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+    let base = flag_val(rest, &["--registry"])
+        .or_else(|| std::env::var("KLANG_REGISTRY").ok())
+        .unwrap_or_else(|| klang::registry::DEFAULT_REGISTRY.to_string());
+    let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+    match cmd {
+        "publish" => {
+            let dir = flag_val(rest, &["--dir"])
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let token = flag_val(rest, &["--token"])
+                .or_else(|| std::env::var("KLANG_REGISTRY_TOKEN").ok())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| {
+                    eprintln!("publish needs a token: set KLANG_REGISTRY_TOKEN or pass --token");
+                    std::process::exit(2);
+                });
+            match klang_publish(&dir, &base, &token) {
+                Ok(line) => println!("{line}"),
+                Err(e) => {
+                    eprintln!("publish: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "add" => {
+            let Some(spec) = positional.first() else {
+                eprintln!("usage: add <name@version> [--registry URL]");
+                std::process::exit(2);
+            };
+            let (name, version) = spec.split_once('@').unwrap_or(("", ""));
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            match klang::registry::add_dependency(&dir, &base, name, version, false) {
+                Ok(line) => println!("{line}"),
+                Err(e) => {
+                    eprintln!("add: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "fetch" => {
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let offline = rest.iter().any(|a| a == "--offline");
+            match klang::registry::fetch_project(&dir, &base, offline) {
+                Ok(logs) => {
+                    for l in logs {
+                        println!("{l}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("fetch: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => unreachable!("registry dispatcher"),
+    }
+}
+
+/// Pack the project in `dir` and publish it. Returns the success line.
+fn klang_publish(
+    dir: &std::path::Path,
+    base: &str,
+    token: &str,
+) -> Result<String, klang::registry::RegistryError> {
+    use klang::registry::RegistryError;
+    let text = std::fs::read_to_string(dir.join("klang.toml"))
+        .map_err(|e| RegistryError::new("io", format!("cannot read klang.toml: {e}")))?;
+    let manifest =
+        klang::package::Manifest::parse(&text).map_err(|e| RegistryError::new("io", e))?;
+    if !klang::registry::valid_pkg_name(&manifest.name) {
+        return Err(RegistryError::new(
+            "protocol",
+            format!("klang.toml name `{}` is not a publishable package name", manifest.name),
+        ));
+    }
+    if !klang::registry::valid_version(&manifest.version) {
+        return Err(RegistryError::new(
+            "protocol",
+            format!("klang.toml version `{}` must be X.Y.Z", manifest.version),
+        ));
+    }
+    let files = klang::registry::collect_package_files(dir)
+        .map_err(|e| klang::registry::RegistryError::new("io", e))?;
+    let archive = klang::registry::pack_archive(&files)
+        .map_err(|e| klang::registry::RegistryError::new("io", e))?;
+    let sha = klang::registry::sha256_hex(&archive);
+    klang::registry::publish_pkg(base, token, &manifest.name, &manifest.version, &archive)?;
+    Ok(format!(
+        "published {}@{} ({} files, {} bytes, sha256:{sha})",
+        manifest.name,
+        manifest.version,
+        files.len(),
+        archive.len()
+    ))
+}
+
+/// Registry fetch gate for `run`/`check`/`build`: when the entry file
+/// lives in a project whose `klang.toml` declares registry deps, ensure
+/// they are vendored + verified first (network unless `--offline`).
+/// Projects without registry deps behave exactly as before (no network,
+/// no new failure modes). Failures print as `E-IMPORT` JSON.
+fn ensure_registry_deps(entry: &str, offline: bool, base: &str) {
+    let start = std::path::Path::new(entry);
+    let Some(root) = klang::registry::find_project_root(start) else {
+        return;
+    };
+    let text = match std::fs::read_to_string(root.join("klang.toml")) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let manifest = match klang::package::Manifest::parse(&text) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if !manifest
+        .deps
+        .iter()
+        .any(|(_, v)| klang::registry::parse_registry_dep(v).is_some())
+    {
+        return;
+    }
+    if let Err(e) = klang::registry::fetch_project(&root, base, offline) {
+        let d = klang::diagnostics::Diagnostic::error(
+            "E-IMPORT",
+            &e.to_string(),
+            "import",
+            0,
+            0,
+            "registry dependency resolution failed",
+            &["run `klang fetch` online first", "check klang.toml pins and klang.lock hashes"],
+            "modules/import",
+        );
+        eprintln!("parse: FAIL");
+        eprintln!("{}", d.to_json());
+        std::process::exit(1);
+    }
+}
+
+/// Registry base URL for dependency fetching during run/check/build
+/// (`--registry URL` or `--registry=URL`, else `KLANG_REGISTRY`, else
+/// the localhost default).
+fn fetch_registry_base(rest: &[String]) -> String {
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("--registry=") {
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        } else if a == "--registry" {
+            if let Some(v) = it.next() {
+                if !v.starts_with("--") {
+                    return v.clone();
+                }
+            }
+        }
+    }
+    std::env::var("KLANG_REGISTRY")
+        .ok()
+        .unwrap_or_else(|| klang::registry::DEFAULT_REGISTRY.to_string())
 }
 
 /// Load a file plus its transitive `import`s, prefixing each file's `NodeId`
@@ -909,6 +1144,15 @@ fn run_mcp_mode() {
             }
         }
     }
+}
+
+/// `klang lsp`: stdio JSON-RPC language server (FOUNDATION-3 Part 2C).
+/// Same stdin reservation as `klang mcp`: protocol owns the stream, so a
+/// `read_line()` call in a checked program sees EOF instead of stealing
+/// protocol bytes.
+fn run_lsp_mode() {
+    klang::stdlib::io::reserve_stdin_for_mcp();
+    klang::lsp::serve_stdio();
 }
 
 /// Directory containing `path` (for `klang.toml` lookup).

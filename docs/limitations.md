@@ -103,12 +103,15 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   the library API (`E-CONTRACT`); nothing in surface syntax triggers it.
 - **JIT**: integer-only behind `--backend-jit`; the interpreter is the
   reference backend. `build` always stops at the MIR listing.
-- **Packages**: manifest + FNV lockfile is change-detection, not
-  cryptography; there is no registry or network fetching.
-- **LSP**: JSON diagnostic renderer only, no server.
-  Closures (by-value capture) and match guards ARE in the language
-  (SPEC §2b/§2c); still absent: no trait bounds; no partial
-  destructuring or struct-style variants; no `throw`
+- **Packages**: manifest + FNV lockfile for local files is
+  change-detection, not cryptography; registry pins add SHA-256
+  (`package <name> <version> <sha256>` in `klang.lock`, verified on
+  every download). No private packages, yanking, or version ranges.
+- **LSP**: `klang lsp` serves diagnostics-as-you-type (whole-file
+  re-check with debounce); hover and go-to-definition are planned v2.
+  Closures (by-value capture), match guards, and nested match patterns
+  ARE in the language (SPEC §2b/§2c); still absent: no trait bounds;
+  no struct-style variants; no `throw`
   statement (`throws` is propagation-checked only); no const items;
   arrays and maps are dynamically typed (`unknown` by design).
 - **Formatter**: `fmt` renders the AST, so comments are dropped from

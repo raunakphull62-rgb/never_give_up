@@ -1130,6 +1130,8 @@ fn is_builtin(name: &str) -> bool {
             | "time_elapsed"
             | "http_get"
             | "http_post"
+            | "http_get_async"
+            | "http_post_async"
             | "read_line"
             | "parse_int"
             | "parse_float"
@@ -1515,6 +1517,40 @@ fn exec_builtin(
                 }
             };
             let r = crate::stdlib::http::post(&url, &body, &headers)?;
+            Ok(http_response_map(&r))
+        }
+        // Simulated-async twins (FOUNDATION-3 Part 2A): identical
+        // signatures, results, and error codes as the sync versions —
+        // only the execution site differs (shared bounded pool).
+        "http_get_async" => {
+            if args.len() != 1 {
+                return Err(runtime_err("http_get_async() takes 1 argument"));
+            }
+            let url = get(&args[0]).render();
+            let r = crate::stdlib::http::get_async(&url)?;
+            Ok(http_response_map(&r))
+        }
+        "http_post_async" => {
+            if args.len() != 3 {
+                return Err(runtime_err("http_post_async() takes 3 arguments"));
+            }
+            let url = get(&args[0]).render();
+            let body = get(&args[1]).render();
+            let headers = match get(&args[2]) {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        out.push(v.render());
+                    }
+                    out
+                }
+                _ => {
+                    return Err(runtime_err(
+                        "http_post_async() needs an array of strings third",
+                    ))
+                }
+            };
+            let r = crate::stdlib::http::post_async(&url, &body, &headers)?;
             Ok(http_response_map(&r))
         }
         "__echo_create" => {

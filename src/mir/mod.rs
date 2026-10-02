@@ -14,7 +14,7 @@ pub mod echo_lowering;
 /// v2 Flow lowering (explicit `dep=` environments).
 pub mod flow_lowering;
 
-use crate::ast::{AssignTarget, Expr, NodeId, Program, Stmt};
+use crate::ast::{AssignTarget, Expr, MatchBinding, NodeId, Program, Stmt};
 
 /// One MIR instruction with source origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +270,96 @@ fn tmp_name(tmp: &mut u32) -> String {
     name
 }
 
+/// Lower one pattern binding element against one payload position.
+/// `base` holds the parent value, `i` the field index. `_` emits
+/// nothing; a variable emits `FieldGet`; a nested pattern extracts the
+/// field into a temp, tag-checks it (mismatch falls through to the next
+/// arm via `pending`, exactly like a top-level tag mismatch), then
+/// recurses. Runs strictly after the parent pattern matched and before
+/// arm setup, so setup/guard/body only ever see a fully-matched arm.
+#[allow(clippy::too_many_arguments)]
+fn lower_pattern(
+    b: &MatchBinding,
+    base: &str,
+    i: usize,
+    arm_id: &NodeId,
+    expr_id: &NodeId,
+    instrs: &mut Vec<MirInstr>,
+    tmp: &mut u32,
+    pending: &mut Vec<usize>,
+) {
+    match b {
+        MatchBinding::Ignore => {}
+        MatchBinding::Bind(name) => {
+            push(
+                instrs,
+                arm_id,
+                MirOp::FieldGet {
+                    into: name.clone(),
+                    base: base.to_string(),
+                    field: format!("f{i}"),
+                },
+            );
+        }
+        MatchBinding::Nested { variant, bindings, .. } => {
+            // Extract first: a non-struct field errors loudly here, the
+            // same treatment a non-enum top-level scrutinee gets
+            // (checked programs only reach this with enum-typed fields —
+            // anything else is `E-TYPE` at check time).
+            let ft = tmp_name(tmp);
+            push(
+                instrs,
+                arm_id,
+                MirOp::FieldGet {
+                    into: ft.clone(),
+                    base: base.to_string(),
+                    field: format!("f{i}"),
+                },
+            );
+            let ftag = tmp_name(tmp);
+            push(
+                instrs,
+                arm_id,
+                MirOp::FieldGet {
+                    into: ftag.clone(),
+                    base: ft.clone(),
+                    field: "__variant".to_string(),
+                },
+            );
+            let want = tmp_name(tmp);
+            push(
+                instrs,
+                arm_id,
+                MirOp::ConstStr {
+                    into: want.clone(),
+                    value: variant.clone(),
+                },
+            );
+            let cmp = tmp_name(tmp);
+            push(
+                instrs,
+                arm_id,
+                MirOp::Eq {
+                    into: cmp.clone(),
+                    left: ftag,
+                    right: want,
+                },
+            );
+            pending.push(push(
+                instrs,
+                expr_id,
+                MirOp::JumpIfFalse {
+                    cond: cmp,
+                    target: usize::MAX,
+                },
+            ));
+            for (j, sb) in bindings.iter().enumerate() {
+                lower_pattern(sb, &ft, j, arm_id, expr_id, instrs, tmp, pending);
+            }
+        }
+    }
+}
+
 fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> String {
     match e {
         Expr::Int { value, .. } => {
@@ -433,9 +523,16 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
             // out of scope here.)
             let mut names: Vec<String> = Vec::new();
             for arm in arms.iter() {
+                // Pattern bindings at every nesting level share the flat
+                // namespace (collected recursively, so nested bindings
+                // restore exactly like top-level ones on fallthrough).
                 for b in arm.bindings.iter() {
-                    if !names.contains(b) {
-                        names.push(b.clone());
+                    let mut bound = Vec::new();
+                    b.bound_names(&mut bound);
+                    for n in bound {
+                        if !names.contains(&n) {
+                            names.push(n);
+                        }
                     }
                 }
                 for s in arm.stmts.iter() {
@@ -515,14 +612,15 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
                     ));
                 }
                 for (i, b) in arm.bindings.iter().enumerate() {
-                    push(
-                        instrs,
+                    lower_pattern(
+                        b,
+                        &s,
+                        i,
                         &arm.id,
-                        MirOp::FieldGet {
-                            into: b.clone(),
-                            base: s.clone(),
-                            field: format!("f{i}"),
-                        },
+                        e.id(),
+                        instrs,
+                        tmp,
+                        &mut pending,
                     );
                 }
                 if !arm.stmts.is_empty() {

@@ -3,6 +3,19 @@
 use klang::runtime::echo::Echo;
 use klang::runtime::gc::rc::{live_count, RcCell};
 use klang::sema::echo_lifetime::{check_branches, EchoScope};
+use std::sync::{Mutex, OnceLock};
+
+/// Serializes the two `live_count`-sensitive tests below.
+///
+/// `live_count()` reads a process-global counter, so two such tests
+/// running on parallel worker threads race (each observes the other's
+/// live cell). The tests are deterministic in isolation and under
+/// `--test-threads=1`; the mutex makes the default parallel runner
+/// deterministic too without changing what is asserted.
+fn live_count_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn v2_echo_unlistened_is_error() {
@@ -62,6 +75,7 @@ fn v2_echo_early_return_checked() {
 
 #[test]
 fn v2_echo_runtime_success_and_cleanup() {
+    let _guard = live_count_lock().lock().expect("test mutex");
     let before = live_count();
     let e = Echo::new("pending");
     assert_eq!(e.strong(), 1);
@@ -73,6 +87,7 @@ fn v2_echo_runtime_success_and_cleanup() {
 
 #[test]
 fn v2_echo_runtime_failure_lossless() {
+    let _guard = live_count_lock().lock().expect("test mutex");
     let before = live_count();
     let e: Echo<i32> = Echo::new("pending");
     e.fail("boom");
@@ -84,6 +99,10 @@ fn v2_echo_runtime_failure_lossless() {
 
 #[test]
 fn v2_echo_rc_counts_and_cycles_visible() {
+    // Also serialized: this test transiently bumps the same global
+    // counter the two tests above snapshot, so concurrent execution
+    // would flake their before/after equality.
+    let _guard = live_count_lock().lock().expect("test mutex");
     let c = RcCell::new(1);
     assert_eq!(c.strong(), 1);
     let r = c.retain();

@@ -129,11 +129,20 @@ fn fmt_enum(e: &EnumDecl) -> String {
             if v.fields.is_empty() {
                 v.name.clone()
             } else {
-                let fs: Vec<String> = v
-                    .fields
-                    .iter()
-                    .map(|f| format!("{}: {}", f.name, f.ty))
-                    .collect();
+                // Tuple payloads (`V(i32, str)`, synthesized `f0..fN`
+                // names) print bare; named fields keep `name: Type`.
+                // Payload names are inert (binding is positional), so
+                // normalizing an explicit `V(f0: i32)` to `V(i32)` is
+                // behavior-preserving and keeps `fmt(fmt(x)) == fmt(x)`.
+                let tuple = v.fields.iter().enumerate().all(|(i, f)| f.name == format!("f{i}"));
+                let fs: Vec<String> = if tuple {
+                    v.fields.iter().map(|f| f.ty.clone()).collect()
+                } else {
+                    v.fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.name, f.ty))
+                        .collect()
+                };
                 format!("{}({})", v.name, fs.join(", "))
             }
         })
@@ -317,7 +326,9 @@ fn fmt_expr(e: &Expr) -> String {
                             if a.bindings.is_empty() {
                                 format!("{en}::{v}")
                             } else {
-                                format!("{en}::{v}({})", a.bindings.join(", "))
+                                let bs: Vec<String> =
+                                    a.bindings.iter().map(fmt_binding).collect();
+                                format!("{en}::{v}({})", bs.join(", "))
                             }
                         }
                         _ => "_".to_string(),
@@ -407,6 +418,25 @@ fn fmt_expr(e: &Expr) -> String {
         Expr::Or { left, right, .. } => bin(left, right, "||"),
         Expr::Not { inner, .. } => format!("!{}", fmt_expr(inner)),
         Expr::Neg { inner, .. } => format!("-{}", fmt_expr(inner)),
+    }
+}
+
+fn fmt_binding(b: &crate::ast::MatchBinding) -> String {
+    match b {
+        crate::ast::MatchBinding::Ignore => "_".to_string(),
+        crate::ast::MatchBinding::Bind(n) => n.clone(),
+        crate::ast::MatchBinding::Nested {
+            enum_name,
+            variant,
+            bindings,
+        } => {
+            if bindings.is_empty() {
+                format!("{enum_name}::{variant}")
+            } else {
+                let bs: Vec<String> = bindings.iter().map(fmt_binding).collect();
+                format!("{enum_name}::{variant}({})", bs.join(", "))
+            }
+        }
     }
 }
 

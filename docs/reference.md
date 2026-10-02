@@ -157,6 +157,7 @@ Free functions and methods:
 | `regex_is_match(pat, text)` / `regex_find(pat, text)` | 2 / 2 | regex search; `find` returns map `matched`/`match`/`groups`/`named`; no match is a normal result, bad pattern is `E-REGEX-INVALID-PATTERN` |
 | `time_sleep(s)` / `time_now()` / `time_elapsed(since)` | 1 / 0 / 1 | blocking sleep (fractional seconds ok, int widens), Unix-epoch clock, same-clock elapsed; returns int/float/float; bad duration is `E-TIME-INVALID` |
 | `http_get(url)` / `http_post(url, body, headers)` | 1 / 3 | sync HTTP via ureq (10s connect / 60s backstop); returns map `status`/`body`/`headers` (lowercased names); error statuses are normal results; transport failures are `E-NET-UNREACHABLE`, bad URLs `E-NET-INVALID-URL`, bad header entries `E-NET-INVALID-HEADER` |
+| `http_get_async(url)` / `http_post_async(url, body, headers)` | 1 / 3 | SIMULATED async: byte-identical exchange/results/errors as the sync twins, executed on a shared bounded pool (16 workers, FIFO queue) while the caller parks — blocking calls on pool threads, NOT true async I/O; requires the `async` effect on the caller (`E-EFFECT-MISMATCH` otherwise); fan-out via `spawn` of `async` helpers from inside a `task_group` |
 
 String methods (`upper lower trim chars len split contains
 starts_with ends_with replace`), array methods (`len push pop insert
@@ -239,8 +240,9 @@ fn main() -> i32 {
   binding-count mismatches are `E-ARITY`; cross-enum arms and
   non-enum scrutinees are `E-TYPE` (naming the actual type).
 - Not in the language: struct-style variants, partial `{ f, .. }`
-  destructuring, tuple-variant syntax. (Match guards and multi-statement
-  arms ARE in the language; see SPEC §2b.)
+  struct destructuring. (Tuple variants `V(i32, str)`, partial `_` /
+  nested enum patterns, match guards, and multi-statement arms ARE in
+  the language; see SPEC §2b.)
 
 ## 7. Generics
 
@@ -314,7 +316,10 @@ fn main() -> i32 {
   annotations; a `throws` function that calls nothing throwing is
   legal (it declares a failure boundary).
 - `async`: any function using `task_group`/`spawn`/`await` must
-  declare it (`E-EFFECT-MISMATCH` otherwise).
+  declare it (`E-EFFECT-MISMATCH` otherwise). The simulated-async
+  network twins (`http_get_async`/`http_post_async`) likewise require
+  `async` on the caller (`E-EFFECT-MISMATCH`); `cancel` stays
+  loop-back-edge-only (not newly enforced).
 - `cancel`: accepted in signatures but not propagation-checked.
 - `task_group { let h = spawn f() ... return await h }`: `spawn` only
   directly bound by `let` inside a group (`E-SPAWN-OUTSIDE-GROUP`
@@ -555,14 +560,18 @@ the `ownership` API — only `Managed` ships).
 
 ## 11. What is not in the language
 
-Closures (`fn(params) -> type { ... }` values, by-value capture) and
-match guards ARE in the language (SPEC §2b/§2c). Not in the language:
-no trait bounds; no partial destructuring /
-struct-style variants; no recursive struct fields that must be
-inhabited without a dynamic producer; no `throw` statement; no
-short-circuit `&&`/`||`; no const items; no string interpolation;
-no machine-code backend for non-integer code (interpreter is the
-reference; `--backend-jit` is integer-only); no registry/network
-packages; no LSP server (JSON renderer only); no debugger/profiler.
+Closures (`fn(params) -> type { ... }` values, by-value capture),
+match guards, nested match patterns (qualified `Enum::Variant(sub...)`
+per binding position), and tuple enum variants ARE in the language
+(SPEC §2b/§2c). Registry packages (`klang publish`/`add`/`fetch`,
+`registry:name@version` pins) and the diagnostics-as-you-type LSP
+server (`klang lsp`; hover/go-to-definition are planned v2) ARE
+shipped. Not in the language: no trait bounds; no struct-style
+variants; no recursive struct fields that must be inhabited without a
+dynamic producer; no `throw` statement; no short-circuit `&&`/`||`;
+no const items; no string interpolation; no machine-code backend for
+non-integer code (interpreter is the reference; `--backend-jit` is
+integer-only); no private registry packages, yanking, or version
+ranges; no debugger/profiler.
 See [limitations](limitations.md) for the honest subset that matters
 most in practice.

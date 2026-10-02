@@ -34,10 +34,12 @@ pub mod regex;
 pub mod time;
 
 /// OS-interop HTTP boundary: real synchronous `GET`/`POST` via
-/// `ureq` with `E-NET-*` diagnostics (STDLIB-NET-1). Wired into the
+/// `ureq` with `E-NET-*` diagnostics (STDLIB-NET-1), plus simulated-async
+/// twins on a shared bounded pool (FOUNDATION-3 Part 2A). Wired into the
 /// interpreter as the flat builtins
-/// `http_get(url)` / `http_post(url, body, headers)`. `net.rs`'s
-/// `MockTransport` is the v2 echo test double and stays untouched.
+/// `http_get(url)` / `http_post(url, body, headers)` /
+/// `http_get_async(url)` / `http_post_async(url, body, headers)`.
+/// `net.rs`'s `MockTransport` is the v2 echo test double and stays untouched.
 pub mod http;
 
 /// OS-interop stdin boundary: `read_line` / `parse_int` / `parse_float`

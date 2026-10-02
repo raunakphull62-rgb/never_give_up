@@ -28,6 +28,7 @@
 //!   items only.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 
 use crate::ast::Program;
 use crate::diagnostics::{self, Diagnostic};
@@ -88,12 +89,78 @@ impl std::fmt::Display for ImportError {
 }
 
 enum Work {
-    Whole { path: String, importer: String },
-    Selective { path: String, names: Vec<String>, importer: String },
+    Whole {
+        path: String,
+        importer: String,
+        raw: String,
+    },
+    Selective {
+        path: String,
+        names: Vec<String>,
+        importer: String,
+        raw: String,
+    },
+}
+
+/// Registry vendor context for one load: the project root (dir holding
+/// `klang.toml`, if any) plus its registry deps. `None` when the entry
+/// lives outside any project — then only relative imports resolve.
+struct VendorCtx {
+    root: PathBuf,
+    deps: Vec<(String, String)>,
+}
+
+/// Load `entry` plus its transitive imports, with the entry file's
+/// content supplied in memory (`entry_src`) instead of read from disk.
+///
+/// This is the language-server entry point (FOUNDATION-3 Part 2C): the
+/// editor's dirty buffer is checked exactly as `klang check` would check
+/// the saved file — same loader, same checker, same diagnostics — while
+/// every *imported* file still resolves from disk. The override is keyed
+/// on the entry's canonical path and pre-seeded before the BFS walk, so
+/// `ensure_parsed` treats it as already parsed (imports enqueued from
+/// the buffer's own `import` statements, cycles still terminate).
+pub fn load_program_with_entry_source(
+    entry: &str,
+    entry_src: &str,
+) -> Result<LoadedProgram, ImportError> {
+    let canon = canonical(entry);
+    let mut parsed: HashMap<String, Program> = HashMap::new();
+    let mut path_of_idx: Vec<String> = Vec::new();
+    let mut files: Vec<LoadedFile> = Vec::new();
+    let mut p = Parser::new_with_file(entry_src, entry);
+    let prog = p
+        .parse_program()
+        .map_err(|d| ImportError::new("E-PARSE", d.to_json()))?;
+    path_of_idx.push(canon.clone());
+    files.push(LoadedFile {
+        path: entry.to_string(),
+        bytes: entry_src.len(),
+    });
+    parsed.insert(canon, prog.with_file_prefix(0));
+    load_from(entry, parsed, path_of_idx, files)
 }
 
 /// Load `entry` plus its transitive imports (whole and selective).
 pub fn load_program(entry: &str) -> Result<LoadedProgram, ImportError> {
+    load_from(
+        entry,
+        HashMap::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+/// Shared BFS body for [`load_program`] and
+/// [`load_program_with_entry_source`]. `parsed`/`path_of_idx`/`files`
+/// may arrive pre-seeded (entry source override) or empty (read the
+/// entry from disk like always).
+fn load_from(
+    entry: &str,
+    mut parsed: HashMap<String, Program>,
+    mut path_of_idx: Vec<String>,
+    mut files: Vec<LoadedFile>,
+) -> Result<LoadedProgram, ImportError> {
     let mut merged = Program {
         mods: vec![],
         enums: vec![],
@@ -102,11 +169,10 @@ pub fn load_program(entry: &str) -> Result<LoadedProgram, ImportError> {
         selective_imports: vec![],
         functions: vec![],
     };
-    let mut files: Vec<LoadedFile> = Vec::new();
     // Canonical path -> prefixed parse (cached so each file parses once,
-    // which is also what makes cycles terminate).
-    let mut parsed: HashMap<String, Program> = HashMap::new();
-    let mut path_of_idx: Vec<String> = Vec::new();
+    // which is also what makes cycles terminate). When the entry source
+    // was supplied in memory, `parsed` already holds it under the entry's
+    // canonical path, so the walk below reuses it instead of reading disk.
     let mut whole_done: HashSet<String> = HashSet::new();
     // Canonical paths whose own imports were already queued: a file's
     // imports are static, so expanding once (on first sight, whole or
@@ -122,16 +188,37 @@ pub fn load_program(entry: &str) -> Result<LoadedProgram, ImportError> {
     let mut queue: VecDeque<Work> = VecDeque::from([Work::Whole {
         path: entry.to_string(),
         importer: entry.to_string(),
+        raw: entry.to_string(),
     }]);
+    // Vendor context, computed once from the entry: a `klang.toml` found
+    // by walking up from the entry file enables `pkg/file.klang`
+    // fallback imports for registry dependencies.
+    let vendor: Option<VendorCtx> = {
+        let start = std::path::Path::new(entry);
+        crate::registry::find_project_root(start).and_then(|root| {
+            let text = std::fs::read_to_string(root.join("klang.toml")).ok()?;
+            let manifest = crate::package::Manifest::parse(&text).ok()?;
+            let deps: Vec<(String, String)> = manifest
+                .deps
+                .into_iter()
+                .filter(|(_, v)| crate::registry::parse_registry_dep(v).is_some())
+                .collect();
+            if deps.is_empty() {
+                None
+            } else {
+                Some(VendorCtx { root, deps })
+            }
+        })
+    };
 
     while let Some(work) = queue.pop_front() {
         match work {
-            Work::Whole { path, importer } => {
+            Work::Whole { path, importer, raw } => {
                 let canon = canonical(&path);
                 if whole_done.contains(&canon) {
                     continue;
                 }
-                ensure_parsed(&path, &canon, &mut parsed, &mut path_of_idx, &mut files)?;
+                ensure_parsed(&path, &raw, &vendor, &canon, &mut parsed, &mut path_of_idx, &mut files)?;
                 // Mark BEFORE merging so a self-importing file terminates.
                 whole_done.insert(canon.clone());
                 let prog = parsed.get(&canon).expect("just parsed").clone();
@@ -156,9 +243,10 @@ pub fn load_program(entry: &str) -> Result<LoadedProgram, ImportError> {
                 path,
                 names,
                 importer,
+                raw,
             } => {
                 let canon = canonical(&path);
-                ensure_parsed(&path, &canon, &mut parsed, &mut path_of_idx, &mut files)?;
+                ensure_parsed(&path, &raw, &vendor, &canon, &mut parsed, &mut path_of_idx, &mut files)?;
                 let prog = parsed.get(&canon).expect("just parsed").clone();
                 // The target's own imports still apply transitively (a
                 // named function may need its file's other imports).
@@ -193,9 +281,14 @@ fn canonical(path: &str) -> String {
 }
 
 /// Read + parse one file (once per canonical path), assigning it the next
-/// file index for globally unique `NodeId` prefixes.
+/// file index for globally unique `NodeId` prefixes. When the relative
+/// read fails and the import names a registry dependency
+/// (`pkg/file.klang`), falls back to the pinned vendor directory (local
+/// files always win — this only runs after the relative read failed).
 fn ensure_parsed(
     path: &str,
+    raw: &str,
+    vendor: &Option<VendorCtx>,
     canon: &str,
     parsed: &mut HashMap<String, Program>,
     path_of_idx: &mut Vec<String>,
@@ -204,25 +297,52 @@ fn ensure_parsed(
     if parsed.contains_key(canon) {
         return Ok(());
     }
-    let src = std::fs::read_to_string(path).map_err(|e| {
-        ImportError::new(
-            "E-IO-NOT-FOUND",
-            format!(
-                "cannot read {}: {e}",
-                diagnostics::sanitize_for_terminal(path)
-            ),
-        )
-    })?;
-    let mut p = Parser::new_with_file(&src, path);
+    let (real_path, src) = match std::fs::read_to_string(path) {
+        Ok(src) => (path.to_string(), src),
+        Err(first) => match vendor_fallback(raw, vendor) {
+            Some(vpath) => match std::fs::read_to_string(&vpath) {
+                Ok(src) => (vpath, src),
+                Err(_) => {
+                    return Err(ImportError::new(
+                        "E-IO-NOT-FOUND",
+                        format!(
+                            "cannot read {}: {first}",
+                            diagnostics::sanitize_for_terminal(path)
+                        ),
+                    ));
+                }
+            },
+            None => {
+                return Err(ImportError::new(
+                    "E-IO-NOT-FOUND",
+                    format!(
+                        "cannot read {}: {first}",
+                        diagnostics::sanitize_for_terminal(path)
+                    ),
+                ));
+            }
+        },
+    };
+    let mut p = Parser::new_with_file(&src, &real_path);
     let prog = p.parse_program().map_err(|d| ImportError::new("E-PARSE", d.to_json()))?;
     let idx = path_of_idx.len() as u32;
     path_of_idx.push(canon.to_string());
     files.push(LoadedFile {
-        path: path.to_string(),
+        path: real_path,
         bytes: src.len(),
     });
     parsed.insert(canon.to_string(), prog.with_file_prefix(idx));
     Ok(())
+}
+
+/// Vendor-dir fallback for one raw import string. Returns the vendored
+/// path when the import's first segment names a registry dependency.
+/// Returns `None` for ordinary relative imports (and for anything with
+/// `..`/empty segments — those stay hard errors, never silent).
+fn vendor_fallback(raw: &str, vendor: &Option<VendorCtx>) -> Option<String> {
+    let ctx = vendor.as_ref()?;
+    crate::registry::resolve_vendor_import(&ctx.root, &ctx.deps, raw)
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 /// Queue a file's own imports, resolved against its directory. Unsafe
@@ -246,6 +366,7 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
         queue.push_back(Work::Whole {
             path: dir.join(imp).to_string_lossy().to_string(),
             importer: from_path.to_string(),
+            raw: imp.clone(),
         });
     }
     for sel in &prog.selective_imports {
@@ -262,6 +383,7 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
             path: dir.join(&sel.path).to_string_lossy().to_string(),
             names: sel.names.clone(),
             importer: from_path.to_string(),
+            raw: sel.path.clone(),
         });
     }
     Ok(())

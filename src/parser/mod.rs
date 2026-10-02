@@ -1112,14 +1112,46 @@ impl Parser {
             if self.peek().kind == TokenKind::LParen {
                 self.bump();
                 if self.peek().kind != TokenKind::RParen {
+                    // Tuple payloads (`V(i32, str)`) vs named payloads
+                    // (`V(x: i32, y: str)`): decided by the FIRST field
+                    // only, then enforced for the rest (mixing is
+                    // `E-PARSE` — a silent mixed reading would bind the
+                    // wrong shape). Tuple fields synthesize `f0..fN`
+                    // names matching the positional storage; payload
+                    // names are inert (binding is positional), so this
+                    // is behavior-preserving.
+                    let mut tuple_shape: Option<bool> = None;
                     loop {
-                        let (fname, _, _) = self.expect_ident("field name")?;
-                        self.expect(&TokenKind::Colon, "`:`")?;
-                        let fty = self.parse_ty_name("field type")?;
-                        fields.push(Param {
-                            name: fname,
-                            ty: fty,
-                        });
+                        let is_named = match &self.peek().kind {
+                            TokenKind::Ident(_) => matches!(
+                                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                                Some(TokenKind::Colon)
+                            ),
+                            _ => false,
+                        };
+                        if tuple_shape.is_none() {
+                            tuple_shape = Some(!is_named);
+                        } else if tuple_shape != Some(!is_named) {
+                            let p = self.peek().clone();
+                            return Err(self.err(
+                                p.start,
+                                p.end,
+                                "cannot mix named and tuple payload fields in one variant",
+                            ));
+                        }
+                        if is_named {
+                            let (fname, _, _) = self.expect_ident("field name")?;
+                            self.expect(&TokenKind::Colon, "`:`")?;
+                            let fty = self.parse_ty_name("field type")?;
+                            fields.push(Param {
+                                name: fname,
+                                ty: fty,
+                            });
+                        } else {
+                            let fty = self.parse_ty_name("field type")?;
+                            let fname = format!("f{}", fields.len());
+                            fields.push(Param { name: fname, ty: fty });
+                        }
                         if self.peek().kind == TokenKind::Comma {
                             self.bump();
                         } else {
@@ -1622,8 +1654,7 @@ impl Parser {
             self.bump();
             if self.peek().kind != TokenKind::RParen {
                 loop {
-                    let (b, _, _) = self.expect_ident("binding name")?;
-                    bindings.push(b);
+                    bindings.push(self.parse_match_binding()?);
                     if self.peek().kind == TokenKind::Comma {
                         self.bump();
                     } else {
@@ -1644,6 +1675,57 @@ impl Parser {
             stmts,
             guard,
             body,
+        })
+    }
+
+    /// One pattern binding element: `_` (ignore), `name` (bind), or
+    /// `Enum::Variant(sub...)` / `m::Enum::Variant(sub...)` (nested
+    /// destructure). A bare identifier always binds — even `Nil` — so
+    /// nested enum patterns must be qualified (unambiguous, mirroring
+    /// the top-level rule that bare names are bindings). The nested
+    /// sub-list is optional: `E::V` matches the tag with no bindings.
+    fn parse_match_binding(&mut self) -> Result<crate::ast::MatchBinding, Diagnostic> {
+        if let TokenKind::Ident(n) = &self.peek().kind {
+            if n == "_" {
+                self.bump();
+                return Ok(crate::ast::MatchBinding::Ignore);
+            }
+        }
+        let (first, _, _) = self.expect_ident("binding name")?;
+        let mut segs = vec![first];
+        while self.peek().kind == TokenKind::ColonColon {
+            self.bump();
+            let (s, _, _) = self.expect_ident("variant name")?;
+            segs.push(s);
+            if segs.len() > 3 {
+                let p = self.peek().clone();
+                return Err(self.err(p.start, p.end, "pattern path too long"));
+            }
+        }
+        if segs.len() == 1 {
+            return Ok(crate::ast::MatchBinding::Bind(segs.pop().expect("one segment")));
+        }
+        let variant = segs.pop().expect("variant last");
+        let enum_name = segs.join("::");
+        let mut sub = Vec::new();
+        if self.peek().kind == TokenKind::LParen {
+            self.bump();
+            if self.peek().kind != TokenKind::RParen {
+                loop {
+                    sub.push(self.parse_match_binding()?);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+        }
+        Ok(crate::ast::MatchBinding::Nested {
+            enum_name,
+            variant,
+            bindings: sub,
         })
     }
 

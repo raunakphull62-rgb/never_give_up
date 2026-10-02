@@ -11,3 +11,6 @@ cranelift-frontend = "0.119"
 salsa = "0.28"
 regex = "1"
 ureq = "3.4.2"
+# Registry package integrity (SHA-256 of package archives). Pure Rust,
+# no system dependencies — same offline-install story as the rest.
+sha2 = "0.10"

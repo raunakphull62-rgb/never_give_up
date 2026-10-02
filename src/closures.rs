@@ -338,7 +338,15 @@ fn free_vars_expr(e: &Expr, bound: &[String], uses: &mut BTreeSet<String>) {
             free_vars_expr(scrutinee, bound, uses);
             for arm in arms {
                 let mut arm_bound: Vec<String> = bound.to_vec();
-                arm_bound.extend(arm.bindings.iter().cloned());
+                for b in arm.bindings.iter() {
+                    let mut names = Vec::new();
+                    b.bound_names(&mut names);
+                    for n in names {
+                        if !arm_bound.contains(&n) {
+                            arm_bound.push(n);
+                        }
+                    }
+                }
                 for s in &arm.stmts {
                     free_vars_stmt(s, &mut arm_bound, uses);
                 }

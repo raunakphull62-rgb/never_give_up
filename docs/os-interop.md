@@ -214,6 +214,18 @@ A real synchronous HTTP client: `http_get(url)` and
 value). Request headers are an array of `"Name: Value"` strings —
 the same array-of-strings shape as `run_process`'s argv.
 
+Simulated async twins: `http_get_async(url)` and
+`http_post_async(url, body, headers)` perform the byte-identical
+exchange (same results, same `E-NET-*` diagnostics) on a shared
+bounded pool (16 workers, FIFO queue) while the caller parks. This is
+blocking calls on pool threads, NOT true async I/O — what the pool
+buys is bounded thread usage for fan-out (`spawn` N `async` fetchers
+inside a `task_group` shares 16 reusable threads instead of spawning
+N fresh ones). The async twins require the `async` effect on the
+caller (`E-EFFECT-MISMATCH` otherwise); fan-out helpers satisfy this
+via their own `async` annotation once spawned from a group. File,
+stdin, process, and sleep builtins stay blocking (out of scope).
+
 ```klang
 // @run prints: 200 | body ok ; return: 42
 fn main() -> i32 {

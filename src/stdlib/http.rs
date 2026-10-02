@@ -270,3 +270,51 @@ pub fn post(url: &str, body: &str, headers: &[String]) -> Result<HttpResponse, D
         .map_err(|e| map_error("http_post", url, &e))?;
     to_response("http_post", url, res)
 }
+
+// ---------------------------------------------------------------------------
+// Simulated-async variants (FOUNDATION-3 Part 2A): identical requests,
+// error codes, and timeouts as [`get`]/[`post`], executed on the shared
+// bounded pool (`crate::async_pool`) while the caller parks. The pool
+// changes *where* the exchange runs, never *what* it computes —
+// including which `E-NET-*` diagnostic a failure produces.
+// ---------------------------------------------------------------------------
+
+/// `GET url` on the pool → [`HttpResponse`]. Same contract as [`get`].
+pub fn get_async(url: &str) -> Result<HttpResponse, Diagnostic> {
+    let url = url.to_string();
+    crate::async_pool::run_on_pool(move || get(&url))
+        .map_err(|e| {
+            Diagnostic::error(
+                "E-RUNTIME",
+                &format!("http_get_async pool failure: {e}"),
+                "runtime",
+                0,
+                0,
+                "the async worker pool failed, not the request",
+                &[],
+                "runtime/execution",
+            )
+        })?
+}
+
+/// `POST url` on the pool → [`HttpResponse`]. Same contract as [`post`].
+pub fn post_async(
+    url: &str,
+    body: &str,
+    headers: &[String],
+) -> Result<HttpResponse, Diagnostic> {
+    let (url, body, headers) = (url.to_string(), body.to_string(), headers.to_vec());
+    crate::async_pool::run_on_pool(move || post(&url, &body, &headers))
+        .map_err(|e| {
+            Diagnostic::error(
+                "E-RUNTIME",
+                &format!("http_post_async pool failure: {e}"),
+                "runtime",
+                0,
+                0,
+                "the async worker pool failed, not the request",
+                &[],
+                "runtime/execution",
+            )
+        })?
+}

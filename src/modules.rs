@@ -694,37 +694,81 @@ fn rewrite_arm(arm: &mut MatchArm, cur: Option<&str>, ctx: &mut Ctx) {
     let Some(n) = arm.enum_name.clone() else {
         return;
     };
+    rewrite_pattern_path(&n, &mut arm.enum_name, cur, ctx, true);
+    for b in arm.bindings.iter_mut() {
+        rewrite_nested_pattern(b, cur, ctx);
+    }
+}
+
+/// Qualify/validate one enum path in a pattern (`E` or `m::E`), writing
+/// the rewritten path into `slot`. `is_top` selects the arm-level
+/// diagnostic wording; nested paths share the same rules.
+fn rewrite_pattern_path(
+    n: &str,
+    slot: &mut Option<String>,
+    cur: Option<&str>,
+    ctx: &mut Ctx,
+    is_top: bool,
+) {
     if !n.contains("::") {
         if let Some(cur) = cur {
             let is_local = ctx
                 .mods
                 .get(cur)
-                .map(|info| info.enums.contains_key(&n))
+                .map(|info| info.enums.contains_key(n))
                 .unwrap_or(false);
             if is_local {
-                arm.enum_name = Some(format!("{cur}::{n}"));
+                *slot = Some(format!("{cur}::{n}"));
             }
         }
         return;
     }
-    let (m, rest) = split_head(&n).expect("contains ::");
+    let (m, rest) = split_head(n).expect("contains ::");
     match ctx.classify(m, head_item(rest)) {
         Qualified::TopType | Qualified::Unknown => {}
         Qualified::NoSuchItem => {
             let f = ctx.file.clone();
-            ctx.diags.push(undefined(&f, &n));
+            ctx.diags.push(undefined(&f, n));
         }
         Qualified::Member { kind, is_pub } => {
-            ctx.gate(m, is_pub, cur, &n);
+            ctx.gate(m, is_pub, cur, n);
             if kind != MemberKind::Enum {
                 let f = ctx.file.clone();
                 ctx.diags.push(not_a_value(
                     &f,
-                    &n,
-                    "a function or struct path",
+                    n,
+                    if is_top {
+                        "a function or struct path"
+                    } else {
+                        "a function or struct path in a nested pattern"
+                    },
                     "match only on enum variants",
                 ));
             }
+        }
+    }
+}
+
+/// Qualify/validate nested pattern paths (`E::V(...)` inside a binding
+/// list), mirroring the top-level arm rules.
+fn rewrite_nested_pattern(
+    b: &mut crate::ast::MatchBinding,
+    cur: Option<&str>,
+    ctx: &mut Ctx,
+) {
+    if let crate::ast::MatchBinding::Nested {
+        enum_name,
+        bindings,
+        ..
+    } = b
+    {
+        let mut slot = Some(enum_name.clone());
+        rewrite_pattern_path(enum_name, &mut slot, cur, ctx, false);
+        if let Some(rewritten) = slot {
+            *enum_name = rewritten;
+        }
+        for sb in bindings.iter_mut() {
+            rewrite_nested_pattern(sb, cur, ctx);
         }
     }
 }

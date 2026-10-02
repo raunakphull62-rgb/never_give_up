@@ -1,0 +1,34 @@
+# Klang package registry — Render deployment manifest (FOUNDATION-3 Part 2B).
+#
+# This file is applied by the operator (see docs/deploy-registry.md). It
+# contains NO secrets: REGISTRY_ADMIN_TOKEN is declared with `sync: false`
+# so Render prompts for / preserves the dashboard-set value instead of
+# reading it from this file. Never commit a real token here.
+#
+# Verified locally end-to-end (tests/registry_gates.rs); Render itself
+# was not exercised from the build environment (no API credentials were
+# requested or used, per review).
+
+services:
+  - type: web
+    name: klang-registry
+    runtime: rust
+    buildCommand: cargo build --release --bin klang-registry
+    # $PORT is injected by Render; the binary reads PORT, REGISTRY_DATA_DIR,
+    # and REGISTRY_ADMIN_TOKEN from the environment.
+    startCommand: ./target/release/klang-registry --data-dir /data/registry
+    healthCheckPath: /api/packages
+    disk:
+      name: registry-data
+      mountPath: /data
+      # 1 GB holds ~hundreds of small source packages at v1 sizes
+      # (8 MiB unpacked cap each). Raise when the index outgrows files.
+      sizeGB: 1
+    envVars:
+      - key: REGISTRY_DATA_DIR
+        value: /data/registry
+      - key: REGISTRY_ADMIN_TOKEN
+        # Set manually in the Render dashboard (sync: false keeps it out
+        # of this file and out of git). Generate with e.g.:
+        #   python3 -c "import secrets; print(secrets.token_hex(32))"
+        sync: false
