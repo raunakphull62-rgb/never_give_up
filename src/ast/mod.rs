@@ -82,7 +82,18 @@ pub struct Program {
     pub enums: Vec<EnumDecl>,
     pub structs: Vec<StructDecl>,
     pub imports: Vec<String>,
+    /// Selective imports: `import { a, b } from "file.klang"` merges only
+    /// the named top-level items (function/struct/enum) from the target
+    /// file, unlike `imports` which merges whole files.
+    pub selective_imports: Vec<SelectiveImport>,
     pub functions: Vec<FunctionDecl>,
+}
+
+/// One `import { name, ... } from "path"` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectiveImport {
+    pub names: Vec<String>,
+    pub path: String,
 }
 
 /// A named `mod name { ... }` module: its own namespace of items.
@@ -271,8 +282,17 @@ fn prefix_expr(e: &mut Expr, file_idx: u32) {
             prefix_expr(scrutinee, file_idx);
             for arm in arms {
                 prefix_id(&mut arm.id, file_idx);
+                for s in &mut arm.stmts {
+                    prefix_stmt(s, file_idx);
+                }
+                if let Some(g) = &mut arm.guard {
+                    prefix_expr(g, file_idx);
+                }
                 prefix_expr(&mut arm.body, file_idx);
             }
+        }
+        Expr::Closure { body, .. } => {
+            prefix_block(body, file_idx);
         }
         Expr::Index { base, index, .. } => {
             prefix_expr(base, file_idx);
@@ -312,12 +332,22 @@ fn prefix_expr(e: &mut Expr, file_idx: u32) {
 }
 
 /// One `match` arm: `Enum::Variant(bindings...) => body`, or `_ => body`.
+/// `stmts` holds an optional `{ ... }` block prefix: the statements run
+/// in order (same semantics as an `if` block body) and `body` is the
+/// trailing expression that yields the arm's value. Single-expression
+/// arms carry an empty `stmts`.
+/// `guard` holds an optional `if condition`: the arm is taken only when
+/// the pattern matches AND the guard is truthy, otherwise matching falls
+/// through to the next arm. The guard is never evaluated when the
+/// pattern does not match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchArm {
     pub id: NodeId,
     pub enum_name: Option<String>,
     pub variant: Option<String>,
     pub bindings: Vec<String>,
+    pub stmts: Vec<Stmt>,
+    pub guard: Option<Expr>,
     pub body: Expr,
 }
 
@@ -554,6 +584,14 @@ pub enum Expr {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    /// `fn(params) -> type { body }`: anonymous function value capturing
+    /// its enclosing scope by value (see `crate::closures`).
+    Closure {
+        id: NodeId,
+        params: Vec<Param>,
+        return_ty: String,
+        body: Block,
+    },
     Index {
         id: NodeId,
         base: Box<Expr>,
@@ -679,6 +717,7 @@ impl Expr {
             | Expr::StructLit { id, .. }
             | Expr::EnumCtor { id, .. }
             | Expr::Match { id, .. }
+            | Expr::Closure { id, .. }
             | Expr::Index { id, .. }
             | Expr::Field { id, .. }
             | Expr::MethodCall { id, .. }
@@ -724,6 +763,7 @@ impl Expr {
             | Expr::StructLit { id, .. }
             | Expr::EnumCtor { id, .. }
             | Expr::Match { id, .. }
+            | Expr::Closure { id, .. }
             | Expr::Index { id, .. }
             | Expr::Field { id, .. }
             | Expr::MethodCall { id, .. }

@@ -1,51 +1,47 @@
-# Build Roadmap
+# Build Roadmap (current state as of KLANG-FOUNDATION-2)
 
-## Stage 1: Typed core + effect representation - VERIFIED COMPLETE
+This file used to describe "Stage 1.5" as current work and an MCP
+server as a future goal. Both are stale: enums/generics/modules
+shipped (SPEC §7), and `klang mcp` exists (`src/mcp.rs`,
+`tests/mcp_gates.rs`). Rewritten to match what `cargo test` proves.
 
-Parser, AST, typed HIR, throws/async/cancel effects, structured JSON
-diagnostics, structured concurrency (task_group/spawn/await), Salsa
-incremental compilation, a formatter, and a basic package manager.
+## Done and pinned by tests
 
-Verified via 79 passing tests across 12 test files, run with real cargo
-test output (not narration), including the exact hard gates this project
-required after two earlier broken attempts:
-- Exactly one NodeId struct, one Parser struct
-- parent_prefix_containment_everywhere: every child's path starts_with
-  its parent's path, generated while the parent's scope was still
-  entered
-- sibling_functions_have_distinct_paths / stmts_in_same_block_are_distinct
-- unawaited_spawn_emits_task_cancel / spawn_outside_group_is_error
+- Typed core + effects (`throws`/`async`/`cancel`), structured JSON
+  diagnostics, structured concurrency (`task_group`/`spawn`/`await`),
+  Salsa incremental compilation, formatter, basic package manager
+  (`klang.toml` + lockfile).
+- Maturity: enums + `match` with exhaustiveness, generics with
+  per-site inference, multi-file modules (`mod` + `pub` + `import`
+  merging).
+- Stdlib: OS file/env/process/regex/time/HTTP/net interop, variadic
+  `format()`, stdin (`read_line`/`parse_int`/`parse_float`),
+  `for k in map` + array `insert`, `try`/`catch` recoverable errors.
+- Backends: tree-walk interpreter (default) + int-only Cranelift JIT
+  behind `--backend-jit` (anything non-int is a loud rejection, never
+  silent wrong code).
+- Repair (Phase 4): Klang no longer calls a model — the harness owns
+  the model connection and drives the loop via `klang mcp`
+  (`klang_check`, `klang_run`, `klang_fmt`, `klang_scope_plan`);
+  `klang repair --dry-run` prints the planned prompt.
+- v2 language track: schemas, `echo fn`/`listen`, `flow` with
+  `dep=`, `tune`/`verify`, real v2 interpreter (`run-v2`).
+- Robustness: CLI runs on a 256 MiB deep-stack worker; call depth
+  capped at 1024 frames with loud `E-RUNTIME` (never a native
+  stack overflow).
 
-## Stage 1.5: Maturity Phase (current) - enums, generics, modules
+## Done and pinned by tests (incl. KLANG-FOUNDATION-2)
 
-See features.md's "v0.2 - Maturity Phase" section for full scope. Build
-order: enums/match first, then generics, then modules - one at a time,
-each verified with real passing tests before the next begins. Do not
-attempt self-hosting during this phase.
+In dependency order: multi-statement match arms, then match guards,
+then closures (by-value capture), then selective multi-file imports
+(`import { name } from "file.klang"` alongside the existing whole-file
+`import "file.klang"` merge). SPEC §1/§2b/§2c track each item; §8 no
+longer lists any of them.
 
-## Stage 2: Self-hosting attempt (blocked on Stage 1.5)
+## Not here yet (SPEC §8 is the binding list)
 
-Not started until every v0.2 feature has real, passing tests. First
-target: rewrite only the lexer in Klang itself, not the full compiler -
-the smallest possible self-hosting slice, to surface any remaining
-maturity gap cheaply before committing to a full self-hosted parser and
-type checker.
-
-## Stage 3+: Everything else already partially built ahead of schedule
-
-The codebase currently contains substantial work beyond Stage 1's
-original scope (mir.rs, codegen.rs, jit.rs, lsp.rs, ownership.rs,
-package.rs, contracts.rs, derive.rs) built during a session that
-exceeded its assigned task. This code is currently left in place because
-it passes its own tests, but it was not reviewed against this roadmap's
-original sequencing. Treat it as unverified-against-plan until each
-piece is explicitly revisited in its proper stage, rather than assuming
-it is production-ready simply because it exists and compiles.
-
-## Project Ladder (after Stage 1.5, before or alongside Stage 2)
-1. Public playground/demo site (WASM build) - buildable now, since
-   Stage 1's parser/type checker/diagnostics all work end to end
-2. AI code reviewer CLI
-3. Self-host the compiler in its own language (see Stage 2)
-4. Real dogfood target - one utility inside Meridian OS or Vex tooling
-5. MCP server exposing the verification engine to other AI coding agents
+No full-value machine-code backend, no real borrow checker (Managed
+mode only), no async I/O runtime, no registry/network packages, no
+LSP server (only a JSON renderer), no debugger/profiler, no
+recursive/nested enum payloads needing indirection, no tuple-variant
+syntax or partial destructuring.

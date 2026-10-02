@@ -130,6 +130,11 @@ fn value_to_data(v: &Value) -> Result<DataValue, Diagnostic> {
         Value::Array(_) | Value::Map(_) => Err(rt_err(
             "tune() value must be a record struct; arrays/maps are not schema values",
         )),
+        // The v2 language has no closures: one can only arrive here
+        // through hand-built values, so reject loudly, never silently.
+        Value::Closure { .. } => Err(rt_err(
+            "tune() value must be a record struct; closures are not schema values",
+        )),
     }
 }
 

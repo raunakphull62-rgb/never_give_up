@@ -761,76 +761,29 @@ fn run_file_mode(args: &[String]) {
 
 /// Load a file plus its transitive `import`s, prefixing each file's `NodeId`
 /// paths so identity stays unique and parent-prefixed after merging.
+/// Delegates to the library loader (`klang::imports`), which handles both
+/// whole-file `import "x.klang"` merges and selective
+/// `import { name } from "x.klang"` merges with cycle-safe BFS and clean
+/// `E-*` diagnostics (never a panic).
 fn load_with_imports(entry: &str, quiet: bool) -> Result<klang::ast::Program, String> {
-    use std::collections::{HashSet, VecDeque};
-    let mut merged = klang::ast::Program {
-        mods: vec![],
-        enums: vec![],
-        structs: vec![],
-        imports: vec![],
-        functions: vec![],
-    };
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::from([entry.to_string()]);
-    let mut file_idx: u32 = 0;
-    let mut fn_names: HashSet<String> = HashSet::new();
-    while let Some(path) = queue.pop_front() {
-        let canon = std::path::Path::new(&path)
-            .canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.clone());
-        if !seen.insert(canon) {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).map_err(|e| {
-            format!(
-                "cannot read {}: {e}",
-                klang::diagnostics::sanitize_for_terminal(&path)
-            )
-        })?;
-        // RUN-DEFAULT-1: the `file:` preamble shows only with `--verbose`.
-        // The `quiet` arg means "suppress preamble"; callers pass
-        // `!verbose` (see run_file_mode).
-        if !quiet {
-            println!(
-                "file: {} ({} bytes)",
-                klang::diagnostics::sanitize_for_terminal(&path),
-                src.len()
-            );
-        }
-        let mut p = Parser::new_with_file(&src, &path);
-        let prog = p.parse_program().map_err(|d| d.to_json())?;
-        let dir = std::path::Path::new(&path)
-            .parent()
-            .map(|d| d.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        for imp in &prog.imports {
-            // Root confinement: reject absolute imports and `..` escapes so
-            // untrusted `.klang` files cannot pull in `../../…` or absolute
-            // paths. Plain relative imports (`mylib.klang`, `./x.klang`)
-            // keep working. Single predicate shared with the repair
-            // model-output screen (`repair::is_unsafe_import_path`).
-            if klang::repair::is_unsafe_import_path(imp) {
-                return Err(format!(
-                    "unsafe import `{}` from `{path}`",
-                    klang::diagnostics::sanitize_for_terminal(imp)
-                ));
+    match klang::imports::load_program(entry) {
+        Ok(loaded) => {
+            // RUN-DEFAULT-1: the `file:` preamble shows only with `--verbose`.
+            // The `quiet` arg means "suppress preamble"; callers pass
+            // `!verbose` (see run_file_mode).
+            if !quiet {
+                for f in &loaded.files {
+                    println!(
+                        "file: {} ({} bytes)",
+                        klang::diagnostics::sanitize_for_terminal(&f.path),
+                        f.bytes
+                    );
+                }
             }
-            queue.push_back(dir.join(imp).to_string_lossy().to_string());
+            Ok(loaded.program)
         }
-        let prefixed = prog.with_file_prefix(file_idx);
-        file_idx += 1;
-        merged.mods.extend(prefixed.mods);
-        merged.enums.extend(prefixed.enums);
-        merged.structs.extend(prefixed.structs);
-        for f in prefixed.functions {
-            if !fn_names.insert(f.name.clone()) {
-                return Err(format!("duplicate function `{}`", f.name));
-            }
-            merged.functions.push(f);
-        }
+        Err(e) => Err(e.to_json()),
     }
-    Ok(merged)
 }
 
 /// `klang repair <file.klang> [--max-iters N] [--scope function|file] [--dry-run]`

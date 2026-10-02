@@ -65,6 +65,14 @@ pub enum Value {
         name: String,
         fields: Vec<(String, Value)>,
     },
+    /// A closure value: lifted function `func` plus its by-value capture
+    /// snapshot (`(name, value)` pairs in `closure_captures` order).
+    /// Cloned on copy (never aliased); called through `MirOp::Call`
+    /// dynamic dispatch with captures prepended to the call arguments.
+    Closure {
+        func: String,
+        captures: Vec<(String, Value)>,
+    },
 }
 
 impl Value {
@@ -76,6 +84,10 @@ impl Value {
             Self::Array(a) => a.len() as i64,
             Self::Map(m) => m.len() as i64,
             Self::Struct { fields, .. } => fields.len() as i64,
+            // Like `Struct` (field count): capture count. Only reachable
+            // through unchecked MIR — checked programs reject closure
+            // arithmetic with `E-TYPE`.
+            Self::Closure { captures, .. } => captures.len() as i64,
         }
     }
 
@@ -87,6 +99,7 @@ impl Value {
             Self::Array(a) => a.len() as f64,
             Self::Map(m) => m.len() as f64,
             Self::Struct { fields, .. } => fields.len() as f64,
+            Self::Closure { captures, .. } => captures.len() as f64,
         }
     }
 
@@ -102,6 +115,9 @@ impl Value {
             Self::Array(a) => !a.is_empty(),
             Self::Map(m) => !m.is_empty(),
             Self::Struct { .. } => true,
+            // A closure value is always truthy (like a struct): checked
+            // programs reject non-bool conditions with `E-TYPE` anyway.
+            Self::Closure { .. } => true,
         }
     }
 
@@ -135,6 +151,9 @@ impl Value {
                     .collect();
                 format!("{name} {{ {} }}", inner.join(", "))
             }
+            // Opaque by design: captures are an implementation detail,
+            // so `print`/`str`/`format` show a stable placeholder.
+            Self::Closure { .. } => "<closure>".to_string(),
         }
     }
 
@@ -546,6 +565,15 @@ fn run_instrs(
                 if *group_depth == 0 {
                     return Err(Diagnostic::spawn_outside_group("runtime", 0, 0));
                 }
+                // A closure value carries snapshots the child frame cannot
+                // see (checked programs reject this with `E-TYPE`); through
+                // unchecked MIR it is a loud error here, never a detached
+                // or mis-scoped thread.
+                if matches!(values.get(func), Some(Value::Closure { .. })) {
+                    return Err(runtime_err(
+                        "cannot `spawn` a closure value (spawn takes a named function)",
+                    ));
+                }
                 if pending.len() >= MAX_CONCURRENT_TASKS {
                     return Err(concurrent_err("too many concurrent tasks (limit 256)"));
                 }
@@ -629,6 +657,28 @@ fn run_instrs(
                     pc += 1;
                     continue;
                 }
+                // Dynamic dispatch through a closure-typed binding
+                // (values-first, mirroring the checker: a closure binding
+                // shadows any same-named function). Captures were
+                // snapshotted at the literal site, so they are prepended
+                // to the call arguments to match the lifted parameter
+                // prefix; depth accounting matches static calls exactly.
+                if let Some(Value::Closure {
+                    func: target,
+                    captures,
+                }) = values.get(func).cloned()
+                {
+                    let mut arg_vals: Vec<Value> =
+                        captures.iter().map(|(_, v)| v.clone()).collect();
+                    for a in args {
+                        arg_vals.push(lookup(&values, &ctx.stubs, a).unwrap_or(Value::Int(0)));
+                    }
+                    let v = call_value(ctx, &target, &arg_vals, depth, &current(&groups, parent))?;
+                    values.insert(into.clone(), v.clone());
+                    last = v;
+                    pc += 1;
+                    continue;
+                }
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for a in args {
                     arg_vals.push(lookup(&values, &ctx.stubs, a).unwrap_or(Value::Int(0)));
@@ -668,6 +718,31 @@ fn run_instrs(
             }
             MirOp::ConstStr { into, value } => {
                 let v = Value::Str(value.clone());
+                values.insert(into.clone(), v.clone());
+                last = v;
+                pc += 1;
+            }
+            MirOp::ClosureNew {
+                into,
+                func,
+                captures,
+            } => {
+                // By-value snapshot: each named binding is cloned NOW, so
+                // later mutations of the outer variables — including the
+                // outer function having returned — never affect the value.
+                // (Checked programs always bind every capture; unchecked
+                // MIR falls back to the usual `Int(0)` convention.)
+                let mut snap = Vec::with_capacity(captures.len());
+                for c in captures {
+                    snap.push((
+                        c.clone(),
+                        lookup(&values, &ctx.stubs, c).unwrap_or(Value::Int(0)),
+                    ));
+                }
+                let v = Value::Closure {
+                    func: func.clone(),
+                    captures: snap,
+                };
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;

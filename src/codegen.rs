@@ -42,6 +42,15 @@ pub fn emit_listing(module: &MirModule) -> String {
                 MirOp::Call { into, func, args } => {
                     format!("  {into} = call {func}({})", args.join(", "))
                 }
+                MirOp::ClosureNew {
+                    into,
+                    func,
+                    captures,
+                } => {
+                    // Lifted names contain NUL (unspellable): escape so the
+                    // listing stays printable and stable.
+                    format!("  {into} = closure \"{}\" [{}]", esc(func), captures.join(", "))
+                }
                 MirOp::Const { into, value } => format!("  {into} = const {value}"),
                 MirOp::ConstFloat { into, bits } => {
                     format!("  {into} = const_float {}", f64::from_bits(*bits))

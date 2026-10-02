@@ -41,6 +41,10 @@ pub enum Ty {
     Struct(String),
     Enum(String),
     Param(String),
+    /// `fn(T, ...) -> R`: a closure value's signature (see
+    /// `crate::closures`). Structural: same parameter/return shape means
+    /// the same type.
+    Closure { params: Vec<Ty>, ret: Box<Ty> },
     Void,
     Unknown,
 }
@@ -57,6 +61,10 @@ impl Ty {
             Ty::Struct(n) => n.clone(),
             Ty::Enum(n) => n.clone(),
             Ty::Param(n) => n.clone(),
+            Ty::Closure { params, ret } => {
+                let ps: Vec<String> = params.iter().map(|t| t.name()).collect();
+                format!("fn({})->{}", ps.join(", "), ret.name())
+            }
             Ty::Void => "void".to_string(),
             Ty::Unknown => "unknown".to_string(),
         }
@@ -94,6 +102,26 @@ fn base_ty_name(s: &str) -> &str {
     }
 }
 
+/// Resolve a `fn(T, ...) -> R` closure annotation (`None` when `s` is
+/// not one). Inner annotations resolve recursively, so nesting and
+/// generic parameters work uniformly; anything malformed stays
+/// `Unknown`, like every other unknown annotation.
+fn resolve_closure_ty(
+    s: &str,
+    type_params: &[String],
+    enums: &EnumTable,
+    structs: &[String],
+) -> Option<Ty> {
+    let (ps, r) = crate::closures::split_closure_ty(s)?;
+    Some(Ty::Closure {
+        params: ps
+            .iter()
+            .map(|p| resolve_body_ty(p, type_params, enums, structs))
+            .collect(),
+        ret: Box::new(resolve_body_ty(&r, type_params, enums, structs)),
+    })
+}
+
 /// Resolve a parameter annotation: known enum names become nominal
 /// `Ty::Enum`, known struct names (including flattened `m::T` paths) become
 /// nominal `Ty::Struct`, everything else keeps `parse_ty` behavior.
@@ -101,6 +129,9 @@ fn base_ty_name(s: &str) -> &str {
 /// checker actually knows become nominal, so a typo'd annotation never
 /// produces a false `E-TYPE` — it simply stays dynamic.
 fn resolve_param_ty(s: &str, enums: &EnumTable, structs: &[String]) -> Ty {
+    if let Some(clos) = resolve_closure_ty(s, &[], enums, structs) {
+        return clos;
+    }
     let base = base_ty_name(s);
     if enums.contains_key(base) {
         Ty::Enum(base.to_string())
@@ -306,6 +337,40 @@ impl TypedHIR {
                 },
             );
         }
+        // Closure pre-pass: every `fn(...) -> ...` literal gets a synthetic
+        // signature (keyed by its NUL-containing lifted name, which source
+        // can never spell) so bodies check their `return`s against the
+        // literal's own declared type instead of the enclosing function's.
+        // Collection recurses into nested closures, so deeply nested
+        // literals are all registered before any body is checked.
+        for f in &program.functions {
+            let mut lits = Vec::new();
+            crate::closures::collect_closures(&f.body, &mut lits);
+            for lit in &lits {
+                let cparams: Vec<Ty> = lit
+                    .params
+                    .iter()
+                    .map(|p| {
+                        resolve_body_ty(&p.ty, &f.type_params, &enums, &struct_names_early)
+                    })
+                    .collect();
+                sigs.insert(
+                    crate::closures::closure_fn_name(&lit.id),
+                    Sig {
+                        effects: Vec::new(),
+                        arity: lit.params.len(),
+                        type_params: f.type_params.clone(),
+                        param_tys: cparams,
+                        return_ty: resolve_body_ty(
+                            &lit.return_ty,
+                            &f.type_params,
+                            &enums,
+                            &struct_names_early,
+                        ),
+                    },
+                );
+            }
+        }
         // struct name -> (field name -> field type)
         let mut struct_fields: HashMap<String, HashMap<String, Ty>> = HashMap::new();
         let mut struct_names: Vec<String> = Vec::new();
@@ -404,6 +469,9 @@ fn has_effect(effects: &[Effect], want: Effect) -> bool {
 /// letting `x - 1` pass for generic `T` and `p.nonexistent` pass for
 /// struct params.
 fn resolve_body_ty(s: &str, type_params: &[String], enums: &EnumTable, structs: &[String]) -> Ty {
+    if let Some(clos) = resolve_closure_ty(s, type_params, enums, structs) {
+        return clos;
+    }
     if type_params.iter().any(|t| t == s) {
         return Ty::Param(s.to_string());
     }
@@ -489,6 +557,11 @@ struct Ctx {
     /// `break`/`continue` inside a `try` must target a loop that also
     /// started inside it: slice execution cannot jump across slices.
     try_loop_depths: Vec<usize>,
+    /// `loop_depth` at each enclosing multi-statement `match` arm entry,
+    /// innermost last. Arm setup statements lower into the taken branch's
+    /// own instruction run (fresh loop stack), so `break`/`continue`
+    /// cannot cross an arm boundary — same discipline as `try` slices.
+    match_arm_depths: Vec<usize>,
 }
 
 /// Walk a block. `group_stack` holds the pending-spawn list of each enclosing
@@ -520,6 +593,24 @@ fn check_block(
                     if group_stack.is_empty() {
                         diags.push(Diagnostic::spawn_outside_group(file, l.span.0, l.span.1));
                     } else {
+                        // `spawn` runs a named function on its thread: a
+                        // closure value carries snapshots the child frame
+                        // cannot see, so spawning one is rejected here
+                        // instead of failing inside the runtime.
+                        if let Expr::Call { func, .. } = call.as_ref() {
+                            if matches!(defined.get(func), Some(Ty::Closure { .. })) {
+                                diags.push(Diagnostic::error(
+                                    "E-TYPE",
+                                    &format!("cannot `spawn` closure `{func}` (spawn takes a named function)"),
+                                    file,
+                                    0,
+                                    0,
+                                    "spawned tasks run without the defining scope",
+                                    &["call the closure directly instead"],
+                                    "types/mismatch",
+                                ));
+                            }
+                        }
                         // Re-binding a live handle without awaiting it leaks
                         // the earlier thread at runtime (`pending.insert`
                         // overwrites). Reject unless the previous spawn was
@@ -561,6 +652,8 @@ fn check_block(
                         depth,
                         &mut awaited_here,
                         defined,
+                        group_stack,
+                        cx,
                     )
                 } else {
                     if expr_contains_await(&l.value) && group_stack.is_empty() {
@@ -578,6 +671,8 @@ fn check_block(
                         depth,
                         &mut awaited_here,
                         defined,
+                        group_stack,
+                        cx,
                     )
                 };
                 // `let x = spawn f()` binds the call's return type; `await x`
@@ -601,6 +696,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 let value_ty = check_expr(
                     file,
@@ -614,6 +711,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 if let Some(want) = target_ty {
                     if !assignable(&value_ty, &want) {
@@ -641,6 +740,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
             }
             Stmt::Return(r) => {
@@ -659,6 +760,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 let want = sigs
                     .get(&caller.name)
@@ -689,6 +792,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
             }
             Stmt::Break(_) | Stmt::Continue(_) => {
@@ -721,6 +826,25 @@ fn check_block(
                         &["move the loop inside the `try`", "remove it"],
                         "control/loop",
                     ));
+                } else if cx
+                    .match_arm_depths
+                    .last()
+                    .is_some_and(|entry| cx.loop_depth <= *entry)
+                {
+                    // The target loop encloses the `match` arm: arm setup
+                    // statements lower into the taken branch's own run, so
+                    // the jump has no lowering to land on — restructure so
+                    // the loop is inside the arm.
+                    diags.push(Diagnostic::error(
+                        "E-LOOP",
+                        "break/continue cannot cross a match arm boundary",
+                        file,
+                        0,
+                        0,
+                        "break and continue only jump within their own match arm",
+                        &["move the loop inside the arm", "remove it"],
+                        "control/loop",
+                    ));
                 }
             }
             Stmt::While(w) => {
@@ -739,6 +863,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 require_condition(file, &cond_ty, "while", diags);
                 cx.loop_depth += 1;
@@ -784,6 +910,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 let e_ty = check_expr(
                     file,
@@ -797,6 +925,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 for (ty, what) in [(&s_ty, "for range start"), (&e_ty, "for range end")] {
                     if !matches!(ty, Ty::Int | Ty::Unknown) {
@@ -845,6 +975,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 // Maps iterate over keys in insertion order (same order as
                 // `keys()`): MIR lowers `for-in` to integer-indexed
@@ -961,6 +1093,8 @@ fn check_block(
                     depth,
                     &mut awaited_here,
                     defined,
+                    group_stack,
+                    cx,
                 );
                 require_condition(file, &cond_ty, "if", diags);
                 // Branches are block-scoped: new lets inside do not leak out.
@@ -1115,6 +1249,23 @@ fn assignable(got: &Ty, want: &Ty) -> bool {
         (a, b) if a == b => true,
         // int coerces to float
         (Ty::Int, Ty::Float) => true,
+        // Closures are structural: same arity with compatible
+        // parameters and return type (component `Param`s hit the
+        // wildcard above, staying dynamic).
+        (
+            Ty::Closure {
+                params: gp,
+                ret: gr,
+            },
+            Ty::Closure {
+                params: wp,
+                ret: wr,
+            },
+        ) => {
+            gp.len() == wp.len()
+                && gp.iter().zip(wp.iter()).all(|(g, w)| assignable(g, w))
+                && assignable(gr, wr)
+        }
         // struct names must match exactly (handled above)
         _ => false,
     }
@@ -1145,6 +1296,8 @@ fn check_assign_target(
     depth: usize,
     awaited: &mut Vec<String>,
     defined: &HashMap<String, Ty>,
+    group_stack: &mut Vec<Vec<PendingSpawn>>,
+    cx: &mut Ctx,
 ) -> Option<Ty> {
     match t {
         AssignTarget::Var { name } => {
@@ -1168,6 +1321,8 @@ fn check_assign_target(
                 depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let idx_ty = check_expr(
                 file,
@@ -1181,6 +1336,8 @@ fn check_assign_target(
                 depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             match &base_ty {
                 Ty::Array => {
@@ -1217,6 +1374,8 @@ fn check_assign_target(
                 depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             match &base_ty {
                 Ty::Struct(name) => {
@@ -1424,6 +1583,10 @@ fn unify_generic(
 fn substitute_ty(ty: &Ty, subst: &HashMap<String, (Ty, String)>) -> Ty {
     match ty {
         Ty::Param(p) => subst.get(p).cloned().map(|(t, _)| t).unwrap_or(Ty::Unknown),
+        Ty::Closure { params, ret } => Ty::Closure {
+            params: params.iter().map(|p| substitute_ty(p, subst)).collect(),
+            ret: Box::new(substitute_ty(ret, subst)),
+        },
         _ => ty.clone(),
     }
 }
@@ -1461,6 +1624,8 @@ fn check_expr(
     _depth: usize,
     awaited: &mut Vec<String>,
     defined: &HashMap<String, Ty>,
+    group_stack: &mut Vec<Vec<PendingSpawn>>,
+    cx: &mut Ctx,
 ) -> Ty {
     match e {
         Expr::Int { value, .. } => {
@@ -1495,6 +1660,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             )
         }
         Expr::Await { name, .. } => {
@@ -1530,6 +1697,8 @@ fn check_expr(
                     _depth,
                     awaited,
                     defined,
+                    group_stack,
+                    cx,
                 ));
             }
             if is_builtin(func) {
@@ -1570,6 +1739,50 @@ fn check_expr(
                     }
                 }
                 return check_builtin_call(file, func, &arg_tys, diags);
+            }
+            // A closure-typed binding dispatches dynamically at runtime
+            // (values-first: it shadows any same-named function, exactly
+            // as it executes — see `MirOp::Call`). Checked before static
+            // signatures; only closure values take this path, so every
+            // pre-closure program checks exactly as before.
+            if let Some(Ty::Closure { params, ret }) = defined.get(func) {
+                if !type_args.is_empty() {
+                    diags.push(Diagnostic::error(
+                        "E-ARITY",
+                        &format!(
+                            "closure `{func}` takes no explicit type arguments, got {}",
+                            type_args.len()
+                        ),
+                        file,
+                        0,
+                        0,
+                        "closures are not generic",
+                        &["remove the explicit type arguments"],
+                        "calls/arity",
+                    ));
+                    return Ty::Unknown;
+                }
+                if args.len() != params.len() {
+                    diags.push(arity_mismatch(
+                        file,
+                        &caller.name,
+                        func,
+                        params.len(),
+                        args.len(),
+                    ));
+                    return Ty::Unknown;
+                }
+                for (i, (got, want)) in arg_tys.iter().zip(params.iter()).enumerate() {
+                    if !assignable(got, want) {
+                        diags.push(type_mismatch(
+                            file,
+                            &format!("`{func}` arg {i}"),
+                            &want.name(),
+                            got,
+                        ));
+                    }
+                }
+                return ret.as_ref().clone();
             }
             if let Some(sig) = sigs.get(func) {
                 if has_effect(&sig.effects, Effect::Throws)
@@ -1679,6 +1892,20 @@ fn check_expr(
                         Ty::Unknown
                     }
                 }
+            } else if let Some(other) = defined.get(func) {
+                // A bound non-closure variable is not callable: reject here
+                // instead of failing at runtime.
+                diags.push(Diagnostic::error(
+                    "E-TYPE",
+                    &format!("`{func}` is {}, not callable", other.name()),
+                    file,
+                    0,
+                    0,
+                    "only functions and closures can be called",
+                    &["call a function or closure value instead"],
+                    "types/mismatch",
+                ));
+                Ty::Unknown
             } else {
                 diags.push(undefined(file, func));
                 Ty::Unknown
@@ -1706,6 +1933,8 @@ fn check_expr(
                     _depth,
                     awaited,
                     defined,
+                    group_stack,
+                    cx,
                 );
             }
             Ty::Array
@@ -1726,6 +1955,8 @@ fn check_expr(
                         _depth,
                         awaited,
                         defined,
+                        group_stack,
+                        cx,
                     );
                 }
                 return Ty::Unknown;
@@ -1747,6 +1978,8 @@ fn check_expr(
                         _depth,
                         awaited,
                         defined,
+                        group_stack,
+                        cx,
                     );
                     if let Some(want) = known.get(fname) {
                         let loc = format!("`{name}.{fname}`");
@@ -1782,6 +2015,8 @@ fn check_expr(
                         _depth,
                         awaited,
                         defined,
+                        group_stack,
+                        cx,
                     );
                 }
             }
@@ -1800,6 +2035,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let idx = check_expr(
                 file,
@@ -1813,6 +2050,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             match &b {
                 Ty::Array => {
@@ -1849,6 +2088,8 @@ fn check_expr(
                     _depth,
                     awaited,
                     defined,
+                    group_stack,
+                    cx,
                 );
             }
             Ty::Map
@@ -1866,6 +2107,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             match &b {
                 Ty::Struct(name) => {
@@ -1909,6 +2152,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let mut arg_tys = Vec::with_capacity(args.len());
             for a in args {
@@ -1924,6 +2169,8 @@ fn check_expr(
                     _depth,
                     awaited,
                     defined,
+                    group_stack,
+                    cx,
                 ));
             }
             if method == "push" || method == "pop" || method == "insert" {
@@ -1960,6 +2207,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let r = check_expr(
                 file,
@@ -1973,6 +2222,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             match (&l, &r) {
                 (Ty::Unknown, _) | (_, Ty::Unknown) => Ty::Unknown,
@@ -2007,6 +2258,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let r = check_expr(
                 file,
@@ -2020,6 +2273,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             if matches!(e, Expr::Mod { .. }) {
                 // `%` is integers only.
@@ -2060,6 +2315,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let r = check_expr(
                 file,
@@ -2073,6 +2330,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             if !equality_ok(&l, &r) {
                 diags.push(type_mismatch(file, "`==` operands", &l.name(), &r));
@@ -2095,6 +2354,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let r = check_expr(
                 file,
@@ -2108,6 +2369,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let ok = matches!(
                 (&l, &r),
@@ -2142,6 +2405,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             let r = check_expr(
                 file,
@@ -2155,6 +2420,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             for (ty, what) in [(&l, "left `&&`/`||`"), (&r, "right `&&`/`||`")] {
                 if !matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown) {
@@ -2176,6 +2443,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             if !matches!(t, Ty::Bool | Ty::Int | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`!` operand", "bool", &t));
@@ -2209,6 +2478,8 @@ fn check_expr(
                 _depth,
                 awaited,
                 defined,
+                group_stack,
+                cx,
             );
             match &t {
                 Ty::Int => Ty::Int,
@@ -2248,6 +2519,8 @@ fn check_expr(
                             _depth,
                             awaited,
                             defined,
+                            group_stack,
+                            cx,
                         );
                     }
                     Ty::Unknown
@@ -2277,6 +2550,8 @@ fn check_expr(
                             _depth,
                             awaited,
                             defined,
+                            group_stack,
+                            cx,
                         );
                         unify_generic(
                             file,
@@ -2301,6 +2576,8 @@ fn check_expr(
                             _depth,
                             awaited,
                             defined,
+                            group_stack,
+                            cx,
                         );
                     }
                     Ty::Enum(enum_name.clone())
@@ -2322,8 +2599,165 @@ fn check_expr(
             _depth,
             awaited,
             defined,
+            group_stack,
+            cx,
         ),
+        Expr::Closure {
+            id,
+            params,
+            return_ty,
+            body,
+        } => {
+            // Anonymous function value. The body checks against a synthetic
+            // caller (pre-registered in `sigs`) so `return` uses the
+            // literal's own declared type, not the enclosing function's.
+            // Task and loop context are fresh: the closure may outlive its
+            // definition site (stored, passed, returned), so `spawn`/
+            // `await` inside is rejected loudly and `break` cannot cross
+            // into the closure.
+            let mut clos_defined = defined.clone();
+            let mut seen: Vec<String> = Vec::new();
+            let mut param_tys = Vec::with_capacity(params.len());
+            for p in params {
+                if seen.contains(&p.name) {
+                    diags.push(duplicate(
+                        file,
+                        &format!("duplicate parameter `{}` in closure", p.name),
+                    ));
+                } else {
+                    seen.push(p.name.clone());
+                }
+                let ty = resolve_body_ty(&p.ty, &caller.type_params, enums, structs);
+                param_tys.push(ty.clone());
+                clos_defined.insert(p.name.clone(), ty);
+            }
+            let ret_ty = resolve_body_ty(return_ty, &caller.type_params, enums, structs);
+            let synth = FunctionDecl {
+                id: id.clone(),
+                name: crate::closures::closure_fn_name(id),
+                name_span: caller.name_span,
+                is_pub: false,
+                type_params: caller.type_params.clone(),
+                params: params.clone(),
+                return_ty: return_ty.clone(),
+                effects: Vec::new(),
+                body: body.clone(),
+            };
+            let mut fresh_groups: Vec<Vec<PendingSpawn>> = Vec::new();
+            let mut fresh_cx = Ctx::default();
+            check_block(
+                file,
+                body,
+                &synth,
+                sigs,
+                structs,
+                struct_fields,
+                enums,
+                diags,
+                0,
+                &mut fresh_groups,
+                &mut clos_defined,
+                &mut fresh_cx,
+            );
+            Ty::Closure {
+                params: param_tys,
+                ret: Box::new(ret_ty),
+            }
+        }
     }
+}
+
+/// Check one match arm's setup statements plus its trailing body.
+/// `arm_defined` enters holding the outer scope plus the arm's payload
+/// bindings; setup `let`s extend it for the guard and trailing body (new
+/// bindings never leak past the arm). The guard sees the bindings and
+/// setup lets and must be `bool`/`int` like any condition; it is only
+/// ever evaluated when the pattern matched (enforced in MIR lowering).
+/// Spawn discipline mirrors `if` branches — an arm may not run, so its
+/// spawns must be awaited inside it — and `break`/`continue` cannot
+/// cross the arm boundary (same rule as `try` slices, via
+/// `match_arm_depths`). Awaits inside setup statements never propagate
+/// outward (the arm may not run); the trailing body's existing
+/// propagation is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn check_arm_body(
+    file: &str,
+    arm: &MatchArm,
+    arm_defined: &mut HashMap<String, Ty>,
+    caller: &FunctionDecl,
+    sigs: &HashMap<String, Sig>,
+    structs: &[String],
+    struct_fields: &HashMap<String, HashMap<String, Ty>>,
+    enums: &EnumTable,
+    diags: &mut Vec<Diagnostic>,
+    depth: usize,
+    awaited: &mut Vec<String>,
+    group_stack: &mut Vec<Vec<PendingSpawn>>,
+    cx: &mut Ctx,
+) -> Ty {
+    if !arm.stmts.is_empty() {
+        let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
+        cx.match_arm_depths.push(cx.loop_depth);
+        let arm_block = Block {
+            id: arm.id.clone(),
+            stmts: arm.stmts.clone(),
+        };
+        let arm_awaited = check_block(
+            file,
+            &arm_block,
+            caller,
+            sigs,
+            structs,
+            struct_fields,
+            enums,
+            diags,
+            depth + 1,
+            group_stack,
+            arm_defined,
+            cx,
+        );
+        cx.match_arm_depths.pop();
+        if let Some(pending) = group_stack.last() {
+            for p in pending.iter().skip(pending_before) {
+                if !arm_awaited.contains(&p.handle) {
+                    diags.push(Diagnostic::task_leak(file, p.span.0, p.span.1, &p.handle));
+                }
+            }
+        }
+    }
+    if let Some(g) = &arm.guard {
+        let g_ty = check_expr(
+            file,
+            g,
+            caller,
+            sigs,
+            structs,
+            struct_fields,
+            enums,
+            diags,
+            depth,
+            awaited,
+            arm_defined,
+            group_stack,
+            cx,
+        );
+        require_condition(file, &g_ty, "match guard", diags);
+    }
+    check_expr(
+        file,
+        &arm.body,
+        caller,
+        sigs,
+        structs,
+        struct_fields,
+        enums,
+        diags,
+        depth,
+        awaited,
+        arm_defined,
+        group_stack,
+        cx,
+    )
 }
 
 /// Check a `match` expression: arm shapes, binding types, branch result
@@ -2343,6 +2777,8 @@ fn check_match(
     depth: usize,
     awaited: &mut Vec<String>,
     defined: &HashMap<String, Ty>,
+    group_stack: &mut Vec<Vec<PendingSpawn>>,
+    cx: &mut Ctx,
 ) -> Ty {
     let s_ty = check_expr(
         file,
@@ -2356,6 +2792,8 @@ fn check_match(
         depth,
         awaited,
         defined,
+        group_stack,
+        cx,
     );
     match &s_ty {
         Ty::Enum(ename) => {
@@ -2367,7 +2805,11 @@ fn check_match(
                 // Arm bindings are scoped to the arm body only.
                 let mut arm_defined = defined.clone();
                 if arm.is_wildcard() {
-                    has_wildcard = true;
+                    // Only an unguarded wildcard covers: a guarded one may
+                    // fall through, so exhaustiveness ignores it.
+                    if arm.guard.is_none() {
+                        has_wildcard = true;
+                    }
                 } else {
                     let aname = arm.enum_name.as_deref().unwrap_or("");
                     let avar = arm.variant.as_deref().unwrap_or("");
@@ -2403,7 +2845,12 @@ fn check_match(
                         for b in arm.bindings.iter().skip(wants.len()) {
                             arm_defined.insert(b.clone(), Ty::Unknown);
                         }
-                        covered.insert(avar.to_string());
+                        // Only an unguarded arm covers its variant: when the
+                        // guard is false matching falls through, so a
+                        // guarded arm alone never satisfies exhaustiveness.
+                        if arm.guard.is_none() {
+                            covered.insert(avar.to_string());
+                        }
                     } else {
                         diags.push(undefined(file, &format!("{ename}::{avar}")));
                         for b in &arm.bindings {
@@ -2411,9 +2858,10 @@ fn check_match(
                         }
                     }
                 }
-                let body_ty = check_expr(
+                let body_ty = check_arm_body(
                     file,
-                    &arm.body,
+                    arm,
+                    &mut arm_defined,
                     caller,
                     sigs,
                     structs,
@@ -2422,7 +2870,8 @@ fn check_match(
                     diags,
                     depth,
                     awaited,
-                    &arm_defined,
+                    group_stack,
+                    cx,
                 );
                 match &result {
                     None => result = Some(body_ty),
@@ -2442,6 +2891,11 @@ fn check_match(
                 }
             }
             // Duplicate arms and arms after `_` are dead code: diagnose.
+            // Only unguarded arms cover: a guarded arm may fall through
+            // when its guard is false, so a later same-pattern arm is
+            // still reachable (no duplicate), and arms after a guarded
+            // wildcard still run (no unreachable). An arm after an
+            // UNGUARDED wildcard never runs, guarded or not.
             {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut seen_wildcard = false;
@@ -2460,14 +2914,31 @@ fn check_match(
                         break;
                     }
                     if arm.is_wildcard() {
-                        seen_wildcard = true;
+                        if arm.guard.is_none() {
+                            seen_wildcard = true;
+                        }
                     } else {
                         let key = format!(
                             "{}::{}",
                             arm.enum_name.as_deref().unwrap_or(""),
                             arm.variant.as_deref().unwrap_or("")
                         );
-                        if !seen.insert(key.clone()) {
+                        if arm.guard.is_none() {
+                            if !seen.insert(key.clone()) {
+                                diags.push(Diagnostic::error(
+                                    "E-MATCH-DUPLICATE",
+                                    &format!("duplicate match arm `{key}`"),
+                                    file,
+                                    0,
+                                    0,
+                                    "duplicate pattern never runs",
+                                    &["remove the duplicate arm"],
+                                    "match/duplicate",
+                                ));
+                            }
+                        } else if seen.contains(&key) {
+                            // A guarded arm after an unguarded same pattern
+                            // never runs (the earlier arm always takes it).
                             diags.push(Diagnostic::error(
                                 "E-MATCH-DUPLICATE",
                                 &format!("duplicate match arm `{key}`"),
@@ -2512,9 +2983,10 @@ fn check_match(
                         arm_defined.insert(b.clone(), Ty::Unknown);
                     }
                 }
-                let body_ty = check_expr(
+                let body_ty = check_arm_body(
                     file,
-                    &arm.body,
+                    arm,
+                    &mut arm_defined,
                     caller,
                     sigs,
                     structs,
@@ -2523,7 +2995,8 @@ fn check_match(
                     diags,
                     depth,
                     awaited,
-                    &arm_defined,
+                    group_stack,
+                    cx,
                 );
                 if result.is_none() {
                     result = Some(body_ty);
@@ -2538,9 +3011,10 @@ fn check_match(
                 for b in &arm.bindings {
                     arm_defined.insert(b.clone(), Ty::Unknown);
                 }
-                check_expr(
+                check_arm_body(
                     file,
-                    &arm.body,
+                    arm,
+                    &mut arm_defined,
                     caller,
                     sigs,
                     structs,
@@ -2549,7 +3023,8 @@ fn check_match(
                     diags,
                     depth,
                     awaited,
-                    &arm_defined,
+                    group_stack,
+                    cx,
                 );
             }
             Ty::Unknown

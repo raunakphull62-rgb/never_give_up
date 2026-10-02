@@ -51,6 +51,15 @@ pub enum MirOp {
         func: String,
         args: Vec<String>,
     },
+    /// Snapshot captures into a closure value: `into` becomes the
+    /// closure of lifted function `func` over the current values of
+    /// `captures` (binding names, read at this site: by-value copy).
+    /// Calling through the value dispatches dynamically in `Call`.
+    ClosureNew {
+        into: String,
+        func: String,
+        captures: Vec<String>,
+    },
     /// Integer / float / string constants.
     Const {
         into: String,
@@ -414,12 +423,26 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
             );
             let dst = tmp_name(tmp);
             // Arm bindings share the flat value namespace, so save any
-            // same-named outer bindings and restore them per arm.
+            // same-named outer bindings and restore them per arm. This
+            // covers payload bindings AND top-level setup `let`s: a setup
+            // `let n` shadowing an outer `n` must not clobber it after a
+            // taken arm, nor leak into later arms on guard-false
+            // fallthrough (the post-body and per-entry restores below).
+            // (Nested lets inside setup control flow share the general
+            // flat-namespace quirk of all blocks — same as `if` bodies,
+            // out of scope here.)
             let mut names: Vec<String> = Vec::new();
             for arm in arms.iter() {
                 for b in arm.bindings.iter() {
                     if !names.contains(b) {
                         names.push(b.clone());
+                    }
+                }
+                for s in arm.stmts.iter() {
+                    if let crate::ast::Stmt::Let(l) = s {
+                        if !names.contains(&l.name) {
+                            names.push(l.name.clone());
+                        }
                     }
                 }
             }
@@ -436,12 +459,31 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
                 );
                 saved.push((n.clone(), sv));
             }
-            let mut pending_jfalse: Option<usize> = None;
+            let mut pending: Vec<usize> = Vec::new();
             let mut end_jumps: Vec<usize> = Vec::new();
             for arm in arms.iter() {
-                if let Some(jf) = pending_jfalse.take() {
+                // Every arm entry first patches all pending fallthrough
+                // jumps (tag mismatch or false guard) here, then restores
+                // possibly-clobbered bindings: a previous arm may have
+                // bound payloads before falling through on a false guard.
+                // Restores copy from saved temps (which never change), so
+                // they are idempotent and safe on every path, including
+                // the first arm (a plain no-op there).
+                if !pending.is_empty() {
                     let target = instrs.len();
-                    patch_target(instrs, jf, target);
+                    for jf in pending.drain(..) {
+                        patch_target(instrs, jf, target);
+                    }
+                }
+                for (n, sv) in saved.iter() {
+                    push(
+                        instrs,
+                        e.id(),
+                        MirOp::Copy {
+                            into: n.clone(),
+                            from: sv.clone(),
+                        },
+                    );
                 }
                 if !arm.is_wildcard() {
                     let want = tmp_name(tmp);
@@ -463,7 +505,7 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
                             right: want,
                         },
                     );
-                    pending_jfalse = Some(push(
+                    pending.push(push(
                         instrs,
                         e.id(),
                         MirOp::JumpIfFalse {
@@ -482,6 +524,36 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
                             field: format!("f{i}"),
                         },
                     );
+                }
+                if !arm.stmts.is_empty() {
+                    // Setup statements run inline in the taken branch, in
+                    // order, BEFORE the guard is checked (SPEC §2b: the
+                    // guard observes setup bindings) and before the
+                    // trailing value expression. Fresh loop stack: loops
+                    // inside the arm are self-contained; `break`/`continue`
+                    // crossing the arm boundary is an `E-LOOP` at check
+                    // time (unchecked MIR reaching here surfaces as a loud
+                    // invalid-jump error, never silent).
+                    let mut arm_loops: Vec<LoopCtx> = Vec::new();
+                    lower_block(&arm.stmts, instrs, tmp, &mut arm_loops);
+                }
+                if let Some(g) = &arm.guard {
+                    // The guard runs only after the pattern matched (the
+                    // tag jump above skips setup AND guard entirely
+                    // otherwise). A false guard falls through to the next
+                    // arm, never a crash and never a silent wrong match.
+                    // Setup effects on outer variables persist on
+                    // fallthrough (same as an `if` block body); setup
+                    // `let`s are arm-local via the save/restore above.
+                    let c = lower_expr_to_value(g, instrs, tmp);
+                    pending.push(push(
+                        instrs,
+                        e.id(),
+                        MirOp::JumpIfFalse {
+                            cond: c,
+                            target: usize::MAX,
+                        },
+                    ));
                 }
                 let v = lower_expr_to_value(&arm.body, instrs, tmp);
                 if v != dst {
@@ -506,11 +578,15 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
                 }
                 end_jumps.push(push(instrs, e.id(), MirOp::Jump { target: usize::MAX }));
             }
-            // No arm matched (unreachable when HIR accepted the program):
+            // No arm matched (unreachable when HIR accepted the program —
+            // every variant has an unguarded arm or wildcard — reachable
+            // only through unchecked MIR, e.g. total guard failure):
             // force a loud runtime error, never a silent default value.
-            if let Some(jf) = pending_jfalse.take() {
+            if !pending.is_empty() {
                 let target = instrs.len();
-                patch_target(instrs, jf, target);
+                for jf in pending.drain(..) {
+                    patch_target(instrs, jf, target);
+                }
             }
             push(
                 instrs,
@@ -588,6 +664,25 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
             name.clone()
         }
         Expr::Var { name, .. } => name.clone(),
+        Expr::Closure { id, params, body, .. } => {
+            // Lambda lifting over existing ops: the literal's lifted
+            // function (synthesized in `lower`, same name) takes the
+            // captures first, then the declared parameters. Here we only
+            // snapshot the captures into the value; dispatch happens in
+            // `Call`. Capture order is `closure_captures` (sorted,
+            // deterministic), matching the lifted parameter prefix.
+            let dst = tmp_name(tmp);
+            push(
+                instrs,
+                e.id(),
+                MirOp::ClosureNew {
+                    into: dst.clone(),
+                    func: crate::closures::closure_fn_name(id),
+                    captures: crate::closures::closure_captures(params, body),
+                },
+            );
+            dst
+        }
         Expr::Call { func, args, .. } => {
             let mut lowered = Vec::with_capacity(args.len());
             for a in args {
@@ -784,6 +879,31 @@ pub fn lower(program: &Program) -> MirModule {
             params: f.params.iter().map(|p| p.name.clone()).collect(),
             instrs,
         });
+        // Lambda-lifted closure bodies: one synthetic function per
+        // literal (including nested ones — `collect_closures` recurses),
+        // named by `closure_fn_name` (NUL-containing, unspellable, so no
+        // user function can collide). Leading parameters are the captures
+        // in `closure_captures` order, then the declared parameters; the
+        // body lowers like any function body (`return` returns from the
+        // closure, loops get a fresh stack). Each has its own `tmp`
+        // counter so generated names never collide across functions.
+        let mut lits = Vec::new();
+        crate::closures::collect_closures(&f.body, &mut lits);
+        for lit in &lits {
+            let caps = crate::closures::closure_captures(&lit.params, &lit.body);
+            let mut cinstrs = Vec::new();
+            let mut ctmp: u32 = 0;
+            let mut cloops: Vec<LoopCtx> = Vec::new();
+            lower_block(&lit.body.stmts, &mut cinstrs, &mut ctmp, &mut cloops);
+            let mut cparams = caps;
+            cparams.extend(lit.params.iter().map(|p| p.name.clone()));
+            out.functions.push(MirFunction {
+                name: crate::closures::closure_fn_name(&lit.id),
+                origin: lit.id.clone(),
+                params: cparams,
+                instrs: cinstrs,
+            });
+        }
     }
     out
 }

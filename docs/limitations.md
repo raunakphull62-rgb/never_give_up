@@ -106,8 +106,9 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
 - **Packages**: manifest + FNV lockfile is change-detection, not
   cryptography; there is no registry or network fetching.
 - **LSP**: JSON diagnostic renderer only, no server.
-  No closures or function values; no trait bounds; no match guards,
-  partial destructuring, or struct-style variants; no `throw`
+  Closures (by-value capture) and match guards ARE in the language
+  (SPEC §2b/§2c); still absent: no trait bounds; no partial
+  destructuring or struct-style variants; no `throw`
   statement (`throws` is propagation-checked only); no const items;
   arrays and maps are dynamically typed (`unknown` by design).
 - **Formatter**: `fmt` renders the AST, so comments are dropped from

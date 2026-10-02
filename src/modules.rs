@@ -228,6 +228,7 @@ pub fn resolve_with_file(program: &Program, file: &str) -> (Program, Vec<Diagnos
         enums: Vec::new(),
         structs: Vec::new(),
         imports: program.imports.clone(),
+        selective_imports: program.selective_imports.clone(),
         functions: Vec::with_capacity(program.functions.len()),
     };
     // Top-level items: validate qualified references, rewrite nothing.
@@ -469,6 +470,12 @@ fn rewrite_expr(e: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
         } => {
             rewrite_expr(scrutinee, cur, ctx);
             for arm in arms.iter_mut() {
+                for s in arm.stmts.iter_mut() {
+                    rewrite_stmt(s, cur, ctx);
+                }
+                if let Some(g) = arm.guard.as_mut() {
+                    rewrite_expr(g, cur, ctx);
+                }
                 rewrite_expr(&mut arm.body, cur, ctx);
                 rewrite_arm(arm, cur, ctx);
             }
@@ -485,6 +492,18 @@ fn rewrite_expr(e: &mut Expr, cur: Option<&str>, ctx: &mut Ctx) {
             }
         }
         Expr::Spawn { call, .. } => rewrite_expr(call, cur, ctx),
+        Expr::Closure { params, body, .. } => {
+            // Closure bodies resolve like any nested block: bare member
+            // refs gain their qualifier, annotations included. Known gap
+            // (shared with `let`-shadowing): a closure parameter naming a
+            // module member still qualifies inside — call it shadowing only
+            // with distinct names.
+            for p in params.iter_mut() {
+                let ty = rewrite_ty(&p.ty, &[], cur, ctx);
+                p.ty = ty;
+            }
+            rewrite_block(body, cur, ctx);
+        }
         Expr::Call { func, args, .. } => {
             for a in args.iter_mut() {
                 rewrite_expr(a, cur, ctx);

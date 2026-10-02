@@ -31,7 +31,14 @@ pub fn fmt_program(p: &Program) -> String {
     for imp in &p.imports {
         out.push_str(&format!("import \"{imp}\"\n"));
     }
-    if !p.imports.is_empty() {
+    for sel in &p.selective_imports {
+        out.push_str(&format!(
+            "import {{ {} }} from \"{}\"\n",
+            sel.names.join(", "),
+            sel.path
+        ));
+    }
+    if !p.imports.is_empty() || !p.selective_imports.is_empty() {
         out.push('\n');
     }
     for s in &p.structs {
@@ -315,7 +322,22 @@ fn fmt_expr(e: &Expr) -> String {
                         }
                         _ => "_".to_string(),
                     };
-                    format!("{} => {}", pat, fmt_expr(&a.body))
+                    let head = match &a.guard {
+                        Some(g) => format!("{pat} if {}", fmt_expr(g)),
+                        None => pat,
+                    };
+                    if a.stmts.is_empty() {
+                        format!("{head} => {}", fmt_expr(&a.body))
+                    } else {
+                        // Multi-statement arm: statements in order, trailing
+                        // expression last. Newline-separated (the formatter's
+                        // one-statement-per-line rule); re-parses to the
+                        // same arm, so `fmt(fmt(x)) == fmt(x)` holds.
+                        let mut lines: Vec<String> =
+                            a.stmts.iter().map(|s| fmt_stmt(s, 2)).collect();
+                        lines.push(fmt_expr(&a.body));
+                        format!("{head} => {{\n{}\n}}", lines.join("\n"))
+                    }
                 })
                 .collect();
             format!("match {} {{ {} }}", fmt_expr(scrutinee), as_.join(", "))
@@ -335,6 +357,24 @@ fn fmt_expr(e: &Expr) -> String {
         }
         Expr::Spawn { call, .. } => format!("spawn {}", fmt_expr(call)),
         Expr::Await { name, .. } => format!("await {name}"),
+        Expr::Closure {
+            params, return_ty, body, ..
+        } => {
+            // Anonymous function value. The body is statement-only (the
+            // value comes from `return` or fall-off-the-end `last`); fixed
+            // depth keeps `fmt(fmt(x)) == fmt(x)` (re-parse drops
+            // whitespace, so any fixed depth is idempotent).
+            let ps: Vec<String> = params
+                .iter()
+                .map(|p| format!("{}: {}", p.name, p.ty))
+                .collect();
+            format!(
+                "fn({}) -> {} {{\n{}}}",
+                ps.join(", "),
+                return_ty,
+                fmt_block(body, 1)
+            )
+        }
         Expr::Call {
             func,
             type_args,

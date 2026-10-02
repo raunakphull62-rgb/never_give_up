@@ -3,12 +3,14 @@
 pub mod ai_safety;
 pub mod ast;
 pub mod codegen;
+pub mod closures;
 pub mod contracts;
 pub mod db;
 pub mod derive;
 pub mod diagnostics;
 pub mod fmt;
 pub mod hir;
+pub mod imports;
 pub mod jit;
 pub mod lexer;
 pub mod lsp;

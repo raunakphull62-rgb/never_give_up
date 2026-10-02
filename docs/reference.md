@@ -239,7 +239,8 @@ fn main() -> i32 {
   binding-count mismatches are `E-ARITY`; cross-enum arms and
   non-enum scrutinees are `E-TYPE` (naming the actual type).
 - Not in the language: struct-style variants, partial `{ f, .. }`
-  destructuring, match guards, tuple-variant syntax.
+  destructuring, tuple-variant syntax. (Match guards and multi-statement
+  arms ARE in the language; see SPEC §2b.)
 
 ## 7. Generics
 
@@ -554,7 +555,9 @@ the `ownership` API — only `Managed` ships).
 
 ## 11. What is not in the language
 
-No closures or function values; no trait bounds; no match guards / partial destructuring /
+Closures (`fn(params) -> type { ... }` values, by-value capture) and
+match guards ARE in the language (SPEC §2b/§2c). Not in the language:
+no trait bounds; no partial destructuring /
 struct-style variants; no recursive struct fields that must be
 inhabited without a dynamic producer; no `throw` statement; no
 short-circuit `&&`/`||`; no const items; no string interpolation;

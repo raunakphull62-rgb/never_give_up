@@ -171,7 +171,7 @@ Klang is actively developed, and some features are intentionally narrower than i
 - `&&` and `||` evaluate both operands; they do not short-circuit.
 - The interpreter is the reference backend. The optional JIT supports integer code only, and `build` stops after printing MIR.
 - `fmt` formats the parsed syntax tree and drops comments from its output.
-- There are no closures, function values, trait bounds, match guards, or `throw` statement. `cancel` is accepted as an effect annotation but is not propagation-checked.
+- There are no trait bounds or `throw` statement. Closures (`fn(params) -> type { ... }` values with by-value capture), match guards (`Pattern if cond => body`), and multi-statement match arms are supported (SPEC §2b/§2c). `cancel` is accepted as an effect annotation but is not propagation-checked.
 - Package helpers provide manifest and content-hash lockfile support, not a package registry or network dependency fetching.
 - The LSP module converts diagnostics to LSP-shaped data; the CLI does not run a language-server process.
 - The newer v2 language is selected explicitly and has its own syntax and commands.

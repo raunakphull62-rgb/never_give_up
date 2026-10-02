@@ -763,6 +763,27 @@ impl Parser {
     /// so this parses greedily with no backtracking — unlike call-site
     /// generics, which need speculative disambiguation.
     fn parse_ty_name(&mut self, what: &str) -> Result<String, Diagnostic> {
+        // Closure type annotation: `fn(i32, str) -> i32`. `fn` lexes as
+        // its own token, so this is unambiguous in type position.
+        if self.peek().kind == TokenKind::Fn {
+            self.bump();
+            self.expect(&TokenKind::LParen, "`(`")?;
+            let mut params = Vec::new();
+            if self.peek().kind != TokenKind::RParen {
+                loop {
+                    params.push(self.parse_ty_name("parameter type")?);
+                    if self.peek().kind == TokenKind::Comma {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+            self.expect(&TokenKind::Arrow, "`->`")?;
+            let ret = self.parse_ty_name("return type")?;
+            return Ok(format!("fn({})->{}", params.join(", "), ret));
+        }
         let (mut name, _, _) = self.expect_ident(what)?;
         while self.peek().kind == TokenKind::ColonColon {
             self.bump();
@@ -882,6 +903,7 @@ impl Parser {
         let mut enums = Vec::new();
         let mut structs = Vec::new();
         let mut imports = Vec::new();
+        let mut selective_imports = Vec::new();
         let mut functions = Vec::new();
         loop {
             match &self.peek().kind {
@@ -903,12 +925,15 @@ impl Parser {
                             self.consume_semi_opt();
                             imports.push(path);
                         }
+                        TokenKind::LBrace => {
+                            selective_imports.push(self.parse_selective_import()?);
+                        }
                         _ => {
                             let p = self.peek().clone();
                             return Err(self.err(
                                 p.start,
                                 p.end,
-                                "expected `\"path\"` after `import`",
+                                "expected `\"path\"` or `{ names } from \"path\"` after `import`",
                             ));
                         }
                     }
@@ -929,8 +954,64 @@ impl Parser {
             enums,
             structs,
             imports,
+            selective_imports,
             functions,
         })
+    }
+
+    /// `import { a, b } from "path"`: selective import of named top-level
+    /// items. Called just after `import` when the next token is `{`.
+    /// `from` is a plain identifier (never a keyword), so this is
+    /// unambiguous. Empty braces and duplicates-in-one-list are `E-PARSE`
+    /// and dedupe respectively — both loud-or-harmless, never silent.
+    fn parse_selective_import(&mut self) -> Result<crate::ast::SelectiveImport, Diagnostic> {
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut names = Vec::new();
+        loop {
+            match &self.peek().kind {
+                TokenKind::RBrace => {
+                    self.bump();
+                    break;
+                }
+                _ => {}
+            }
+            let (name, _, _) = self.expect_ident("imported name")?;
+            if !names.contains(&name) {
+                names.push(name);
+            }
+            match &self.peek().kind {
+                TokenKind::Comma => {
+                    self.bump();
+                }
+                TokenKind::RBrace => {}
+                _ => {
+                    let p = self.peek().clone();
+                    return Err(self.err(p.start, p.end, "expected `,` or `}`"));
+                }
+            }
+        }
+        if names.is_empty() {
+            let p = self.peek().clone();
+            return Err(self.err(p.start, p.end, "expected at least one name in `{ }`"));
+        }
+        let (from, _, _) = self.expect_ident("`from`")?;
+        if from != "from" {
+            let p = self.peek().clone();
+            return Err(self.err(p.start, p.end, "expected `from \"path\"` after `{ names }`"));
+        }
+        let path = match &self.peek().kind {
+            TokenKind::StrLit(path) => {
+                let path = path.clone();
+                self.bump();
+                path
+            }
+            _ => {
+                let p = self.peek().clone();
+                return Err(self.err(p.start, p.end, "expected `\"path\"` after `from`"));
+            }
+        };
+        self.consume_semi_opt();
+        Ok(crate::ast::SelectiveImport { names, path })
     }
 
     fn parse_mod(&mut self) -> Result<ModDecl, Diagnostic> {
@@ -1512,13 +1593,16 @@ impl Parser {
         if let TokenKind::Ident(n) = &head.kind {
             if n == "_" {
                 self.bump();
+                let guard = self.parse_match_guard_opt()?;
                 self.expect(&TokenKind::FatArrow, "`=>`")?;
-                let body = self.parse_expr()?;
+                let (stmts, body) = self.parse_match_arm_body(&id)?;
                 return Ok(MatchArm {
                     id,
                     enum_name: None,
                     variant: None,
                     bindings: Vec::new(),
+                    stmts,
+                    guard,
                     body,
                 });
             }
@@ -1549,15 +1633,75 @@ impl Parser {
             }
             self.expect(&TokenKind::RParen, "`)`")?;
         }
+        let guard = self.parse_match_guard_opt()?;
         self.expect(&TokenKind::FatArrow, "`=>`")?;
-        let body = self.parse_expr()?;
+        let (stmts, body) = self.parse_match_arm_body(&id)?;
         Ok(MatchArm {
             id,
             enum_name: Some(enum_name),
             variant: Some(variant),
             bindings,
+            stmts,
+            guard,
             body,
         })
+    }
+
+    /// Optional `if condition` guard between a match pattern and `=>`.
+    /// `if` lexes as its own token (never an identifier), so this is
+    /// unambiguous: a pattern cannot contain a bare `if`.
+    fn parse_match_guard_opt(&mut self) -> Result<Option<Expr>, Diagnostic> {
+        if self.peek().kind != TokenKind::If {
+            return Ok(None);
+        }
+        self.bump();
+        Ok(Some(self.parse_expr()?))
+    }
+
+    /// Arm body after `=>`: either a single expression (with empty setup
+    /// statements) or a `{ ... }` block of statements ending in a trailing
+    /// expression that yields the arm's value (same statement semantics as
+    /// an `if` block body). A `{ ... }` here is never a map literal: map
+    /// shapes (`{"a": 1}`, `{a: 1}`) fail inside as `E-PARSE`, exactly as
+    /// they did when the braces parsed as a map literal before.
+    fn parse_match_arm_body(&mut self, arm_id: &NodeId) -> Result<(Vec<Stmt>, Expr), Diagnostic> {
+        if self.peek().kind != TokenKind::LBrace {
+            return Ok((Vec::new(), self.parse_expr()?));
+        }
+        self.bump();
+        self.enter_scope(arm_id);
+        let mut stmts = Vec::new();
+        loop {
+            let t = self.peek().clone();
+            match &t.kind {
+                TokenKind::RBrace => {
+                    self.exit_scope();
+                    return Err(self.err(
+                        t.start,
+                        t.end,
+                        "match arm block must end with an expression",
+                    ));
+                }
+                TokenKind::Eof => {
+                    let e = self.err(t.start, t.end, "expected `}`");
+                    self.exit_scope();
+                    return Err(e);
+                }
+                _ => {}
+            }
+            let stmt = self.parse_stmt()?;
+            // A trailing `expr }` is the arm's value; anything else is a
+            // setup statement and parsing continues.
+            if let Stmt::Expr(e) = &stmt {
+                if self.peek().kind == TokenKind::RBrace {
+                    self.bump();
+                    let body = e.clone();
+                    self.exit_scope();
+                    return Ok((stmts, body));
+                }
+            }
+            stmts.push(stmt);
+        }
     }
 
     fn parse_print(&mut self) -> Result<PrintStmt, Diagnostic> {
@@ -1935,6 +2079,7 @@ impl Parser {
                 Ok(Expr::Await { id, name })
             }
             TokenKind::Match => self.parse_match(),
+            TokenKind::Fn => self.parse_closure(),
             TokenKind::Ident(name) => {
                 let name = name.clone();
                 let (s, e) = (t.start, t.end);
@@ -2095,6 +2240,51 @@ impl Parser {
             }
             _ => Err(self.err(t.start, t.end, "expected an expression")),
         }
+    }
+
+    /// `fn(params) -> type { body }` anonymous function value. Same
+    /// signature shape as a named `fn` (typed params, `->` return type) but
+    /// no name and no effects: closures are synchronous values, so
+    /// `spawn`/`await` inside the body is rejected at check time.
+    fn parse_closure(&mut self) -> Result<Expr, Diagnostic> {
+        self.expect(&TokenKind::Fn, "`fn`")?;
+        let id = self.next_id();
+        self.enter_scope(&id);
+        self.expect(&TokenKind::LParen, "`(`")?;
+        let params = self.parse_params()?;
+        self.expect(&TokenKind::RParen, "`)`")?;
+        self.expect(&TokenKind::Arrow, "`->`")?;
+        let return_ty = self.parse_ty_name("return type")?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let blk_id = self.next_id();
+        self.enter_scope(&blk_id);
+        let mut stmts = Vec::new();
+        loop {
+            match self.peek().kind {
+                TokenKind::RBrace | TokenKind::Eof => break,
+                _ => stmts.push(self.parse_stmt()?),
+            }
+        }
+        let end_tok = self.peek().clone();
+        match end_tok.kind {
+            TokenKind::RBrace => {
+                self.bump();
+            }
+            _ => {
+                let e = self.err(end_tok.start, end_tok.end, "expected `}`");
+                self.exit_scope();
+                self.exit_scope();
+                return Err(e);
+            }
+        }
+        self.exit_scope();
+        self.exit_scope();
+        Ok(Expr::Closure {
+            id,
+            params,
+            return_ty,
+            body: Block { id: blk_id, stmts },
+        })
     }
 
     /// Optional `(a, b, ...)` call/constructor arguments (empty when absent).

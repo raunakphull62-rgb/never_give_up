@@ -113,9 +113,16 @@ pub fn run_jit(mir: &MirModule, entry: &str, args: &[i64]) -> Result<(i64, Vec<S
         .map_err(|e| format!("declare print import: {e}"))?;
 
     // Declare every function first so calls resolve (incl. recursion).
+    // Lambda-lifted closure bodies (NUL-containing names, unspellable in
+    // source) are never declared: no static `Call` can name them, and the
+    // `ClosureNew` site that creates their values is itself unsupported
+    // below — so any closure use fails loudly at the creation site, and
+    // Cranelift never sees a NUL byte in a symbol name.
     let mut ids: HashMap<String, FuncId> = HashMap::new();
     for f in &mir.functions {
-        let mut sig = module.make_signature();
+        if f.name.contains('\0') {
+            continue;
+        }        let mut sig = module.make_signature();
         for _ in &f.params {
             sig.params.push(AbiParam::new(types::I64));
         }
@@ -199,6 +206,10 @@ fn op_name(op: &MirOp) -> &'static str {
         MirOp::Spawn { .. } => "Spawn",
         MirOp::Await { .. } => "Await",
         MirOp::Call { .. } => "Call",
+        // Closures are values the int-only JIT cannot represent: creation
+        // snapshots arbitrary values and dispatch is dynamic. Rejected
+        // loudly via the catch-all below (never silent wrong code).
+        MirOp::ClosureNew { .. } => "ClosureNew",
         MirOp::Const { .. } => "Const",
         MirOp::ConstFloat { .. } => "ConstFloat",
         MirOp::ConstStr { .. } => "ConstStr",

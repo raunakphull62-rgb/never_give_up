@@ -21,12 +21,60 @@ fn main() -> i32 {
 
 - One file = structs + imports + `fn` items. `import "x.klang"`
   merges files (duplicate `fn` names are an error).
+  `import { name, ... } from "x.klang"` merges only the named top-level
+  items (function/struct/enum) from the file: a missing file is
+  `E-IO-NOT-FOUND`, a missing name is `E-IMPORT` (naming what is
+  available), an unsafe path (`..`/absolute/`~`) is `E-IMPORT`, and a
+  same-named item from a different file is `E-DUPLICATE`. Re-importing
+  an already-merged item is idempotent (diamond-safe); circular
+  imports terminate and resolve (each file merges at most once per
+  mode). `mod` blocks are never split (naming one is `E-IMPORT`
+  pointing at the whole-file form); items the target merely defines
+  but was not asked for stay invisible (`E-UNDEFINED` at check).
 - `fn name(params) -> type [effects] { ... }`. Effects: `throws`,
   `async`, `cancel`. Calling a `throws` function requires `throws`
   on the caller (`E-EFFECT-MISMATCH`).
 - Arguments are pass-by-value: mutating a struct, array, or map
   parameter inside the callee never affects the caller's binding.
   Return the updated value (or a status code) instead.
+
+## 2c. Closures (checked)
+
+```klang
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+    return f(x)
+}
+
+fn main() -> i32 {
+    let n = 20
+    let addn = fn(x: i32) -> i32 { return x + n }
+    return apply(addn, 22)
+}
+```
+
+- A closure literal `fn(params) -> type { body }` is a first-class
+  value capturing its enclosing scope **by value**: captures are
+  snapshotted when the literal runs, so later mutations of the outer
+  variables — including the outer function having returned — never
+  affect the closure (copy semantics, never aliasing; Managed mode
+  only, no borrow checker). Store in a variable, pass as an argument,
+  return from a function: all three work.
+- Calling through a closure-typed binding dispatches dynamically and
+  shadows any same-named function (checked and runtime agree).
+  Calling a bound non-closure is `E-TYPE`; arity/type mismatches are
+  `E-ARITY`/`E-TYPE`; closure arithmetic is `E-TYPE`. A closure cannot
+  name its own `let` binding (bound only after the literal checks:
+  `E-UNDEFINED`, so no self-recursion by variable name).
+- Closures are synchronous values: `spawn` of a closure value is
+  `E-TYPE`, and `spawn`/`await` inside a closure body is
+  `E-SPAWN-OUTSIDE-GROUP`/`E-AWAIT-OUTSIDE-GROUP` (the body checks
+  with a fresh task context, since it may escape). A closure entering
+  and leaving its OWN `task_group` is sound and runs.
+- Compilation is lambda lifting over existing ops (synthetic lifted
+  function per literal + a capture snapshot at the literal site), so
+  the int-only JIT loudly rejects any closure creation (`unsupported`,
+  never silent wrong code), and the v2 language has no closure
+  literals at all. See `tests/closure_gates.rs`.
 
 ## 2b. Enums + match (checked)
 
@@ -44,10 +92,26 @@ fn area(s: Shape) -> i32 {
   Construction: `Shape::Circle(10)` (bare variants still take `()`
   at construction: `Shape::Point()`).
 - `match scrutinee { Enum::Variant(bindings...) => expr, ... }`,
-  arms comma-separated, `_ => ...` wildcard. Arm bodies are single
-  expressions — a `{ ... }` block after `=>` parses as a map literal
-  and fails with `E-PARSE`, so multi-statement arm logic goes in a
-  helper function called from the arm.
+  arms comma-separated, `_ => ...` wildcard. An arm body is either a
+  single expression or a `{ ... }` block of statements ending in a
+  trailing expression that yields the arm's value (same statement
+  semantics as an `if` block body: `let`/assignment/`print`/`return`/
+  loops/`if` all work inside; `break`/`continue` cannot cross the arm
+  boundary, `E-LOOP`).
+- Arm guards: `Pattern if condition => body` (wildcards too). Taken
+  only when the pattern matches AND the guard (`bool`/`int`, checked
+  `E-TYPE`) is truthy; a matching pattern with a false guard falls
+  through to the next arm. The guard is never evaluated when the
+  pattern does not match, and sees the arm's payload bindings. With a
+  `{ ... }` block arm, the setup statements run BEFORE the guard is
+  checked, so the guard also sees setup bindings; setup effects on
+  outer variables then persist when the guard fails (same as an `if`
+  block body), while setup `let`s stay arm-local. Guards
+  never satisfy exhaustiveness (a guarded arm alone leaves
+  `E-MATCH-EXHAUSTIVE`); duplicate/unreachable detection is
+  guard-aware (guarded-then-unguarded same patterns are reachable, the
+  reverse is `E-MATCH-DUPLICATE`). Total guard failure at runtime is a
+  loud `E-RUNTIME`, never a silent default.
 - Exhaustiveness is a compile error: missing variants without a
   wildcard is `E-MATCH-EXHAUSTIVE`, naming every missing variant
   (`non-exhaustive match on \`Opt\`: missing Opt::None`) with fixes
@@ -255,9 +319,10 @@ structured diagnostic — never a crash. Pinned by
 `tests/robustness_gates.rs`.
 
 Call depth is capped separately at the interpreter level: nested
-calls deeper than 64 frames fail at run time with `E-RUNTIME` ("call
-depth exceeded"), never a native stack overflow. Depth 63 and below
-runs normally. The cap is deliberately conservative (it guards the
+calls deeper than 1024 frames fail at run time with `E-RUNTIME` ("call
+depth exceeded"), never a native stack overflow. Depth 1024 and below
+runs normally (depth 1000 is pinned running; depth 2000 is pinned
+failing loudly). The cap is deliberately conservative (it guards the
 interpreter's own native recursion); realistic deep recursion past it
 is a known constraint, not a crash bug. Pinned by
 `call_depth_limit_is_loud_never_a_crash`.
@@ -265,10 +330,9 @@ is a known constraint, not a crash bug. Pinned by
 ## 8. What is still NOT here (honest list)
 
 No full-value machine-code backend (int-only Cranelift JIT behind
-`--backend-jit`; interpreter is the default), no closures, no real borrow
+`--backend-jit`; interpreter is the default), no real borrow
 checker (Managed mode only), no async I/O runtime, no registry/network
 packages, no LSP server (only a JSON renderer), no debugger/profiler, no
-recursive/nested enum payloads needing indirection, no match guards, no
-multi-statement match arms (single-expression bodies; use helper
-functions), no tuple-variant syntax or partial destructuring. See `roadmap.md` for
+recursive/nested enum payloads needing indirection,
+no tuple-variant syntax or partial destructuring. See `roadmap.md` for
 sequencing and `AUDIT.md` for the Phase 0 evidence table.

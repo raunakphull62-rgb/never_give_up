@@ -32,6 +32,8 @@ pub fn is_unsafe_import_path(imp: &str) -> bool {
 }
 
 /// Reject unsafe model-generated imports (same rule as load_with_imports).
+/// Covers both forms: `import "path"` and
+/// `import { names } from "path"` (the path after `from`).
 pub fn has_unsafe_import(src: &str) -> Option<String> {
     for line in src.lines() {
         let t = line.trim();
@@ -41,6 +43,21 @@ pub fn has_unsafe_import(src: &str) -> Option<String> {
         // any other continuation (`important ...`) is not an import.
         let rest = match t.strip_prefix("import") {
             Some(r) if r.starts_with('"') => r,
+            Some(r) if r.starts_with('{') => {
+                // Selective form: the screened path is the one after
+                // `from`. Anything unparseable here is unsafe by default
+                // (the parser will reject it too, but the screen must not
+                // wave through a path it cannot see).
+                match selective_screen_path(r) {
+                    Some(imp) => {
+                        if is_unsafe_import_path(imp) {
+                            return Some(imp.to_string());
+                        }
+                        continue;
+                    }
+                    None => return Some(t.to_string()),
+                }
+            }
             Some(r) if r.starts_with(|c: char| c.is_whitespace()) => r.trim_start(),
             _ => continue,
         };
@@ -60,6 +77,23 @@ pub fn has_unsafe_import(src: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract the `"path"` after `from` in a selective import's remainder
+/// (`{ a, b } from "path"`). `None` when the shape is unparseable.
+fn selective_screen_path(rest: &str) -> Option<&str> {
+    let close = rest.find('}')?;
+    let after = rest[close + 1..].trim_start();
+    let from = after.strip_prefix("from")?;
+    // `fromx` is not `from`.
+    if from.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let from = from.trim_start();
+    let q1 = from.find('"')?;
+    let after = &from[q1 + 1..];
+    let q2 = after.find('"')?;
+    Some(&after[..q2])
 }
 
 /// Extract candidate function bodies by name from model output.
