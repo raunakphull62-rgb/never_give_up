@@ -45,7 +45,7 @@ fn main() {
         eprintln!("klang-registry: missing admin token (pass --admin-token or set REGISTRY_ADMIN_TOKEN)");
         std::process::exit(2);
     };
-    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|e| {
+    let listener = TcpListener::bind(("0.0.0.0", port)).unwrap_or_else(|e| {
         eprintln!("klang-registry: cannot bind 127.0.0.1:{port}: {e}");
         std::process::exit(1);
     });
