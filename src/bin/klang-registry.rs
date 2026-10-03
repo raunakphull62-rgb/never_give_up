@@ -46,10 +46,10 @@ fn main() {
         std::process::exit(2);
     };
     let listener = TcpListener::bind(("0.0.0.0", port)).unwrap_or_else(|e| {
-        eprintln!("klang-registry: cannot bind 127.0.0.1:{port}: {e}");
+        eprintln!("klang-registry: cannot bind 0.0.0.0:{port}: {e}");
         std::process::exit(1);
     });
-    eprintln!("klang-registry: serving {data_dir} on 127.0.0.1:{port}");
+    eprintln!("klang-registry: serving {data_dir} on 0.0.0.0:{port}");
     let cfg = klang::registry::RegistryConfig {
         data_dir: data_dir.into(),
         admin_token: token,
