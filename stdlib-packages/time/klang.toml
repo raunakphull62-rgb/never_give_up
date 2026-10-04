@@ -1,0 +1,7 @@
+[project]
+name = "time"
+version = "1.0.0"
+description = "Duration type and clock helpers"
+authors = ["Klang Core"]
+
+[dependencies]

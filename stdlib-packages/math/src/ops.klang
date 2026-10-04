@@ -1,0 +1,71 @@
+// math — constants and integer/float functions.
+//
+// Import: import "math/lib.klang"
+
+fn math_pi() -> f64 {
+    return 3.14159
+}
+
+fn math_e() -> f64 {
+    return 2.71828
+}
+
+fn math_abs(n: i32) -> i32 {
+    if n < 0 {
+        return 0 - n
+    } else {
+        return n
+    }
+}
+
+fn math_max(a: i32, b: i32) -> i32 {
+    if a > b {
+        return a
+    } else {
+        return b
+    }
+}
+
+fn math_min(a: i32, b: i32) -> i32 {
+    if a < b {
+        return a
+    } else {
+        return b
+    }
+}
+
+fn math_clamp(v: i32, lo: i32, hi: i32) -> i32 {
+    if v < lo {
+        return lo
+    } else {
+        if v > hi {
+            return hi
+        } else {
+            return v
+        }
+    }
+}
+
+fn math_pow(base: i32, exp: i32) -> i32 {
+    let out = 1
+    let i = 0
+    while i < exp {
+        out = out * base
+        i = i + 1
+    }
+    return out
+}
+
+fn math_fact(n: i32) -> i32 {
+    let out = 1
+    let i = 2
+    while i <= n {
+        out = out * i
+        i = i + 1
+    }
+    return out
+}
+
+fn math_circle_area(r: f64) -> f64 {
+    return math_pi() * r * r
+}

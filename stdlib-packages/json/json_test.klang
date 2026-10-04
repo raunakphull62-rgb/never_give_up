@@ -1,0 +1,15 @@
+// json_test.klang — package self-test. Run: klang run json_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(json_quote("hi") == "\"hi\"")
+    assert(json_int("age", 42) == "\"age\": 42")
+    assert(json_str("name", "amy") == "\"name\": \"amy\"")
+    assert(json_bool("ok", true) == "\"ok\": true")
+    assert(json_obj2(json_int("a", 1), json_int("b", 2)) == "{ \"a\": 1, \"b\": 2 }")
+    assert(json_arr2("1", "2") == "[1, 2]")
+    assert(json_is_obj("{}") == true)
+    assert(json_is_obj("[]") == false)
+    print("json: OK")
+    return 0
+}

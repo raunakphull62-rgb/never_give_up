@@ -1,0 +1,9 @@
+[project]
+name = "logging"
+version = "1.0.0"
+description = "Leveled logger over io and time"
+authors = ["Klang Core"]
+
+[dependencies]
+io = "registry:io@^1.0.0"
+time = "registry:time@^1.0.0"

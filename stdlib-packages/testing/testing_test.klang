@@ -1,0 +1,10 @@
+// testing_test.klang — package self-test. Run: klang run testing_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let failures = 0
+    failures = failures + test_check(1 == 1, "truth")
+    failures = failures + test_eq_int(40 + 2, 42, "answer")
+    failures = failures + test_eq_str("ab" + "c", "abc", "concat")
+    return test_summary(failures)
+}

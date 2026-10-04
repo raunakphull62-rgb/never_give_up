@@ -1,0 +1,7 @@
+[project]
+name = "sql"
+version = "1.0.0"
+description = "SQL query builders and prepared-statement helpers"
+authors = ["Klang Core"]
+
+[dependencies]

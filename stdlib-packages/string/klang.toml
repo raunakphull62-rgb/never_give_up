@@ -1,0 +1,7 @@
+[project]
+name = "string"
+version = "1.0.0"
+description = "StringBuilder and string utilities"
+authors = ["Klang Core"]
+
+[dependencies]

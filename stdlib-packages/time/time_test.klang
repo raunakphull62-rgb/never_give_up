@@ -1,0 +1,13 @@
+// time_test.klang — package self-test. Run: klang run time_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let d = dur_add(dur_from_mins(1), dur_new(30))
+    assert(dur_secs(d) == 90)
+    assert(dur_mins(dur_from_hours(2)) == 120)
+    assert(dur_to_string(dur_new(5)) == "5s")
+    assert(dur_is_zero(dur_new(0)) == true)
+    assert(dur_is_zero(d) == false)
+    print("time: OK")
+    return 0
+}

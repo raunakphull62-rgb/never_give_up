@@ -1,0 +1,7 @@
+[project]
+name = "sync"
+version = "1.0.0"
+description = "Mutex and channel types (single-threaded logic)"
+authors = ["Klang Core"]
+
+[dependencies]

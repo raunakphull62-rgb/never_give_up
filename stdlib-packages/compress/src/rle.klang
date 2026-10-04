@@ -1,0 +1,63 @@
+// compress — run-length codec and size helpers.
+//
+// Toy RLE (runs capped at 9 so counts stay single-digit) plus file
+// round-trip helpers over `io`. Depends on `io`.
+//
+// Import: import "compress/lib.klang"
+import "io/lib.klang"
+
+fn cmp_rle_encode(s: str) -> str {
+    let cs = s.chars()
+    let out = ""
+    let i = 0
+    while i < len(cs) {
+        let cur = cs[i]
+        let run = 1
+        while i + run < len(cs) {
+            if cs[i + run] != cur {
+                break
+            }
+            if run == 9 {
+                break
+            }
+            run = run + 1
+        }
+        out = out + cur + str(run)
+        i = i + run
+    }
+    return out
+}
+
+fn cmp_rle_decode(s: str) -> str {
+    let cs = s.chars()
+    let out = ""
+    let i = 0
+    while i < len(cs) {
+        let cur = cs[i]
+        let n = 1
+        if i + 1 < len(cs) {
+            n = parse_int(cs[i + 1])
+        }
+        let k = 0
+        while k < n {
+            out = out + cur
+            k = k + 1
+        }
+        i = i + 2
+    }
+    return out
+}
+
+fn cmp_ratio(orig: str, coded: str) -> i32 {
+    if len(orig) == 0 {
+        return 0
+    }
+    return len(coded) * 100 / len(orig)
+}
+
+fn cmp_roundtrip_file(path: str, content: str) -> bool {
+    let w = io_writer(path)
+    io_write_all(w, cmp_rle_encode(content))
+    let r = io_reader(path)
+    return cmp_rle_decode(io_read_all(r)) == content
+}

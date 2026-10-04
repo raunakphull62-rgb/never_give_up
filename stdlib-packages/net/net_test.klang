@@ -1,0 +1,16 @@
+// net_test.klang — package self-test. Run: klang run net_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let a = net_addr("example.com", 80)
+    assert(net_is_valid(a) == true)
+    assert(net_to_string(a) == "example.com:80")
+    assert(net_to_string(net_local(8765)) == "127.0.0.1:8765")
+    assert(net_port_ok(0) == false)
+    assert(net_port_ok(65536) == false)
+    assert(net_is_valid(net_addr("", 80)) == false)
+    assert(net_save(a, "/tmp/klang_net_test.txt") == 14)
+    io_remove_path("/tmp/klang_net_test.txt")
+    print("net: OK")
+    return 0
+}

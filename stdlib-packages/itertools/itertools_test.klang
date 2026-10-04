@@ -1,0 +1,16 @@
+// itertools_test.klang — package self-test. Run: klang run itertools_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let nums = [3, 1, 4, 1, 5]
+    assert(iter_sum(nums) == 14)
+    assert(iter_count(nums) == 5)
+    assert(iter_max(nums) == 5)
+    assert(iter_min(nums) == 1)
+    let pos = iter_filter_pos([-2, 0, 7])
+    assert(len(pos) == 1)
+    let bumped = iter_add_all([1, 2], 10)
+    assert(iter_sum(bumped) == 23)
+    print("itertools: OK")
+    return 0
+}

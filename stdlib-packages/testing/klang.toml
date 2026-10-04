@@ -1,0 +1,7 @@
+[project]
+name = "testing"
+version = "1.0.0"
+description = "Assert helpers and tiny test framework hooks"
+authors = ["Klang Core"]
+
+[dependencies]

@@ -1,0 +1,2 @@
+// math/lib.klang — package entry point (re-exports src modules).
+import "src/ops.klang"

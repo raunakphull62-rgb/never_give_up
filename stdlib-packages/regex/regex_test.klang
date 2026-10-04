@@ -1,0 +1,13 @@
+// regex_test.klang — package self-test. Run: klang run regex_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(rx_match("h.llo", "hello") == true)
+    assert(rx_match("xyz", "hello") == false)
+    assert(rx_find_or_empty("h.llo", "say hello") == "hello")
+    assert(rx_find_or_empty("xyz", "hello") == "")
+    assert(rx_matches_word("h.llo", "say hello", "hello") == true)
+    assert(rx_count_words("a b c") == 3)
+    print("regex: OK")
+    return 0
+}

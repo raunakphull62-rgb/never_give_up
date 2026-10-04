@@ -1,0 +1,20 @@
+// io_test.klang — package self-test. Run: klang run io_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let path = "/tmp/klang_io_test.txt"
+    if io_exists_path(path) {
+        io_remove_path(path)
+    }
+    let w = io_writer(path)
+    assert(io_write_all(w, "hello") == 5)
+    assert(io_append_all(w, " klang") == 6)
+    let r = io_reader(path)
+    assert(io_read_all(r) == "hello klang")
+    assert(io_exists_path(path) == true)
+    assert(io_write_lines("/tmp/klang_io_lines.txt", ["a", "b"]) == 3)
+    io_remove_path(path)
+    io_remove_path("/tmp/klang_io_lines.txt")
+    print("io: OK")
+    return 0
+}

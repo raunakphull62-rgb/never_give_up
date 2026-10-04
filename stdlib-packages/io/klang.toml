@@ -1,0 +1,7 @@
+[project]
+name = "io"
+version = "1.0.0"
+description = "Reader/Writer wrappers over file builtins"
+authors = ["Klang Core"]
+
+[dependencies]

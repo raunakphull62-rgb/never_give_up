@@ -1,0 +1,31 @@
+// sql — query builders and prepared-statement helpers (pure strings).
+//
+// Import: import "sql/lib.klang"
+
+fn sql_select(table: str, cols: str) -> str {
+    return "SELECT " + cols + " FROM " + table
+}
+
+fn sql_where(q: str, cond: str) -> str {
+    return q + " WHERE " + cond
+}
+
+fn sql_limit(q: str, n: i32) -> str {
+    return q + " LIMIT " + str(n)
+}
+
+fn sql_insert(table: str, cols: str, vals: str) -> str {
+    return "INSERT INTO " + table + " (" + cols + ") VALUES (" + vals + ")"
+}
+
+fn sql_quote(s: str) -> str {
+    return "'" + s.replace("'", "''") + "'"
+}
+
+fn sql_eq_int(col: str, v: i32) -> str {
+    return col + " = " + str(v)
+}
+
+fn sql_and(a: str, b: str) -> str {
+    return "(" + a + ") AND (" + b + ")"
+}

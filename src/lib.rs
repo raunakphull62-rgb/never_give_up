@@ -20,6 +20,7 @@ pub mod mir;
 pub mod modules;
 pub mod ownership;
 pub mod package;
+pub mod package_manager;
 pub mod parser;
 pub mod registry;
 pub mod repair;

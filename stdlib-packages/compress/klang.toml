@@ -1,0 +1,8 @@
+[project]
+name = "compress"
+version = "1.0.0"
+description = "Run-length codec and size helpers"
+authors = ["Klang Core"]
+
+[dependencies]
+io = "registry:io@^1.0.0"

@@ -1,0 +1,27 @@
+// regex — Pattern matching over the regex builtins.
+//
+// Depends on `string` (word helpers), resolved transitively.
+//
+// Import: import "regex/lib.klang"
+import "string/lib.klang"
+
+fn rx_match(pat: str, text: str) -> bool {
+    return regex_is_match(pat, text)
+}
+
+fn rx_find_or_empty(pat: str, text: str) -> str {
+    let m = regex_find(pat, text)
+    if m["matched"] == 1 {
+        return m["match"]
+    } else {
+        return ""
+    }
+}
+
+fn rx_matches_word(pat: str, text: str, word: str) -> bool {
+    return rx_match(pat, text) && text.contains(word)
+}
+
+fn rx_count_words(text: str) -> i32 {
+    return str_line_count(text.replace(" ", "\n"))
+}

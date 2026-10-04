@@ -1,0 +1,48 @@
+// http — request/response builders.
+//
+// Pure value construction over `io` (persistence) and `string`
+// (builders). Live client exchange is a documented Phase 2 addition.
+//
+// Import: import "http/lib.klang"
+import "io/lib.klang"
+import "string/lib.klang"
+
+struct HttpReq {
+    method: str
+    url: str
+    body: str
+}
+
+struct HttpResp {
+    code: i32
+    body: str
+}
+
+fn http_get_req(url: str) -> HttpReq {
+    return HttpReq { method: "GET", url: url, body: "" }
+}
+
+fn http_post_req(url: str, body: str) -> HttpReq {
+    return HttpReq { method: "POST", url: url, body: body }
+}
+
+fn http_resp(code: i32, body: str) -> HttpResp {
+    return HttpResp { code: code, body: body }
+}
+
+fn http_status_ok(r: HttpResp) -> bool {
+    return r.code == 200
+}
+
+fn http_req_to_string(q: HttpReq) -> str {
+    let b = str_builder_new()
+    b = str_builder_push(b, q.method)
+    b = str_builder_push(b, " ")
+    b = str_builder_push(b, q.url)
+    return str_builder_build(b)
+}
+
+fn http_save_resp(r: HttpResp, path: str) -> i32 {
+    let w = io_writer(path)
+    return io_write_all(w, str(r.code) + "\n" + r.body)
+}

@@ -1,0 +1,9 @@
+[project]
+name = "http"
+version = "1.0.0"
+description = "HTTP request/response builders"
+authors = ["Klang Core"]
+
+[dependencies]
+io = "registry:io@^1.0.0"
+string = "registry:string@^1.0.0"

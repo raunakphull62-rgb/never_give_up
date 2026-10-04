@@ -448,7 +448,8 @@ fn run_file_mode(args: &[String]) {
     // first arg means `run <file> [entry]`.
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
         Some("check") | Some("check-v2") | Some("fmt") | Some("run") | Some("run-v2") | Some("build")
-        | Some("repair") | Some("mcp") | Some("lsp") | Some("publish") | Some("add") | Some("fetch") => {
+        | Some("repair") | Some("mcp") | Some("lsp") | Some("publish") | Some("add") | Some("fetch")
+        | Some("install") | Some("remove") | Some("update") | Some("list") | Some("init") => {
             (args[0].as_str(), &args[1..])
         }
         _ => ("run", args),
@@ -461,7 +462,15 @@ fn run_file_mode(args: &[String]) {
         run_lsp_mode();
         return;
     }
-    if cmd == "publish" || cmd == "add" || cmd == "fetch" {
+    if cmd == "publish"
+    || cmd == "add"
+    || cmd == "fetch"
+    || cmd == "install"
+    || cmd == "remove"
+    || cmd == "update"
+    || cmd == "list"
+    || cmd == "init"
+    {
         run_registry_mode(cmd, rest);
         return;
     }
@@ -570,7 +579,7 @@ fn run_file_mode(args: &[String]) {
             // plain check on the file. Recurse once on flag-free args.
             if files.is_empty() {
                 eprintln!(
-                    "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch> <file.klang> [entry] [--backend-jit|--write]"
+                    "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--write]"
                 );
                 std::process::exit(2);
             }
@@ -582,12 +591,13 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch> <file.klang> [entry] [--backend-jit|--verbose|-v]"
+            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
         eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
         eprintln!("       run [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
         eprintln!("       publish [--dir PATH] [--registry URL]  (KLANG_REGISTRY_TOKEN)");
-        eprintln!("       add <name@version> [--registry URL] | fetch [--registry URL] [--offline]");
+        eprintln!("       add <name[@constraint]> [--dev] [--registry URL] [--offline] | fetch [--registry URL] [--offline]");
+        eprintln!("       install [name[@constraint]] [--registry URL] [--offline] | remove <name> | update [name] | list | init [name] [--dir PATH]");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -805,10 +815,19 @@ fn run_file_mode(args: &[String]) {
     }
 }
 
-/// `klang publish|add|fetch`: registry package management (FOUNDATION-3
-/// Part 2B). `--registry URL` overrides `KLANG_REGISTRY` which overrides
-/// the localhost default; publish auth comes from `KLANG_REGISTRY_TOKEN`
+/// `klang publish|add|fetch|install|remove|update|list|init`: package
+/// management (FOUNDATION-3 Part 2B + Phase 1 Core PM).
+/// `--registry URL` overrides `KLANG_REGISTRY` which overrides the
+/// localhost default; publish auth comes from `KLANG_REGISTRY_TOKEN`
 /// (env preferred) or `--token` (overrides env).
+///
+/// Semantics (PRD § CLI, reconciled with backcompat):
+/// - `install [spec]` — vendor without editing klang.toml; no args
+///   reproduces from klang.lock/manifest.
+/// - `add spec [--dev]` — pin + edit klang.toml + install (keeps the
+///   legacy `add name@version` form working; now also accepts ranges).
+/// - `remove name` / `update [name]` / `list` / `init [name]`
+/// - `fetch` (legacy alias, kept) and `publish` unchanged.
 fn run_registry_mode(cmd: &str, rest: &[String]) {
     fn flag_val(rest: &[String], names: &[&str]) -> Option<String> {
         let mut it = rest.iter().peekable();
@@ -859,12 +878,14 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
         }
         "add" => {
             let Some(spec) = positional.first() else {
-                eprintln!("usage: add <name@version> [--registry URL]");
+                eprintln!("usage: add <name[@constraint]> [--dev] [--registry URL] [--offline]");
+                eprintln!("  constraint: X.Y.Z, =X.Y.Z, ^X.Y.Z, ~X.Y.Z, >/>=/</<=X.Y.Z, * (default: latest)");
                 std::process::exit(2);
             };
-            let (name, version) = spec.split_once('@').unwrap_or(("", ""));
+            let dev = rest.iter().any(|a| a == "--dev");
+            let offline = rest.iter().any(|a| a == "--offline");
             let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            match klang::registry::add_dependency(&dir, &base, name, version, false) {
+            match klang::package_manager::cli::cmd_add(&dir, &base, spec, dev, offline) {
                 Ok(line) => println!("{line}"),
                 Err(e) => {
                     eprintln!("add: FAIL\n{e}");
@@ -872,10 +893,106 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
                 }
             }
         }
-        "fetch" => {
+        "install" => {
+            // `install` never edits klang.toml (PRD): no args reproduces
+            // the locked environment; with a spec it vendors that
+            // package + transitive deps and updates klang.lock.
             let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let offline = rest.iter().any(|a| a == "--offline");
-            match klang::registry::fetch_project(&dir, &base, offline) {
+            let spec = positional.first().map(|s| s.as_str());
+            match klang::package_manager::cli::cmd_install(&dir, &base, spec, offline) {
+                Ok(logs) => {
+                    for l in logs {
+                        println!("{l}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("install: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "remove" => {
+            let Some(name) = positional.first() else {
+                eprintln!("usage: remove <name>");
+                std::process::exit(2);
+            };
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            match klang::package_manager::cli::cmd_remove(&dir, name) {
+                Ok(line) => println!("{line}"),
+                Err(e) => {
+                    eprintln!("remove: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "update" => {
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let offline = rest.iter().any(|a| a == "--offline");
+            let name = positional.first().map(|s| s.as_str());
+            match klang::package_manager::cli::cmd_update(&dir, &base, name, offline) {
+                Ok(logs) => {
+                    for l in logs {
+                        println!("{l}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("update: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "list" => {
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            match klang::package_manager::cli::cmd_list(&dir) {
+                Ok(out) => print!("{out}"),
+                Err(e) => {
+                    eprintln!("list: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "init" => {
+            // `init [name] [--dir PATH]`: scaffold klang.toml + src/ + tests/.
+            let name = positional
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "my-project".to_string());
+            let dir = flag_val(rest, &["--dir"])
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let target = if positional.first().is_some() && flag_val(rest, &["--dir"]).is_none() {
+                // `init my-project` with no --dir creates ./my-project/.
+                let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                let sub = cwd.join(&name);
+                if sub.exists() {
+                    // Name is a project name AND the dir exists: init in place?
+                    // Prefer explicitness: if ./name exists as a dir without
+                    // klang.toml, use it; otherwise init cwd with that name.
+                    if sub.is_dir() && !sub.join("klang.toml").exists() {
+                        sub
+                    } else {
+                        cwd
+                    }
+                } else {
+                    sub
+                }
+            } else {
+                dir
+            };
+            match klang::package_manager::cli::cmd_init(&target, &name) {
+                Ok(line) => println!("{line}"),
+                Err(e) => {
+                    eprintln!("init: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "fetch" => {
+            // Legacy alias for `install` with no spec (kept for backcompat).
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let offline = rest.iter().any(|a| a == "--offline");
+            match klang::package_manager::cli::cmd_install(&dir, &base, None, offline) {
                 Ok(logs) => {
                     for l in logs {
                         println!("{l}");
@@ -950,7 +1067,11 @@ fn ensure_registry_deps(entry: &str, offline: bool, base: &str) {
     if !manifest
         .deps
         .iter()
-        .any(|(_, v)| klang::registry::parse_registry_dep(v).is_some())
+        .chain(manifest.dev_deps.iter())
+        .any(|(k, v)| {
+            klang::registry::parse_registry_dep(v).is_some()
+                || klang::registry::parse_registry_req(v, k).is_some()
+        })
     {
         return;
     }

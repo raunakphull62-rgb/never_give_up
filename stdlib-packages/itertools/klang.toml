@@ -1,0 +1,7 @@
+[project]
+name = "itertools"
+version = "1.0.0"
+description = "Iterator utilities over arrays: sums, extrema, filters"
+authors = ["Klang Core"]
+
+[dependencies]

@@ -1,0 +1,7 @@
+[project]
+name = "crypto"
+version = "1.0.0"
+description = "Demo checksum and constant-time comparison helpers"
+authors = ["Klang Core"]
+
+[dependencies]

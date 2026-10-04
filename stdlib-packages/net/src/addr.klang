@@ -1,0 +1,38 @@
+// net — socket address types and validation.
+//
+// Address construction + validation only; live sockets are a
+// documented Phase 2 addition (the runtime transport is a mock).
+// Depends on `io` (endpoint persistence helpers).
+//
+// Import: import "net/lib.klang"
+import "io/lib.klang"
+
+struct NetAddr {
+    host: str
+    port: i32
+}
+
+fn net_addr(host: str, port: i32) -> NetAddr {
+    return NetAddr { host: host, port: port }
+}
+
+fn net_local(port: i32) -> NetAddr {
+    return NetAddr { host: "127.0.0.1", port: port }
+}
+
+fn net_port_ok(port: i32) -> bool {
+    return port > 0 && port < 65536
+}
+
+fn net_is_valid(a: NetAddr) -> bool {
+    return len(a.host) > 0 && net_port_ok(a.port)
+}
+
+fn net_to_string(a: NetAddr) -> str {
+    return a.host + ":" + str(a.port)
+}
+
+fn net_save(addr: NetAddr, path: str) -> i32 {
+    let w = io_writer(path)
+    return io_write_all(w, net_to_string(addr))
+}

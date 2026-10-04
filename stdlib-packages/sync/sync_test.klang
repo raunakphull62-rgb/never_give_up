@@ -1,0 +1,21 @@
+// sync_test.klang — package self-test. Run: klang run sync_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let m = mutex_new(41)
+    assert(mutex_is_locked(m) == false)
+    m = mutex_lock(m)
+    assert(mutex_is_locked(m) == true)
+    m = mutex_set(m, mutex_get(m) + 1)
+    m = mutex_unlock(m)
+    assert(mutex_get(m) == 42)
+    let c = chan_new([1, 2])
+    c = chan_send(c, 3)
+    assert(chan_len(c) == 3)
+    let r = chan_recv(c)
+    assert(r["value"] == 3)
+    c = chan_new(r["items"])
+    assert(chan_len(c) == 2)
+    print("sync: OK")
+    return 0
+}

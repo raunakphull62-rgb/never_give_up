@@ -1,0 +1,8 @@
+[project]
+name = "net"
+version = "1.0.0"
+description = "Socket address types and validation"
+authors = ["Klang Core"]
+
+[dependencies]
+io = "registry:io@^1.0.0"

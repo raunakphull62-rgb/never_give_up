@@ -1,0 +1,14 @@
+// compress_test.klang — package self-test. Run: klang run compress_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(cmp_rle_encode("aaabbc") == "a3b2c1")
+    assert(cmp_rle_encode("") == "")
+    assert(cmp_rle_decode("a3b2c1") == "aaabbc")
+    assert(cmp_rle_decode(cmp_rle_encode("hello world")) == "hello world")
+    assert(cmp_ratio("aaabbc", "a3b2c1") == 100)
+    assert(cmp_roundtrip_file("/tmp/klang_cmp_test.txt", "aaabbb") == true)
+    io_remove_path("/tmp/klang_cmp_test.txt")
+    print("compress: OK")
+    return 0
+}

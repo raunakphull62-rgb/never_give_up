@@ -1,0 +1,43 @@
+// io — Reader/Writer wrappers over the file builtins.
+//
+// Import: import "io/lib.klang"
+
+struct Reader {
+    path: str
+}
+
+struct Writer {
+    path: str
+}
+
+fn io_reader(path: str) -> Reader {
+    return Reader { path: path }
+}
+
+fn io_writer(path: str) -> Writer {
+    return Writer { path: path }
+}
+
+fn io_read_all(r: Reader) -> str {
+    return read_file(r.path)
+}
+
+fn io_write_all(w: Writer, content: str) -> i32 {
+    return write_file(w.path, content)
+}
+
+fn io_append_all(w: Writer, content: str) -> i32 {
+    return append_file(w.path, content)
+}
+
+fn io_exists_path(path: str) -> bool {
+    return exists(path)
+}
+
+fn io_remove_path(path: str) -> i32 {
+    return remove_file(path)
+}
+
+fn io_write_lines(path: str, lines: array) -> i32 {
+    return write_file(path, lines.join("\n"))
+}

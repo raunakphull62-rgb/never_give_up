@@ -1,0 +1,111 @@
+// collections — List, Stack, Queue, and map helpers.
+//
+// Value semantics throughout (pass-by-value): mutating operations
+// return the updated collection. Depends on `itertools` for sums
+// and extrema.
+//
+// Import: import "collections/lib.klang"
+import "itertools/lib.klang"
+
+struct List {
+    items: array
+}
+
+fn list_new(items: array) -> List {
+    return List { items: items }
+}
+
+fn list_empty() -> List {
+    return List { items: range(0, 0) }
+}
+
+fn list_len(l: List) -> i32 {
+    return len(l.items)
+}
+
+fn list_push(l: List, v: i32) -> List {
+    let items = l.items
+    push(items, v)
+    l.items = items
+    return l
+}
+
+fn list_get(l: List, i: i32) -> i32 {
+    return l.items[i]
+}
+
+fn list_sum(l: List) -> i32 {
+    return iter_sum(l.items)
+}
+
+fn list_max(l: List) -> i32 {
+    return iter_max(l.items)
+}
+
+struct Stack {
+    items: array
+}
+
+fn stack_new() -> Stack {
+    return Stack { items: range(0, 0) }
+}
+
+fn stack_push(s: Stack, v: i32) -> Stack {
+    let items = s.items
+    push(items, v)
+    s.items = items
+    return s
+}
+
+fn stack_pop(s: Stack) -> map {
+    let items = s.items
+    let v = pop(items)
+    return {"value": v, "items": items}
+}
+
+fn stack_len(s: Stack) -> i32 {
+    return len(s.items)
+}
+
+struct Queue {
+    items: array
+    head: i32
+}
+
+fn queue_new() -> Queue {
+    return Queue { items: range(0, 0), head: 0 }
+}
+
+fn queue_push(q: Queue, v: i32) -> Queue {
+    let items = q.items
+    push(items, v)
+    q.items = items
+    return q
+}
+
+fn queue_peek(q: Queue) -> i32 {
+    return q.items[q.head]
+}
+
+fn queue_pop(q: Queue) -> Queue {
+    q.head = q.head + 1
+    return q
+}
+
+fn queue_len(q: Queue) -> i32 {
+    return len(q.items) - q.head
+}
+
+fn map_put(m: map, k: str, v: i32) -> map {
+    let out = m
+    out[k] = v
+    return out
+}
+
+fn map_get_or(m: map, k: str, dflt: i32) -> i32 {
+    if m.contains(k) {
+        return m[k]
+    } else {
+        return dflt
+    }
+}

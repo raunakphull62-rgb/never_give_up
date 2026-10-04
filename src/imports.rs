@@ -192,17 +192,35 @@ fn load_from(
     }]);
     // Vendor context, computed once from the entry: a `klang.toml` found
     // by walking up from the entry file enables `pkg/file.klang`
-    // fallback imports for registry dependencies.
+    // fallback imports for registry dependencies (direct + transitive
+    // via klang.lock; local files always win downstream).
     let vendor: Option<VendorCtx> = {
         let start = std::path::Path::new(entry);
         crate::registry::find_project_root(start).and_then(|root| {
             let text = std::fs::read_to_string(root.join("klang.toml")).ok()?;
             let manifest = crate::package::Manifest::parse(&text).ok()?;
-            let deps: Vec<(String, String)> = manifest
+            let mut deps: Vec<(String, String)> = manifest
                 .deps
                 .into_iter()
-                .filter(|(_, v)| crate::registry::parse_registry_dep(v).is_some())
+                .chain(manifest.dev_deps)
+                .filter(|(k, v)| {
+                    crate::registry::parse_registry_dep(v).is_some()
+                        || crate::registry::parse_registry_req(v, k).is_some()
+                })
                 .collect();
+            // Transitive pins from the lock get synthetic entries so
+            // `resolve_vendor_import` can see them even without a
+            // direct manifest line.
+            if let Ok(lock_text) = std::fs::read_to_string(root.join("klang.lock")) {
+                for pin in crate::registry::parse_package_locks(&lock_text) {
+                    if !deps.iter().any(|(n, _)| n == &pin.name) {
+                        deps.push((
+                            pin.name.clone(),
+                            format!("registry:{}@{}", pin.name, pin.version),
+                        ));
+                    }
+                }
+            }
             if deps.is_empty() {
                 None
             } else {

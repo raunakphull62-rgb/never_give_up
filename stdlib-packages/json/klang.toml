@@ -1,0 +1,7 @@
+[project]
+name = "json"
+version = "1.0.0"
+description = "JSON encoders for ints, strings, bools, arrays, objects"
+authors = ["Klang Core"]
+
+[dependencies]

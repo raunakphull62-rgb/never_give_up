@@ -1,0 +1,43 @@
+// json — encoders for ints, strings, bools, arrays, objects.
+//
+// Import: import "json/lib.klang"
+
+fn json_quote(s: str) -> str {
+    return "\"" + s.replace("\"", "\\\"") + "\""
+}
+
+fn json_int(key: str, v: i32) -> str {
+    return json_quote(key) + ": " + str(v)
+}
+
+fn json_str(key: str, v: str) -> str {
+    return json_quote(key) + ": " + json_quote(v)
+}
+
+fn json_bool(key: str, v: bool) -> str {
+    if v {
+        return json_quote(key) + ": true"
+    } else {
+        return json_quote(key) + ": false"
+    }
+}
+
+fn json_obj1(f1: str) -> str {
+    return "{ " + f1 + " }"
+}
+
+fn json_obj2(f1: str, f2: str) -> str {
+    return "{ " + f1 + ", " + f2 + " }"
+}
+
+fn json_obj3(f1: str, f2: str, f3: str) -> str {
+    return "{ " + f1 + ", " + f2 + ", " + f3 + " }"
+}
+
+fn json_arr2(a: str, b: str) -> str {
+    return "[" + a + ", " + b + "]"
+}
+
+fn json_is_obj(s: str) -> bool {
+    return s.starts_with("{") && s.ends_with("}")
+}

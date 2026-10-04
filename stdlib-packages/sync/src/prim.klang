@@ -1,0 +1,63 @@
+// sync — Mutex and Channel types.
+//
+// Single-threaded flag/array logic (no runtime threads involved);
+// pair with `task_group`/`spawn` at the call site when needed.
+//
+// Import: import "sync/lib.klang"
+
+struct Mutex {
+    locked: bool
+    value: i32
+}
+
+fn mutex_new(v: i32) -> Mutex {
+    return Mutex { locked: false, value: v }
+}
+
+fn mutex_lock(m: Mutex) -> Mutex {
+    m.locked = true
+    return m
+}
+
+fn mutex_unlock(m: Mutex) -> Mutex {
+    m.locked = false
+    return m
+}
+
+fn mutex_is_locked(m: Mutex) -> bool {
+    return m.locked
+}
+
+fn mutex_get(m: Mutex) -> i32 {
+    return m.value
+}
+
+fn mutex_set(m: Mutex, v: i32) -> Mutex {
+    m.value = v
+    return m
+}
+
+struct Channel {
+    items: array
+}
+
+fn chan_new(seed: array) -> Channel {
+    return Channel { items: seed }
+}
+
+fn chan_send(c: Channel, v: i32) -> Channel {
+    let items = c.items
+    push(items, v)
+    c.items = items
+    return c
+}
+
+fn chan_len(c: Channel) -> i32 {
+    return len(c.items)
+}
+
+fn chan_recv(c: Channel) -> map {
+    let items = c.items
+    let v = pop(items)
+    return {"value": v, "items": items}
+}

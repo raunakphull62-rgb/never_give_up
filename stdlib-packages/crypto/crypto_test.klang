@@ -1,0 +1,16 @@
+// crypto_test.klang — package self-test. Run: klang run crypto_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(crypto_hash("") == 0)
+    assert(crypto_hash("abc") == 993)
+    assert(crypto_hash("abc") == crypto_hash("abc"))
+    assert(crypto_eq_const("sekret", "sekret") == true)
+    assert(crypto_eq_const("sekret", "sekreT") == false)
+    assert(crypto_eq_const("short", "longer") == false)
+    assert(crypto_pin4(7) == "0007")
+    assert(crypto_pin4(42) == "0042")
+    assert(crypto_pin4(1234) == "1234")
+    print("crypto: OK")
+    return 0
+}

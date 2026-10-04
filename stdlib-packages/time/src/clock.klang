@@ -1,0 +1,39 @@
+// time — Duration type and formatting helpers (pure, no syscalls).
+//
+// Import: import "time/lib.klang"
+
+struct Duration {
+    secs: i32
+}
+
+fn dur_new(secs: i32) -> Duration {
+    return Duration { secs: secs }
+}
+
+fn dur_from_mins(m: i32) -> Duration {
+    return Duration { secs: m * 60 }
+}
+
+fn dur_from_hours(h: i32) -> Duration {
+    return Duration { secs: h * 3600 }
+}
+
+fn dur_add(a: Duration, b: Duration) -> Duration {
+    return Duration { secs: a.secs + b.secs }
+}
+
+fn dur_secs(d: Duration) -> i32 {
+    return d.secs
+}
+
+fn dur_mins(d: Duration) -> i32 {
+    return d.secs / 60
+}
+
+fn dur_to_string(d: Duration) -> str {
+    return str(d.secs) + "s"
+}
+
+fn dur_is_zero(d: Duration) -> bool {
+    return d.secs == 0
+}

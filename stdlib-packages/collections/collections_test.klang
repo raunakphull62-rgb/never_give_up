@@ -1,0 +1,34 @@
+// collections_test.klang — package self-test. Run: klang run collections_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let l = list_empty()
+    l = list_push(l, 20)
+    l = list_push(l, 22)
+    assert(list_len(l) == 2)
+    assert(list_get(l, 0) == 20)
+    assert(list_sum(l) == 42)
+    assert(list_max(list_new([1, 9, 3])) == 9)
+    let s = stack_new()
+    s = stack_push(s, 1)
+    s = stack_push(s, 2)
+    assert(stack_len(s) == 2)
+    let top = stack_pop(s)
+    assert(top["value"] == 2)
+    s = stack_new()
+    s = stack_push(s, top["value"])
+    assert(stack_len(s) == 1)
+    let q = queue_new()
+    q = queue_push(q, 7)
+    q = queue_push(q, 8)
+    assert(queue_peek(q) == 7)
+    q = queue_pop(q)
+    assert(queue_peek(q) == 8)
+    assert(queue_len(q) == 1)
+    let m = {"a": 1}
+    m = map_put(m, "b", 2)
+    assert(map_get_or(m, "b", 0) == 2)
+    assert(map_get_or(m, "zzz", 9) == 9)
+    print("collections: OK")
+    return 0
+}

@@ -9,6 +9,32 @@
 /// v2 `klang.toml` keys (offline; no registry).
 pub mod manifest;
 
+/// Semantic version constraints (exact, `=`, `^`, `~`, `>`, `>=`,
+/// `<`, `<=`, `*`/`latest`, whitespace AND groups).
+pub mod version;
+
+/// Dependency resolution (SemVer + transitive closure + conflicts).
+pub mod resolver;
+
+/// Build configuration from `[build]` (parsed; inert in Phase 1 —
+/// the compiler does not read it yet).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildConfig {
+    /// e.g. `"release"` / `"debug"`.
+    pub target: String,
+    /// e.g. `3`.
+    pub optimization_level: u32,
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            target: "debug".to_string(),
+            optimization_level: 0,
+        }
+    }
+}
+
 /// Parsed `klang.toml` manifest (minimal v0.1 shape + local path deps).
 ///
 /// ```toml
@@ -18,13 +44,31 @@ pub mod manifest;
 /// [dependencies]
 /// mylib = "./mylib.klang"
 /// ```
+///
+/// Phase 1 extensions (all backcompat):
+/// - `[project]` is an alias for top-level `name`/`version`/`entry`
+///   (PRD shape) and also carries `description` + `authors`.
+/// - `[dev-dependencies]` parses into `dev_deps` (same value shapes).
+/// - `[build]` parses into [`BuildConfig`] (inert in Phase 1).
+/// - Dependency values may be exact pins (`registry:name@1.2.3`),
+///   SemVer constraints (`^1.2.0`, `~1.2.0`, `>=1.2.0`, `<2.0.0`,
+///   `*`, `latest`, bare `1.2.3`), or local paths.
+/// - [`Manifest::write_manifest`] serializes back deterministically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub name: String,
     pub version: String,
     pub entry: String,
-    /// (dep name, local path) pairs from `[dependencies]`.
+    /// Free-text description from `[project]`.
+    pub description: String,
+    /// Author list from `[project]` (`authors = ["Name"]`).
+    pub authors: Vec<String>,
+    /// `[build]` config (inert in Phase 1).
+    pub build: BuildConfig,
+    /// (dep name, raw value) pairs from `[dependencies]`.
     pub deps: Vec<(String, String)>,
+    /// (dep name, raw value) pairs from `[dev-dependencies]`.
+    pub dev_deps: Vec<(String, String)>,
 }
 
 impl Manifest {
@@ -32,11 +76,18 @@ impl Manifest {
     /// Strips inline `#` comments outside quotes so
     /// `entry = "main" # comment` parses as `main`, not `main" # comment`.
     /// Unknown keys are ignored (forward-compat); missing fields default.
+    /// `[project]` feeds `name`/`version`/`entry`/`description`/`authors`;
+    /// `[dev-dependencies]` feeds `dev_deps`; `[build]` feeds [`BuildConfig`].
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut name: Option<String> = None;
         let mut version: Option<String> = None;
         let mut entry: Option<String> = None;
+        let mut description: Option<String> = None;
+        let mut authors: Vec<String> = Vec::new();
+        let mut build = BuildConfig::default();
+        let mut build_seen = false;
         let mut deps: Vec<(String, String)> = Vec::new();
+        let mut dev_deps: Vec<(String, String)> = Vec::new();
         let mut section = String::new();
         for raw in text.lines() {
             let line = strip_inline_comment(raw).trim();
@@ -48,16 +99,44 @@ impl Manifest {
                 continue;
             }
             if let Some((k, v)) = line.split_once('=') {
-                let val = parse_toml_value(v.trim());
+                let key = k.trim();
+                let val_raw = v.trim();
+                let val = parse_toml_value(val_raw);
                 if section == "dependencies" {
-                    deps.push((k.trim().to_string(), val));
-                } else {
-                    match k.trim() {
+                    deps.push((key.to_string(), val));
+                } else if section == "dev-dependencies" {
+                    dev_deps.push((key.to_string(), val));
+                } else if section == "project" {
+                    match key {
                         "name" => name = Some(val),
                         "version" => version = Some(val),
                         "entry" => entry = Some(val),
+                        "description" => description = Some(val),
+                        "authors" => authors = parse_string_array(val_raw),
                         _ => {}
                     }
+                } else if section == "build" {
+                    build_seen = true;
+                    match key {
+                        "target" => build.target = val,
+                        "optimization-level" | "optimization_level" => {
+                            if let Ok(n) = val.parse::<u32>() {
+                                build.optimization_level = n;
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if section.is_empty() || section == "package" {
+                    match key {
+                        "name" => name = Some(val),
+                        "version" => version = Some(val),
+                        "entry" => entry = Some(val),
+                        "description" => description = Some(val),
+                        "authors" => authors = parse_string_array(val_raw),
+                        _ => {}
+                    }
+                } else {
+                    // Unknown sections ([repair], ...) ignored.
                 }
             }
         }
@@ -65,9 +144,165 @@ impl Manifest {
             name: name.unwrap_or_else(|| "app".to_string()),
             version: version.unwrap_or_else(|| "0.1.0".to_string()),
             entry: entry.unwrap_or_else(|| "combine".to_string()),
+            description: description.unwrap_or_default(),
+            authors,
+            build: if build_seen {
+                build
+            } else {
+                BuildConfig::default()
+            },
             deps,
+            dev_deps,
         })
     }
+
+    /// All registry-relevant deps (normal + dev).
+    pub fn all_deps(&self) -> Vec<(String, String)> {
+        let mut out = self.deps.clone();
+        out.extend(self.dev_deps.clone());
+        out
+    }
+
+    /// Serialize deterministically (PRD `write_manifest`). Sections in
+    /// fixed order; `[dev-dependencies]` and `[build]` are emitted only
+    /// when non-default so minimal manifests stay minimal. This is a
+    /// full rewrite (comments/formatting are not preserved) — used for
+    /// fresh files (`klang init`); `add`/`remove` keep line-splicing to
+    /// preserve user formatting.
+    pub fn write_manifest(&self) -> String {
+        let mut out = String::new();
+        out.push_str("[project]\n");
+        out.push_str(&format!("name = \"{}\"\n", escape_toml_str(&self.name)));
+        out.push_str(&format!("version = \"{}\"\n", escape_toml_str(&self.version)));
+        out.push_str(&format!("entry = \"{}\"\n", escape_toml_str(&self.entry)));
+        if !self.description.is_empty() {
+            out.push_str(&format!(
+                "description = \"{}\"\n",
+                escape_toml_str(&self.description)
+            ));
+        }
+        if !self.authors.is_empty() {
+            let quoted: Vec<String> = self
+                .authors
+                .iter()
+                .map(|a| format!("\"{}\"", escape_toml_str(a)))
+                .collect();
+            out.push_str(&format!("authors = [{}]\n", quoted.join(", ")));
+        }
+        out.push('\n');
+        out.push_str("[dependencies]\n");
+        for (k, v) in &self.deps {
+            out.push_str(&format!("{} = \"{}\"\n", k, escape_toml_str(v)));
+        }
+        if !self.dev_deps.is_empty() {
+            out.push('\n');
+            out.push_str("[dev-dependencies]\n");
+            for (k, v) in &self.dev_deps {
+                out.push_str(&format!("{} = \"{}\"\n", k, escape_toml_str(v)));
+            }
+        }
+        if self.build != BuildConfig::default() {
+            out.push('\n');
+            out.push_str("[build]\n");
+            out.push_str(&format!("target = \"{}\"\n", escape_toml_str(&self.build.target)));
+            out.push_str(&format!("optimization-level = {}\n", self.build.optimization_level));
+        }
+        out
+    }
+}
+
+/// Escape a TOML basic string (quotes + backslashes).
+fn escape_toml_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Parse `["a", "b"]` (also accepts single-quoted items and bare
+/// words). Anything else yields an empty vec (never an error —
+/// manifest parsing stays total).
+fn parse_string_array(raw: &str) -> Vec<String> {
+    let t = raw.trim();
+    let inner = match t.strip_prefix('[') {
+        Some(rest) => match rest.rfind(']') {
+            Some(end) => &rest[..end],
+            None => return Vec::new(),
+        },
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                cur.push(c);
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    quote = Some(c);
+                    cur.push(c);
+                } else if c == ',' {
+                    let item = unescape_basic(&cur);
+                    if !item.trim().is_empty() {
+                        out.push(item.trim().to_string());
+                    }
+                    cur.clear();
+                } else {
+                    cur.push(c);
+                }
+            }
+        }
+    }
+    let item = unescape_basic(&cur);
+    if !item.trim().is_empty() {
+        out.push(item.trim().to_string());
+    }
+    out
+}
+
+/// Undo the escapes [`escape_toml_str`] produces (best-effort).
+fn unescape_basic(s: &str) -> String {
+    let t = s.trim();
+    let inner = if t.len() >= 2
+        && ((t.starts_with('"') && t.ends_with('"'))
+            || (t.starts_with('\'') && t.ends_with('\'')))
+    {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Strip an inline `#` comment, respecting single/double quotes.

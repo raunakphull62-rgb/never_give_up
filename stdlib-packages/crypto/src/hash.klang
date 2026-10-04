@@ -1,0 +1,48 @@
+// crypto — demo checksum + comparison helpers.
+//
+// NOTE: `crypto_hash` is a pedagogical FNV-style checksum over
+// characters, NOT a cryptographic hash. Real SHA-256 verification of
+// package archives happens in the registry client (Rust `sha2`).
+//
+// Import: import "crypto/lib.klang"
+
+fn crypto_hash(s: str) -> i32 {
+    let h = 0
+    let cs = s.chars()
+    for c in cs {
+        h = (h * 31 + len(c)) % 1000003
+    }
+    return h
+}
+
+fn crypto_eq_const(a: str, b: str) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    let ca = a.chars()
+    let cb = b.chars()
+    let diff = 0
+    for i in 0..len(ca) {
+        if ca[i] != cb[i] {
+            diff = diff + 1
+        }
+    }
+    return diff == 0
+}
+
+fn crypto_pin4(n: i32) -> str {
+    let s = str(n % 10000)
+    if len(s) == 1 {
+        return "000" + s
+    } else {
+        if len(s) == 2 {
+            return "00" + s
+        } else {
+            if len(s) == 3 {
+                return "0" + s
+            } else {
+                return s
+            }
+        }
+    }
+}

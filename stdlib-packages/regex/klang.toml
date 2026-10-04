@@ -1,0 +1,8 @@
+[project]
+name = "regex"
+version = "1.0.0"
+description = "Pattern matching over the regex builtins"
+authors = ["Klang Core"]
+
+[dependencies]
+string = "registry:string@^1.0.0"

@@ -1,0 +1,16 @@
+// logging_test.klang — package self-test. Run: klang run logging_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let l = log_new("app", 1)
+    assert(log_level_name(0) == "DEBUG")
+    assert(log_level_name(3) == "ERROR")
+    assert(log_should(l, 0) == false)
+    assert(log_should(l, 2) == true)
+    assert(log_format(l, 2, "disk full") == "[WARN] app: disk full")
+    assert(log_record(l, 0, "hidden") == 0)
+    assert(log_record(l, 1, "shown") == 0)
+    assert(log_timed(l, 1, "done", dur_new(5)) == 0)
+    print("logging: OK")
+    return 0
+}

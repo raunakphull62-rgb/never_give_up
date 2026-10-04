@@ -1,0 +1,14 @@
+// sql_test.klang — package self-test. Run: klang run sql_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(sql_select("users", "*") == "SELECT * FROM users")
+    assert(sql_where("SELECT * FROM users", "age > 18") == "SELECT * FROM users WHERE age > 18")
+    assert(sql_limit("SELECT * FROM users", 10) == "SELECT * FROM users LIMIT 10")
+    assert(sql_insert("users", "name", "'amy'") == "INSERT INTO users (name) VALUES ('amy')")
+    assert(sql_quote("o'brien") == "'o''brien'")
+    assert(sql_eq_int("age", 42) == "age = 42")
+    assert(sql_and("a = 1", "b = 2") == "(a = 1) AND (b = 2)")
+    print("sql: OK")
+    return 0
+}

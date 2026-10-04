@@ -1,0 +1,17 @@
+// string_test.klang — package self-test. Run: klang run string_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let b = str_builder_new()
+    b = str_builder_push(b, "hello")
+    b = str_builder_push(b, " world")
+    assert(str_builder_build(b) == "hello world")
+    assert(str_is_empty("") == true)
+    assert(str_is_empty("x") == false)
+    assert(str_repeat("ab", 3) == "ababab")
+    assert(str_line_count("a\nb\nc") == 3)
+    assert(str_contains_all("hello world", "hello", "world") == true)
+    assert(str_shout("hey") == "HEY!")
+    print("string: OK")
+    return 0
+}

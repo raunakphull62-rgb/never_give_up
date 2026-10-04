@@ -1,0 +1,52 @@
+// string — StringBuilder and string utilities.
+//
+// Import: import "string/lib.klang"
+
+struct StringBuilder {
+    parts: array
+}
+
+fn str_builder_new() -> StringBuilder {
+    return StringBuilder { parts: range(0, 0) }
+}
+
+fn str_builder_push(b: StringBuilder, s: str) -> StringBuilder {
+    let parts = b.parts
+    push(parts, s)
+    b.parts = parts
+    return b
+}
+
+fn str_builder_build(b: StringBuilder) -> str {
+    return b.parts.join("")
+}
+
+fn str_is_empty(s: str) -> bool {
+    return len(s) == 0
+}
+
+fn str_repeat(s: str, n: i32) -> str {
+    let out = ""
+    let i = 0
+    while i < n {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+fn str_lines(s: str) -> array {
+    return s.split("\n")
+}
+
+fn str_line_count(s: str) -> i32 {
+    return len(s.split("\n"))
+}
+
+fn str_contains_all(s: str, a: str, b: str) -> bool {
+    return s.contains(a) && s.contains(b)
+}
+
+fn str_shout(s: str) -> str {
+    return s.upper() + "!"
+}

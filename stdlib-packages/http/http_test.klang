@@ -1,0 +1,15 @@
+// http_test.klang — package self-test. Run: klang run http_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let q = http_get_req("https://example.com")
+    assert(http_req_to_string(q) == "GET https://example.com")
+    let p = http_post_req("https://example.com", "a=1")
+    assert(p.method == "POST")
+    assert(http_status_ok(http_resp(200, "ok")) == true)
+    assert(http_status_ok(http_resp(404, "no")) == false)
+    assert(http_save_resp(http_resp(200, "ok"), "/tmp/klang_http_test.txt") == 6)
+    io_remove_path("/tmp/klang_http_test.txt")
+    print("http: OK")
+    return 0
+}

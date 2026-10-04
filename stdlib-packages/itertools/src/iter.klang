@@ -1,0 +1,66 @@
+// itertools — iterator utilities over arrays.
+//
+// Import: import "itertools/lib.klang"
+// All functions take plain arrays and never mutate the caller's copy.
+
+fn iter_sum(nums: array) -> i32 {
+    let total = 0
+    for x in nums {
+        total = total + x
+    }
+    return total
+}
+
+fn iter_count(nums: array) -> i32 {
+    return len(nums)
+}
+
+fn iter_max(nums: array) -> i32 {
+    let best = 0
+    let first = 1
+    for x in nums {
+        if first == 1 {
+            best = x
+            first = 0
+        } else {
+            if x > best {
+                best = x
+            }
+        }
+    }
+    return best
+}
+
+fn iter_min(nums: array) -> i32 {
+    let best = 0
+    let first = 1
+    for x in nums {
+        if first == 1 {
+            best = x
+            first = 0
+        } else {
+            if x < best {
+                best = x
+            }
+        }
+    }
+    return best
+}
+
+fn iter_filter_pos(nums: array) -> array {
+    let seed = range(0, 0)
+    for x in nums {
+        if x > 0 {
+            push(seed, x)
+        }
+    }
+    return seed
+}
+
+fn iter_add_all(nums: array, k: i32) -> array {
+    let out = range(0, 0)
+    for x in nums {
+        push(out, x + k)
+    }
+    return out
+}

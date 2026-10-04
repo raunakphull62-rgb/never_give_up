@@ -1,0 +1,54 @@
+// logging — leveled logger over `io` and `time`.
+//
+// Levels: 0 DEBUG, 1 INFO, 2 WARN, 3 ERROR. A Logger prints records
+// at or above its level. Depends on `io` + `time`.
+//
+// Import: import "logging/lib.klang"
+import "io/lib.klang"
+import "time/lib.klang"
+
+struct Logger {
+    name: str
+    level: i32
+}
+
+fn log_new(name: str, level: i32) -> Logger {
+    return Logger { name: name, level: level }
+}
+
+fn log_level_name(level: i32) -> str {
+    if level == 0 {
+        return "DEBUG"
+    } else {
+        if level == 1 {
+            return "INFO"
+        } else {
+            if level == 2 {
+                return "WARN"
+            } else {
+                return "ERROR"
+            }
+        }
+    }
+}
+
+fn log_should(l: Logger, level: i32) -> bool {
+    return level >= l.level
+}
+
+fn log_format(l: Logger, level: i32, msg: str) -> str {
+    return "[" + log_level_name(level) + "] " + l.name + ": " + msg
+}
+
+fn log_record(l: Logger, level: i32, msg: str) -> i32 {
+    if log_should(l, level) {
+        print(log_format(l, level, msg))
+        return 0
+    } else {
+        return 0
+    }
+}
+
+fn log_timed(l: Logger, level: i32, msg: str, d: Duration) -> i32 {
+    return log_record(l, level, msg + " (" + dur_to_string(d) + ")")
+}

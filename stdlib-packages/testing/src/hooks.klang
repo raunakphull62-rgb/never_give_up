@@ -1,0 +1,46 @@
+// testing — assert helpers and tiny test-framework hooks.
+//
+// Import: import "testing/lib.klang"
+
+fn test_check(cond: bool, name: str) -> i32 {
+    if cond {
+        print("PASS " + name)
+        return 0
+    } else {
+        print("FAIL " + name)
+        assert(false)
+        return 1
+    }
+}
+
+fn test_eq_int(a: i32, b: i32, name: str) -> i32 {
+    if a == b {
+        print("PASS " + name)
+        return 0
+    } else {
+        print("FAIL " + name + ": got " + str(a) + ", want " + str(b))
+        assert(false)
+        return 1
+    }
+}
+
+fn test_eq_str(a: str, b: str, name: str) -> i32 {
+    if a == b {
+        print("PASS " + name)
+        return 0
+    } else {
+        print("FAIL " + name + ": got " + a + ", want " + b)
+        assert(false)
+        return 1
+    }
+}
+
+fn test_summary(failures: i32) -> i32 {
+    if failures == 0 {
+        print("ALL TESTS PASSED")
+        return 0
+    } else {
+        print("FAILURES: " + str(failures))
+        return failures
+    }
+}

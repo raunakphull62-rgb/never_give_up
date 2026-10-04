@@ -1,3 +1,5 @@
 target/
 *.rs.bk
 Cargo.lock.bak
+target/
+.klang_pkgs/

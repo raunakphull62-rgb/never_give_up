@@ -1,0 +1,7 @@
+[project]
+name = "math"
+version = "1.0.0"
+description = "Math constants and integer/float functions"
+authors = ["Klang Core"]
+
+[dependencies]
