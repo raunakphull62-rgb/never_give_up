@@ -183,16 +183,22 @@ fn pm_lock_from_resolution() {
         ],
     };
     let hashes: HashMap<(String, String), String> = [
-        (("a".to_string(), "2.0.0".to_string()), "h1".to_string()),
-        (("b".to_string(), "1.0.0".to_string()), "h2".to_string()),
+        (
+            ("a".to_string(), "2.0.0".to_string()),
+            "a".repeat(64),
+        ),
+        (
+            ("b".to_string(), "1.0.0".to_string()),
+            "b".repeat(64),
+        ),
     ]
     .into_iter()
     .collect();
-    let lock = LockFile::from_resolution(&graph, &hashes);
+    let lock = LockFile::from_resolution(&graph, &hashes).expect("valid hashes");
     // Sorted by name regardless of input order.
     assert_eq!(lock.packages[0].name, "a");
     assert_eq!(lock.packages[1].name, "b");
-    assert_eq!(lock.packages[0].checksum, "h1");
+    assert_eq!(lock.packages[0].checksum, "a".repeat(64));
 }
 
 // ---------------------------------------------------------------------------
@@ -261,8 +267,8 @@ fn pm_resolver_struct_end_to_end() {
     let order: Vec<&str> = g.install_order.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(order, vec!["itertools", "collections", "http"]);
     r.detect_conflicts(&g).expect("clean");
-    // Wrapper topo matches the graph order.
-    assert_eq!(r.topological_sort(&g.packages), g.install_order);
+    // Wrapper topo matches the graph order (B3: returns Result now).
+    assert_eq!(r.topological_sort(&g.packages).expect("sorts"), g.install_order);
 }
 
 #[test]
@@ -377,6 +383,7 @@ fn pm_stdlib_layout() {
     let pkgs = [
         "collections", "io", "string", "math", "time", "json", "http", "crypto", "sql",
         "regex", "compress", "net", "sync", "logging", "testing", "itertools",
+        "fs", "path", "os", "random", "csv", "text",
     ];
     let mut seen = HashSet::new();
     for name in pkgs {
@@ -397,5 +404,5 @@ fn pm_stdlib_layout() {
         assert!(dir.join("README.md").is_file(), "{name}: README");
         assert!(seen.insert(name), "unique");
     }
-    assert_eq!(seen.len(), 16);
+    assert_eq!(seen.len(), 22);
 }
