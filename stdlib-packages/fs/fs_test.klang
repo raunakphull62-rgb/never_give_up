@@ -1,0 +1,39 @@
+// fs_test.klang — package self-test. Run: klang run fs_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let base = "/tmp/klang_fs_test"
+    if fs_exists(base + ".txt") {
+        fs_remove(base + ".txt")
+    }
+    assert(fs_write(base + ".txt", "hello") == 5)
+    assert(fs_append(base + ".txt", " klang") == 6)
+    assert(fs_read(base + ".txt") == "hello klang")
+    assert(fs_exists(base + ".txt") == true)
+    assert(fs_exists(base + "_missing.txt") == false)
+    assert(fs_read_or(base + "_missing.txt", "dflt") == "dflt")
+    assert(fs_read_or(base + ".txt", "dflt") == "hello klang")
+    assert(fs_write_lines(base + "_lines.txt", ["a", "b", "c"]) == 5)
+    let lines = fs_read_lines(base + "_lines.txt")
+    assert(len(lines) == 3)
+    assert(lines[0] == "a")
+    assert(lines[2] == "c")
+    assert(fs_write(base + "_crlf.txt", "x\r\ny\r\n") == 6)
+    let crlf = fs_read_lines(base + "_crlf.txt")
+    assert(len(crlf) == 2)
+    assert(crlf[0] == "x")
+    assert(crlf[1] == "y")
+    assert(fs_copy_file(base + ".txt", base + "_copy.txt") == 11)
+    assert(fs_read(base + "_copy.txt") == "hello klang")
+    assert(fs_touch(base + "_new.txt") == 1)
+    assert(fs_touch(base + "_new.txt") == 0)
+    assert(fs_read(base + "_new.txt") == "")
+    assert(len(fs_read_lines(base + "_new.txt")) == 0)
+    fs_remove(base + ".txt")
+    fs_remove(base + "_lines.txt")
+    fs_remove(base + "_crlf.txt")
+    fs_remove(base + "_copy.txt")
+    fs_remove(base + "_new.txt")
+    print("fs: OK")
+    return 0
+}

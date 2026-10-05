@@ -1,0 +1,7 @@
+[project]
+name = "fs"
+version = "1.0.0"
+description = "File helpers over the file builtins"
+authors = ["Klang Core"]
+
+[dependencies]

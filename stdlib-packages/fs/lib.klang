@@ -1,0 +1,2 @@
+// fs/lib.klang — package entry point (re-exports src modules).
+import "src/files.klang"

@@ -1,0 +1,182 @@
+// path — pure path manipulation with "/" separator.
+//
+// Import: import "path/lib.klang"
+//
+// Pure string code (no builtins besides str/array/map methods), so no
+// function here can fail. Empty inputs follow the documented edge rules
+// below rather than raising.
+
+fn path_is_absolute(p: str) -> bool {
+    return p.starts_with("/")
+}
+
+fn path_strip_trailing_slash(p: str) -> str {
+    let out = p
+    while len(out) > 1 {
+        if out.ends_with("/") {
+            let cs = out.chars()
+            pop(cs)
+            out = cs.join("")
+        } else {
+            break
+        }
+    }
+    return out
+}
+
+fn path_join(a: str, b: str) -> str {
+    if b.starts_with("/") {
+        return b
+    }
+    if a == "" {
+        return b
+    }
+    if b == "" {
+        return a
+    }
+    let left = path_strip_trailing_slash(a)
+    let right = b
+    while right.starts_with("/") {
+        let cs = right.chars()
+        let rest = range(0, 0)
+        let i = 1
+        while i < len(cs) {
+            push(rest, cs[i])
+            i = i + 1
+        }
+        right = rest.join("")
+    }
+    if left == "/" {
+        return left + right
+    }
+    return left + "/" + right
+}
+
+fn path_basename(p: str) -> str {
+    let s = path_strip_trailing_slash(p)
+    if s == "/" {
+        return "/"
+    }
+    if s == "" {
+        return ""
+    }
+    let parts = s.split("/")
+    return parts[len(parts) - 1]
+}
+
+fn path_dirname(p: str) -> str {
+    let s = path_strip_trailing_slash(p)
+    if s == "" {
+        return "."
+    }
+    let parts = s.split("/")
+    if len(parts) <= 1 {
+        return "."
+    }
+    let out = range(0, 0)
+    let i = 0
+    while i < len(parts) - 1 {
+        push(out, parts[i])
+        i = i + 1
+    }
+    let dir = out.join("/")
+    if dir == "" {
+        if s.starts_with("/") {
+            return "/"
+        } else {
+            return "."
+        }
+    }
+    return dir
+}
+
+fn path_extension(p: str) -> str {
+    let base = path_basename(p)
+    let cs = base.chars()
+    let dot = -1
+    let i = 1
+    while i < len(cs) {
+        if cs[i] == "." {
+            dot = i
+        }
+        i = i + 1
+    }
+    if dot == -1 {
+        return ""
+    }
+    let out = ""
+    let j = dot + 1
+    while j < len(cs) {
+        out = out + cs[j]
+        j = j + 1
+    }
+    return out
+}
+
+fn path_stem(p: str) -> str {
+    let base = path_basename(p)
+    let cs = base.chars()
+    let dot = -1
+    let i = 1
+    while i < len(cs) {
+        if cs[i] == "." {
+            dot = i
+        }
+        i = i + 1
+    }
+    if dot == -1 {
+        return base
+    }
+    let out = ""
+    let j = 0
+    while j < dot {
+        out = out + cs[j]
+        j = j + 1
+    }
+    return out
+}
+
+fn path_normalize(p: str) -> str {
+    let absolute = p.starts_with("/")
+    let parts = p.split("/")
+    let kept = range(0, 0)
+    for part in parts {
+        if part == "" {
+            continue
+        }
+        if part == "." {
+            continue
+        }
+        if part == ".." {
+            if len(kept) > 0 {
+                if kept[len(kept) - 1] != ".." {
+                    pop(kept)
+                    continue
+                }
+            }
+            if absolute {
+                continue
+            }
+            push(kept, "..")
+            continue
+        }
+        push(kept, part)
+    }
+    if len(kept) == 0 {
+        if absolute {
+            return "/"
+        } else {
+            return "."
+        }
+    }
+    let joined = kept.join("/")
+    if absolute {
+        return "/" + joined
+    } else {
+        return joined
+    }
+}
+
+fn path_split(p: str) -> map {
+    return {"dir": path_dirname(p), "base": path_basename(p)}
+}

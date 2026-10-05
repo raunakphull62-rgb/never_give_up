@@ -1,0 +1,84 @@
+// http — live transfer wrappers + pure request helpers.
+//
+// Wraps the http_get/http_post builtins (real client, see BUILTINS.md).
+// Transport failures raise E-NET-*; HTTP error statuses are normal
+// results in the response map.
+//
+// Import: import "http/lib.klang"
+import "io/lib.klang"
+
+fn http_fetch(url: str) -> map {
+    return http_get(url)
+}
+
+fn http_fetch_body(url: str) -> str {
+    let r = http_get(url)
+    return r["body"]
+}
+
+fn http_fetch_async(url: str) -> map async {
+    return http_get_async(url)
+}
+
+fn http_post_text(url: str, body: str, headers: array) -> map {
+    return http_post(url, body, headers)
+}
+
+fn http_post_async_text(url: str, body: str, headers: array) -> map async {
+    return http_post_async(url, body, headers)
+}
+
+fn http_ok(resp: map) -> bool {
+    return resp["status"] == 200
+}
+
+fn http_body(resp: map) -> str {
+    return resp["body"]
+}
+
+fn http_status(resp: map) -> i32 {
+    return resp["status"]
+}
+
+fn http_header(name: str, value: str) -> str {
+    return name + ": " + value
+}
+
+fn http_headers(m: map) -> array {
+    let out = range(0, 0)
+    for k in keys(m) {
+        push(out, k + ": " + m[k])
+    }
+    return out
+}
+
+fn http_query_string(params: map) -> str {
+    let out = ""
+    let first = 1
+    for k in keys(params) {
+        if first == 1 {
+            first = 0
+        } else {
+            out = out + "&"
+        }
+        out = out + k + "=" + params[k]
+    }
+    return out
+}
+
+fn http_form_body(fields: map) -> str {
+    return http_query_string(fields)
+}
+
+fn http_post_form(url: str, fields: map) -> map {
+    return http_post(url, http_form_body(fields), ["Content-Type: application/x-www-form-urlencoded"])
+}
+
+fn http_post_json(url: str, body: str) -> map {
+    return http_post(url, body, ["Content-Type: application/json"])
+}
+
+fn http_save_body(resp: map, path: str) -> i32 {
+    let w = io_writer(path)
+    return io_write_all(w, resp["body"])
+}

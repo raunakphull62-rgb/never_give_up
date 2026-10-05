@@ -1,4 +1,8 @@
-// http_test.klang — package self-test. Run: klang run http_test.klang
+// http_test.klang — package self-test (offline only). Run: klang run http_test.klang
+//
+// Live-request coverage lives in tests/http_pkg_gates.rs (loopback
+// server on 127.0.0.1) and scripts/live-tests.sh (real internet,
+// KLANG_LIVE_TESTS=1). This file must stay offline + deterministic.
 import "lib.klang"
 
 fn main() -> i32 {
@@ -10,6 +14,15 @@ fn main() -> i32 {
     assert(http_status_ok(http_resp(404, "no")) == false)
     assert(http_save_resp(http_resp(200, "ok"), "/tmp/klang_http_test.txt") == 6)
     io_remove_path("/tmp/klang_http_test.txt")
+    assert(http_header("X-Token", "abc") == "X-Token: abc")
+    let hs = http_headers({"Accept": "text/plain"})
+    assert(len(hs) == 1)
+    assert(hs[0] == "Accept: text/plain")
+    assert(http_query_string({"a": "1", "b": "2"}) == "a=1&b=2")
+    assert(http_query_string({}) == "")
+    assert(http_form_body({"x": "1"}) == "x=1")
+    assert(http_save_body({"body": "hi"}, "/tmp/klang_http_body.txt") == 2)
+    io_remove_path("/tmp/klang_http_body.txt")
     print("http: OK")
     return 0
 }

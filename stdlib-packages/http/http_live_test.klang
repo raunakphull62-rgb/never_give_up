@@ -1,0 +1,14 @@
+// http_live_test.klang — OPTIONAL live-internet check. NOT run by cargo test.
+//
+// Run only via: KLANG_LIVE_TESTS=1 sh scripts/live-tests.sh
+// Uses https://example.com (stable, plain GET). Do not add tokens here.
+import "lib.klang"
+
+fn main() -> i32 {
+    let body = http_fetch_body("https://example.com")
+    assert(body.contains("Example Domain") == true)
+    let r = http_fetch("https://example.com")
+    assert(http_ok(r) == true)
+    print("http-live: OK")
+    return 0
+}

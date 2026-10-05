@@ -1,0 +1,7 @@
+[project]
+name = "path"
+version = "1.0.0"
+description = "Pure path manipulation with / separator"
+authors = ["Klang Core"]
+
+[dependencies]

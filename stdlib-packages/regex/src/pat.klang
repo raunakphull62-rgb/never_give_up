@@ -9,6 +9,38 @@ fn rx_match(pat: str, text: str) -> bool {
     return regex_is_match(pat, text)
 }
 
+fn regex_matches(pat: str, text: str) -> bool {
+    return regex_is_match(pat, text)
+}
+
+fn regex_first(pat: str, text: str) -> str {
+    let m = regex_find(pat, text)
+    if m["matched"] == 1 {
+        return m["match"]
+    } else {
+        return ""
+    }
+}
+
+fn regex_find_or(pat: str, text: str, dflt: str) -> str {
+    let m = regex_find(pat, text)
+    if m["matched"] == 1 {
+        return m["match"]
+    } else {
+        return dflt
+    }
+}
+
+fn regex_groups(pat: str, text: str) -> array {
+    let m = regex_find(pat, text)
+    return m["groups"]
+}
+
+fn regex_named_map(pat: str, text: str) -> map {
+    let m = regex_find(pat, text)
+    return m["named"]
+}
+
 fn rx_find_or_empty(pat: str, text: str) -> str {
     let m = regex_find(pat, text)
     if m["matched"] == 1 {

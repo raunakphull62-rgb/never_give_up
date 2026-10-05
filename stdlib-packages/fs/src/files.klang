@@ -1,0 +1,77 @@
+// fs — file helpers over the file builtins.
+//
+// Import: import "fs/lib.klang"
+//
+// Failure convention: every function lets the underlying builtin
+// diagnostic propagate (E-IO-NOT-FOUND, E-IO-PERMISSION, E-IO-FAILED),
+// except fs_read_or which returns its default on any failure. Check
+// existence first with fs_exists when a missing file is expected.
+
+fn fs_read(path: str) -> str {
+    return read_file(path)
+}
+
+fn fs_write(path: str, content: str) -> i32 {
+    return write_file(path, content)
+}
+
+fn fs_append(path: str, content: str) -> i32 {
+    return append_file(path, content)
+}
+
+fn fs_exists(path: str) -> bool {
+    return exists(path)
+}
+
+fn fs_remove(path: str) -> i32 {
+    return remove_file(path)
+}
+
+fn fs_read_lines(path: str) -> array {
+    let content = read_file(path)
+    if len(content) == 0 {
+        return range(0, 0)
+    }
+    let lines = content.split("\n")
+    if len(lines) > 0 {
+        if lines[len(lines) - 1] == "" {
+            pop(lines)
+        }
+    }
+    let out = range(0, 0)
+    for line in lines {
+        if line.ends_with("\r") {
+            push(out, line.replace("\r", ""))
+        } else {
+            push(out, line)
+        }
+    }
+    return out
+}
+
+fn fs_write_lines(path: str, lines: array) -> i32 {
+    return write_file(path, lines.join("\n"))
+}
+
+fn fs_copy_file(src: str, dst: str) -> i32 {
+    return write_file(dst, read_file(src))
+}
+
+fn fs_touch(path: str) -> i32 {
+    if exists(path) {
+        return 0
+    } else {
+        write_file(path, "")
+        return 1
+    }
+}
+
+fn fs_read_or(path: str, dflt: str) -> str {
+    let out = dflt
+    try {
+        out = read_file(path)
+    } catch e {
+        out = dflt
+    }
+    return out
+}
