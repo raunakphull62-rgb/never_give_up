@@ -1,0 +1,161 @@
+// csv — pure CSV parsing and writing.
+//
+// Import: import "csv/lib.klang"
+//
+// Pure string code; nothing here touches IO. The delimiter must be a
+// single-character string (programmer error otherwise — asserts).
+// Unterminated quotes consume to end of input (documented, no abort).
+
+fn csv_check_delim(delim: str) -> i32 {
+    assert(len(delim) == 1)
+    return 1
+}
+
+fn csv_parse(text: str, delim: str) -> array {
+    csv_check_delim(delim)
+    let rows = range(0, 0)
+    if len(text) == 0 {
+        return rows
+    }
+    let cs = text.chars()
+    let row = range(0, 0)
+    let field = ""
+    let in_q = 0
+    let i = 0
+    while i < len(cs) {
+        let c = cs[i]
+        if in_q == 1 {
+            if c == "\"" {
+                if i + 1 < len(cs) {
+                    if cs[i + 1] == "\"" {
+                        field = field + "\""
+                        i = i + 1
+                    } else {
+                        in_q = 0
+                    }
+                } else {
+                    in_q = 0
+                }
+            } else {
+                field = field + c
+            }
+        } else {
+            if c == "\"" {
+                in_q = 1
+            } else {
+                if c == delim {
+                    push(row, field)
+                    field = ""
+                } else {
+                    if c == "\n" {
+                        push(row, field)
+                        field = ""
+                        push(rows, row)
+                        row = range(0, 0)
+                    } else {
+                        if c == "\r" {
+                            field = field + ""
+                        } else {
+                            field = field + c
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    push(row, field)
+    push(rows, row)
+    if in_q == 0 {
+        if len(text) > 0 {
+            let tail = cs[len(cs) - 1]
+            if tail == "\n" {
+                pop(rows)
+            }
+        }
+    }
+    return rows
+}
+
+fn csv_parse_comma(text: str) -> array {
+    return csv_parse(text, ",")
+}
+
+fn csv_escape_field(f: str, delim: str) -> str {
+    csv_check_delim(delim)
+    let q = 0
+    if f.contains(delim) {
+        q = 1
+    }
+    if f.contains("\"") {
+        q = 1
+    }
+    if f.contains("\n") {
+        q = 1
+    }
+    if f.contains("\r") {
+        q = 1
+    }
+    if q == 1 {
+        return "\"" + f.replace("\"", "\"\"") + "\""
+    } else {
+        return f
+    }
+}
+
+fn csv_write_row(row: array, delim: str) -> str {
+    let out = ""
+    let first = 1
+    for f in row {
+        if first == 1 {
+            first = 0
+        } else {
+            out = out + delim
+        }
+        out = out + csv_escape_field(f, delim)
+    }
+    return out
+}
+
+fn csv_write(rows: array, delim: str) -> str {
+    csv_check_delim(delim)
+    let out = ""
+    let first = 1
+    for row in rows {
+        if first == 1 {
+            first = 0
+        } else {
+            out = out + "\n"
+        }
+        out = out + csv_write_row(row, delim)
+    }
+    return out
+}
+
+fn csv_write_comma(rows: array) -> str {
+    return csv_write(rows, ",")
+}
+
+fn csv_header_map(rows: array) -> array {
+    let out = range(0, 0)
+    if len(rows) == 0 {
+        return out
+    }
+    let heads = rows[0]
+    let r = 1
+    while r < len(rows) {
+        let m = {}
+        let c = 0
+        while c < len(heads) {
+            if c < len(rows[r]) {
+                m[heads[c]] = rows[r][c]
+            } else {
+                m[heads[c]] = ""
+            }
+            c = c + 1
+        }
+        push(out, m)
+        r = r + 1
+    }
+    return out
+}

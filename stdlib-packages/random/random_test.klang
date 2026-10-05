@@ -1,0 +1,31 @@
+// random_test.klang — package self-test. Run: klang run random_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let a = rand_new(0)
+    let r1 = rand_next(a)
+    assert(r1["value"] == 16807)
+    let r2 = rand_next({"state": r1["state"]})
+    assert(r2["value"] == 282475249)
+    let b1 = rand_new(42)
+    let b2 = rand_new(42)
+    let x1 = rand_next(b1)
+    let x2 = rand_next(b2)
+    assert(x1["value"] == x2["value"])
+    assert(x1["state"] == x2["state"])
+    let ri = rand_int(rand_new(7), 1, 6)
+    assert(ri["value"] >= 1 && ri["value"] <= 6)
+    let rf = rand_float(rand_new(7))
+    assert(rf["value"] >= 0.0 && rf["value"] < 1.0)
+    let c = rand_choice(["a", "b", "c"], rand_new(9))
+    assert(c["value"] == "a" || c["value"] == "b" || c["value"] == "c")
+    let s1 = rand_shuffle([1, 2, 3, 4, 5], rand_new(11))
+    let s2 = rand_shuffle([1, 2, 3, 4, 5], rand_new(11))
+    assert(s1["list"].join(",") == s2["list"].join(","))
+    assert(len(s1["list"]) == 5)
+    assert(s1["list"].contains(3) == true)
+    let t = rand_seed_from_time()
+    assert(t["state"] > 0)
+    print("random: OK")
+    return 0
+}

@@ -1,0 +1,7 @@
+[project]
+name = "os"
+version = "1.0.0"
+description = "Environment and process helpers over env and run_process"
+authors = ["Klang Core"]
+
+[dependencies]

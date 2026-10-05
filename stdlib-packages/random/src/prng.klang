@@ -1,0 +1,91 @@
+// random — deterministic PRNG with explicit state.
+//
+// Import: import "random/lib.klang"
+//
+// Park-Miller minimal standard (a=16807, m=2^31-1) via Schrage's
+// method, so every intermediate fits i32 (Klang integers never wrap;
+// out-of-range results are E-OVERFLOW). Klang has no bitwise operators,
+// so this arithmetic formulation replaces the usual xorshift64.
+// Deterministic for a given seed. NOT cryptographic: for real key
+// material wait for Phase 2 OS-seeded builtins.
+//
+// State is an explicit map {"state": s}; every draw returns a new map
+// {"value": v, "state": s2} — thread the state through.
+
+fn rand_modulus() -> i32 {
+    return 2147483647
+}
+
+fn rand_norm_seed(seed: i32) -> i32 {
+    let s = seed % 2147483646
+    if s < 0 {
+        s = s + 2147483646
+    }
+    return s + 1
+}
+
+fn rand_new(seed: i32) -> map {
+    return {"state": rand_norm_seed(seed)}
+}
+
+fn rand_step(s: i32) -> i32 {
+    let hi = s / 127773
+    let lo = s % 127773
+    let t = 16807 * lo - 2836 * hi
+    if t <= 0 {
+        t = t + 2147483647
+    }
+    return t
+}
+
+fn rand_next(st: map) -> map {
+    let s2 = rand_step(st["state"])
+    return {"value": s2, "state": s2}
+}
+
+fn rand_int(st: map, lo: i32, hi: i32) -> map {
+    assert(hi >= lo)
+    let r = rand_next(st)
+    let span = hi - lo + 1
+    return {"value": lo + r["value"] % span, "state": r["state"]}
+}
+
+fn rand_float(st: map) -> map {
+    let r = rand_next(st)
+    return {"value": float(r["value"]) / 2147483647.0, "state": r["state"]}
+}
+
+fn rand_choice(items: array, st: map) -> map {
+    assert(len(items) > 0)
+    let r = rand_next(st)
+    return {"value": items[r["value"] % len(items)], "state": r["state"]}
+}
+
+fn rand_shuffle(items: array, st: map) -> map {
+    let out = range(0, 0)
+    for x in items {
+        push(out, x)
+    }
+    let s = st["state"]
+    let i = len(out) - 1
+    while i > 0 {
+        s = rand_step(s)
+        let j = s % (i + 1)
+        let tmp = out[i]
+        out[i] = out[j]
+        out[j] = tmp
+        i = i - 1
+    }
+    return {"list": out, "state": s}
+}
+
+fn rand_state(st: map) -> i32 {
+    return st["state"]
+}
+
+fn rand_seed_from_time() -> map {
+    let t = time_now()
+    let secs = int(t) % 100000
+    let frac = int((t - float(int(t))) * 1000.0)
+    return rand_new(secs + frac)
+}

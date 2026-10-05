@@ -1,0 +1,36 @@
+// csv_test.klang — package self-test. Run: klang run csv_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    let t = csv_parse("a,b,c\n1,2,3", ",")
+    assert(len(t) == 2)
+    assert(t[0][0] == "a")
+    assert(t[1][2] == "3")
+    let q = csv_parse("a,\"b,c\",d", ",")
+    assert(q[0][1] == "b,c")
+    let esc = csv_parse("a,\"b\"\"c\"", ",")
+    assert(esc[0][1] == "b\"c")
+    let nl = csv_parse("a,\"x\ny\",b", ",")
+    assert(nl[0][1] == "x\ny")
+    let cr = csv_parse("a,b\r\n1,2\r\n", ",")
+    assert(len(cr) == 2)
+    assert(cr[0][1] == "b")
+    assert(cr[1][0] == "1")
+    assert(len(csv_parse("", ",")) == 0)
+    assert(len(csv_parse("a\n", ",")) == 1)
+    let semi = csv_parse("a;b;c", ";")
+    assert(semi[0][1] == "b")
+    assert(csv_write([["a", "b"], ["1", "2"]], ",") == "a,b\n1,2")
+    assert(csv_write([["a,b", "c"]], ",") == "\"a,b\",c")
+    assert(csv_write_comma([["x"]]) == "x")
+    let rt = csv_parse(csv_write_comma([["a", "b,c"], ["d\"e", "f"]]), ",")
+    assert(rt[0][1] == "b,c")
+    assert(rt[1][0] == "d\"e")
+    let hm = csv_header_map(csv_parse("name,age\namy,3\nbo,4", ","))
+    assert(len(hm) == 2)
+    assert(hm[0]["name"] == "amy")
+    assert(hm[1]["age"] == "4")
+    assert(len(csv_header_map([])) == 0)
+    print("csv: OK")
+    return 0
+}

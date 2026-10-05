@@ -1,0 +1,249 @@
+// time — civil datetime math on top of time_now (UTC).
+//
+// Import: import "time/lib.klang"
+//
+// Unix timestamps are f64 seconds (see BUILTINS.md); day-count math uses
+// small i32 values, second conversions stay in f64 so no i32 overflow
+// can occur. Supported range: ts >= 0 (1970-01-01 onward); negative
+// inputs assert. Date <-> day-count conversions use the civil-from-days
+// algorithm (Hinnant).
+
+fn time_is_leap_year(y: i32) -> bool {
+    if y % 400 == 0 {
+        return true
+    }
+    if y % 100 == 0 {
+        return false
+    }
+    return y % 4 == 0
+}
+
+fn time_days_in_month(y: i32, m: i32) -> i32 {
+    if m == 2 {
+        if time_is_leap_year(y) {
+            return 29
+        } else {
+            return 28
+        }
+    }
+    if m == 4 {
+        return 30
+    }
+    if m == 6 {
+        return 30
+    }
+    if m == 9 {
+        return 30
+    }
+    if m == 11 {
+        return 30
+    }
+    return 31
+}
+
+fn time_to_civil(ts: f64) -> map {
+    assert(ts >= 0.0)
+    let days = int(ts / 86400.0)
+    let sod = int(ts - float(days) * 86400.0)
+    let hour = sod / 3600
+    let minute = (sod % 3600) / 60
+    let second = sod % 60
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = mp + 3
+    if mp > 9 {
+        m = mp - 9
+    }
+    if m <= 2 {
+        y = y + 1
+    }
+    return {"year": y, "month": m, "day": d, "hour": hour, "minute": minute, "second": second}
+}
+
+fn time_from_civil(y: i32, mo: i32, d: i32, h: i32, mi: i32, s: i32) -> f64 {
+    assert(mo >= 1 && mo <= 12)
+    assert(d >= 1 && d <= time_days_in_month(y, mo))
+    assert(h >= 0 && h < 24)
+    assert(mi >= 0 && mi < 60)
+    assert(s >= 0 && s < 60)
+    let yy = y
+    if mo <= 2 {
+        yy = y - 1
+    }
+    let era = yy / 400
+    let yoe = yy - era * 400
+    let mp = mo - 3
+    if mo <= 2 {
+        mp = mo + 9
+    }
+    let doy = (153 * mp + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    let days = era * 146097 + doe - 719468
+    return float(days) * 86400.0 + float(h) * 3600.0 + float(mi) * 60.0 + float(s)
+}
+
+fn time_pad2(n: i32) -> str {
+    if n < 10 {
+        return "0" + str(n)
+    } else {
+        return str(n)
+    }
+}
+
+fn time_iso8601(ts: f64) -> str {
+    let c = time_to_civil(ts)
+    let ys = str(c["year"])
+    while len(ys) < 4 {
+        ys = "0" + ys
+    }
+    return ys + "-" + time_pad2(c["month"]) + "-" + time_pad2(c["day"]) + "T" + time_pad2(c["hour"]) + ":" + time_pad2(c["minute"]) + ":" + time_pad2(c["second"]) + "Z"
+}
+
+fn time_parse_digits(cs: array, lo: i32, hi: i32) -> bool {
+    let i = lo
+    while i < hi {
+        if cs[i] < "0" {
+            return false
+        }
+        if cs[i] > "9" {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn time_parse_part(cs: array, lo: i32, hi: i32) -> i32 {
+    let out = ""
+    let i = lo
+    while i < hi {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return parse_int(out)
+}
+
+fn time_parse_fail(col: i32, msg: str) -> map {
+    return {"ok": false, "year": 0, "month": 0, "day": 0, "hour": 0, "minute": 0, "second": 0, "error": "line 1, col " + str(col) + ": " + msg}
+}
+
+fn time_parse_iso8601(s: str) -> map {
+    let cs = s.chars()
+    if len(cs) != 20 {
+        return time_parse_fail(1, "expected UTC \"YYYY-MM-DDTHH:MM:SSZ\" (20 chars)")
+    }
+    if cs[4] != "-" {
+        return time_parse_fail(5, "expected '-'")
+    }
+    if cs[7] != "-" {
+        return time_parse_fail(8, "expected '-'")
+    }
+    if cs[10] != "T" {
+        return time_parse_fail(11, "expected 'T'")
+    }
+    if cs[13] != ":" {
+        return time_parse_fail(14, "expected ':'")
+    }
+    if cs[16] != ":" {
+        return time_parse_fail(17, "expected ':'")
+    }
+    if cs[19] != "Z" {
+        return time_parse_fail(20, "expected 'Z'")
+    }
+    if time_parse_digits(cs, 0, 4) == false {
+        return time_parse_fail(1, "expected 4-digit year")
+    }
+    if time_parse_digits(cs, 5, 7) == false {
+        return time_parse_fail(6, "expected 2-digit month")
+    }
+    if time_parse_digits(cs, 8, 10) == false {
+        return time_parse_fail(9, "expected 2-digit day")
+    }
+    if time_parse_digits(cs, 11, 13) == false {
+        return time_parse_fail(12, "expected 2-digit hour")
+    }
+    if time_parse_digits(cs, 14, 16) == false {
+        return time_parse_fail(15, "expected 2-digit minute")
+    }
+    if time_parse_digits(cs, 17, 19) == false {
+        return time_parse_fail(18, "expected 2-digit second")
+    }
+    let y = time_parse_part(cs, 0, 4)
+    let mo = time_parse_part(cs, 5, 7)
+    let d = time_parse_part(cs, 8, 10)
+    let h = time_parse_part(cs, 11, 13)
+    let mi = time_parse_part(cs, 14, 16)
+    let se = time_parse_part(cs, 17, 19)
+    if mo < 1 {
+        return time_parse_fail(6, "month out of range")
+    }
+    if mo > 12 {
+        return time_parse_fail(6, "month out of range")
+    }
+    if d < 1 {
+        return time_parse_fail(9, "day out of range")
+    }
+    if d > time_days_in_month(y, mo) {
+        return time_parse_fail(9, "day out of range")
+    }
+    if h > 23 {
+        return time_parse_fail(12, "hour out of range")
+    }
+    if mi > 59 {
+        return time_parse_fail(15, "minute out of range")
+    }
+    if se > 59 {
+        return time_parse_fail(18, "second out of range")
+    }
+    return {"ok": true, "year": y, "month": mo, "day": d, "hour": h, "minute": mi, "second": se, "error": ""}
+}
+
+fn time_weekday(ts: f64) -> i32 {
+    assert(ts >= 0.0)
+    let days = int(ts / 86400.0)
+    return (days + 4) % 7
+}
+
+fn time_weekday_name(ts: f64) -> str {
+    let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    return names[time_weekday(ts)]
+}
+
+fn time_add_days(ts: f64, n: i32) -> f64 {
+    return ts + float(n) * 86400.0
+}
+
+fn time_add_hours(ts: f64, n: i32) -> f64 {
+    return ts + float(n) * 3600.0
+}
+
+fn time_format_duration(secs: i32) -> str {
+    assert(secs >= 0)
+    let d = secs / 86400
+    let h = (secs % 86400) / 3600
+    let m = (secs % 3600) / 60
+    let s = secs % 60
+    let out = ""
+    if d > 0 {
+        out = out + str(d) + "d "
+    }
+    if h > 0 {
+        out = out + str(h) + "h "
+    }
+    if m > 0 {
+        out = out + str(m) + "m "
+    }
+    if s > 0 {
+        out = out + str(s) + "s "
+    }
+    if out == "" {
+        return "0s"
+    }
+    return out.trim()
+}

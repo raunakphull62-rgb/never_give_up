@@ -1,0 +1,19 @@
+// os_test.klang — package self-test. Run: klang run os_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(os_env_or("KLANG_DEFINITELY_UNSET_VAR_XYZ", "dflt") == "dflt")
+    let r = os_run("echo", ["hi"])
+    assert(r["exit_code"] == 0)
+    assert(r["stdout"] == "hi\n")
+    assert(os_run_ok("echo", ["hi"]) == true)
+    assert(os_run_ok("sh", ["-c", "exit 3"]) == false)
+    let bad = os_run("sh", ["-c", "exit 3"])
+    assert(bad["exit_code"] == 3)
+    assert(os_which("sh") == "/bin/sh" || os_which("sh") == "/usr/bin/sh")
+    assert(os_which("klang-definitely-missing-xyz") == "")
+    assert(os_which("a;b") == "")
+    assert(os_which("") == "")
+    print("os: OK")
+    return 0
+}

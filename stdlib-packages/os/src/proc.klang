@@ -1,0 +1,66 @@
+// os — environment and process helpers over env and run_process.
+//
+// Import: import "os/lib.klang"
+//
+// Failure convention: spawn failures propagate E-PROCESS-NOT-FOUND /
+// E-PROCESS-FAILED. A non-zero exit is a normal result (check
+// os_run_ok). os_which never fails: "" means "not found or no POSIX sh".
+// No platform-specific behavior is assumed beyond the documented
+// POSIX note on os_which.
+
+fn os_env(name: str) -> str {
+    return env(name)
+}
+
+fn os_env_or(name: str, dflt: str) -> str {
+    let v = env(name)
+    if v == "" {
+        return dflt
+    } else {
+        return v
+    }
+}
+
+fn os_run(cmd: str, args: array) -> map {
+    return run_process(cmd, args)
+}
+
+fn os_run_ok(cmd: str, args: array) -> bool {
+    let r = run_process(cmd, args)
+    return r["exit_code"] == 0
+}
+
+fn os_which_name_ok(name: str) -> bool {
+    if name.contains(" ") {
+        return false
+    }
+    if name.contains(";") {
+        return false
+    }
+    if name.contains("&") {
+        return false
+    }
+    if name.contains("|") {
+        return false
+    }
+    if name.contains("$") {
+        return false
+    }
+    return len(name) > 0
+}
+
+fn os_which(name: str) -> str {
+    if os_which_name_ok(name) == false {
+        return ""
+    }
+    let out = ""
+    try {
+        let r = run_process("sh", ["-c", "command -v " + name])
+        if r["exit_code"] == 0 {
+            out = r["stdout"].trim()
+        }
+    } catch e {
+        out = ""
+    }
+    return out
+}

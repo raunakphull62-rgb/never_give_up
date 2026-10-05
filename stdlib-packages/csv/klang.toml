@@ -1,0 +1,7 @@
+[project]
+name = "csv"
+version = "1.0.0"
+description = "Pure CSV parsing and writing"
+authors = ["Klang Core"]
+
+[dependencies]

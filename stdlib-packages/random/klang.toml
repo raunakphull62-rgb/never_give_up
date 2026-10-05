@@ -1,0 +1,7 @@
+[project]
+name = "random"
+version = "1.0.0"
+description = "Deterministic xorshift-style PRNG with explicit state (Park-Miller)"
+authors = ["Klang Core"]
+
+[dependencies]

@@ -1,0 +1,2 @@
+// csv/lib.klang — package entry point (re-exports src modules).
+import "src/table.klang"
