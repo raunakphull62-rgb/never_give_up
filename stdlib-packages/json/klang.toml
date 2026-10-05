@@ -1,6 +1,6 @@
 [project]
 name = "json"
-version = "1.1.0"
+version = "1.2.0"
 description = "JSON parser, accessors, pretty-printer and encoders"
 authors = ["Klang Core"]
 

@@ -14,6 +14,10 @@ fn main() -> i32 {
     assert(os_which("klang-definitely-missing-xyz") == "")
     assert(os_which("a;b") == "")
     assert(os_which("") == "")
+    assert(len(os_args()) == 0)
+    assert(len(os_cwd()) > 0)
+    assert(os_set_env("KLANG_OS_TEST_VAR", "v1") == 1)
+    assert(os_env("KLANG_OS_TEST_VAR") == "v1")
     print("os: OK")
     return 0
 }

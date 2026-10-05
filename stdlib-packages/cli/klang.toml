@@ -1,0 +1,7 @@
+[project]
+name = "cli"
+version = "1.0.0"
+description = "Spec-driven argument parsing: flags, options, subcommands, auto --help"
+authors = ["Klang Core"]
+
+[dependencies]

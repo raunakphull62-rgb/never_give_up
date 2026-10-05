@@ -384,6 +384,7 @@ fn pm_stdlib_layout() {
         "collections", "io", "string", "math", "time", "json", "http", "crypto", "sql",
         "regex", "compress", "net", "sync", "logging", "testing", "itertools",
         "fs", "path", "os", "random", "csv", "text",
+        "cli", "base64", "hex", "url",
     ];
     let mut seen = HashSet::new();
     for name in pkgs {
@@ -404,5 +405,5 @@ fn pm_stdlib_layout() {
         assert!(dir.join("README.md").is_file(), "{name}: README");
         assert!(seen.insert(name), "unique");
     }
-    assert_eq!(seen.len(), 22);
+    assert_eq!(seen.len(), 26);
 }

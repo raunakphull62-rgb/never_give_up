@@ -1,0 +1,194 @@
+// base64 — standard base64 over UTF-8 bytes.
+//
+// Import: import "base64/lib.klang"
+//
+// Pure. The UTF-8 helpers below twin hex_utf8_encode/decode in the hex
+// package (duplicated, not imported: registry packages stay
+// self-contained, and base64_ prefixes avoid E-DUPLICATE when both
+// packages are imported). Decoding never aborts: bad input comes back
+// in the result map.
+
+fn base64_utf8_encode(s: str) -> array {
+    let out = range(0, 0)
+    for c in s.chars() {
+        let cp = ord(c)
+        if cp < 128 {
+            push(out, cp)
+        } else {
+            if cp < 2048 {
+                push(out, 192 + cp / 64)
+                push(out, 128 + cp % 64)
+            } else {
+                if cp < 65536 {
+                    push(out, 224 + cp / 4096)
+                    push(out, 128 + (cp / 64) % 64)
+                    push(out, 128 + cp % 64)
+                } else {
+                    push(out, 240 + cp / 262144)
+                    push(out, 128 + (cp / 4096) % 64)
+                    push(out, 128 + (cp / 64) % 64)
+                    push(out, 128 + cp % 64)
+                }
+            }
+        }
+    }
+    return out
+}
+
+fn base64_utf8_decode(bytes: array) -> map {
+    let out = ""
+    let i = 0
+    while i < len(bytes) {
+        let b0 = bytes[i]
+        if b0 < 0 {
+            return {"ok": false, "value": "", "error": "byte out of range"}
+        }
+        if b0 > 255 {
+            return {"ok": false, "value": "", "error": "byte out of range"}
+        }
+        if b0 < 128 {
+            out = out + chr(b0)
+            i = i + 1
+            continue
+        }
+        if b0 < 194 {
+            return {"ok": false, "value": "", "error": "bad UTF-8 lead byte"}
+        }
+        let want = 0
+        let cp = 0
+        if b0 < 224 {
+            want = 1
+            cp = b0 - 192
+        } else {
+            if b0 < 240 {
+                want = 2
+                cp = b0 - 224
+            } else {
+                if b0 < 245 {
+                    want = 3
+                    cp = b0 - 240
+                } else {
+                    return {"ok": false, "value": "", "error": "bad UTF-8 lead byte"}
+                }
+            }
+        }
+        if i + want >= len(bytes) {
+            return {"ok": false, "value": "", "error": "truncated UTF-8 sequence"}
+        }
+        let k = 1
+        while k <= want {
+            let bc = bytes[i + k]
+            if bc < 128 {
+                return {"ok": false, "value": "", "error": "bad UTF-8 continuation"}
+            }
+            if bc > 191 {
+                return {"ok": false, "value": "", "error": "bad UTF-8 continuation"}
+            }
+            cp = cp * 64 + (bc - 128)
+            k = k + 1
+        }
+        if cp > 1114111 {
+            return {"ok": false, "value": "", "error": "codepoint out of range"}
+        }
+        if cp >= 55296 {
+            if cp <= 57343 {
+                return {"ok": false, "value": "", "error": "surrogate in UTF-8"}
+            }
+        }
+        out = out + chr(cp)
+        i = i + want + 1
+    }
+    return {"ok": true, "value": out, "error": ""}
+}
+
+fn base64_alpha() -> str {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+}
+
+fn base64_val(c: str) -> i32 {
+    let a = base64_alpha().chars()
+    let i = 0
+    while i < len(a) {
+        if a[i] == c {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn base64_encode(s: str) -> str {
+    let bytes = base64_utf8_encode(s)
+    let a = base64_alpha().chars()
+    let out = ""
+    let i = 0
+    while i + 3 <= len(bytes) {
+        let b0 = bytes[i]
+        let b1 = bytes[i + 1]
+        let b2 = bytes[i + 2]
+        out = out + a[b0 / 4] + a[(b0 % 4) * 16 + b1 / 16] + a[(b1 % 16) * 4 + b2 / 64] + a[b2 % 64]
+        i = i + 3
+    }
+    let rem = len(bytes) - i
+    if rem == 1 {
+        let b0 = bytes[i]
+        out = out + a[b0 / 4] + a[(b0 % 4) * 16] + "=="
+    }
+    if rem == 2 {
+        let b0 = bytes[i]
+        let b1 = bytes[i + 1]
+        out = out + a[b0 / 4] + a[(b0 % 4) * 16 + b1 / 16] + a[(b1 % 16) * 4] + "="
+    }
+    return out
+}
+
+fn base64_decode(s: str) -> map {
+    let cs = s.chars()
+    if len(cs) % 4 != 0 {
+        return {"ok": false, "value": "", "error": "length not a multiple of 4"}
+    }
+    let bytes = range(0, 0)
+    let i = 0
+    while i < len(cs) {
+        let q = range(0, 0)
+        let k = 0
+        while k < 4 {
+            let c = cs[i + k]
+            if c == "=" {
+                push(q, -2)
+            } else {
+                let v = base64_val(c)
+                if v == -1 {
+                    return {"ok": false, "value": "", "error": "bad base64 character"}
+                }
+                push(q, v)
+            }
+            k = k + 1
+        }
+        if q[2] == -2 {
+            if q[3] != -2 {
+                return {"ok": false, "value": "", "error": "bad padding"}
+            }
+            if i + 4 != len(cs) {
+                return {"ok": false, "value": "", "error": "padding must end input"}
+            }
+            push(bytes, q[0] * 4 + q[1] / 16)
+            i = i + 4
+            continue
+        }
+        if q[3] == -2 {
+            if i + 4 != len(cs) {
+                return {"ok": false, "value": "", "error": "padding must end input"}
+            }
+            push(bytes, q[0] * 4 + q[1] / 16)
+            push(bytes, (q[1] % 16) * 16 + q[2] / 4)
+            i = i + 4
+            continue
+        }
+        push(bytes, q[0] * 4 + q[1] / 16)
+        push(bytes, (q[1] % 16) * 16 + q[2] / 4)
+        push(bytes, (q[2] % 4) * 64 + q[3])
+        i = i + 4
+    }
+    return base64_utf8_decode(bytes)
+}

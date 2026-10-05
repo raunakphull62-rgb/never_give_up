@@ -1,0 +1,26 @@
+// base64_test.klang — package self-test. Run: klang run base64_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(base64_encode("") == "")
+    assert(base64_encode("f") == "Zg==")
+    assert(base64_encode("fo") == "Zm8=")
+    assert(base64_encode("foo") == "Zm9v")
+    assert(base64_encode("foob") == "Zm9vYg==")
+    assert(base64_encode("fooba") == "Zm9vYmE=")
+    assert(base64_encode("foobar") == "Zm9vYmFy")
+    assert(base64_encode("é") == "w6k=")
+    let d = base64_decode("Zm9vYmFy")
+    assert(d["ok"] == true)
+    assert(d["value"] == "foobar")
+    assert(base64_decode("w6k=")["value"] == "é")
+    assert(base64_decode("Zg==")["value"] == "f")
+    assert(base64_decode("abc")["ok"] == false)
+    assert(base64_decode("Zm9v*")["ok"] == false)
+    assert(base64_decode("Zg=A")["ok"] == false)
+    let rt = base64_decode(base64_encode("héllo→✓"))
+    assert(rt["ok"] == true)
+    assert(rt["value"] == "héllo→✓")
+    print("base64: OK")
+    return 0
+}

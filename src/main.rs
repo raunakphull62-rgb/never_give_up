@@ -449,7 +449,8 @@ fn run_file_mode(args: &[String]) {
     let (cmd, rest) = match args.first().map(|s| s.as_str()) {
         Some("check") | Some("check-v2") | Some("fmt") | Some("run") | Some("run-v2") | Some("build")
         | Some("repair") | Some("mcp") | Some("lsp") | Some("publish") | Some("add") | Some("fetch")
-        | Some("install") | Some("remove") | Some("update") | Some("list") | Some("init") => {
+        | Some("install") | Some("remove") | Some("update") | Some("list") | Some("init")
+        | Some("login") | Some("logout") => {
             (args[0].as_str(), &args[1..])
         }
         _ => ("run", args),
@@ -470,6 +471,8 @@ fn run_file_mode(args: &[String]) {
     || cmd == "update"
     || cmd == "list"
     || cmd == "init"
+    || cmd == "login"
+    || cmd == "logout"
     {
         run_registry_mode(cmd, rest);
         return;
@@ -591,13 +594,14 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--verbose|-v]"
+            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init|login|logout> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
         eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
         eprintln!("       run [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
-        eprintln!("       publish [--dir PATH] [--registry URL]  (KLANG_REGISTRY_TOKEN)");
-        eprintln!("       add <name[@constraint]> [--dev] [--registry URL] [--offline] | fetch [--registry URL] [--offline]");
-        eprintln!("       install [name[@constraint]] [--registry URL] [--offline] | remove <name> | update [name] | list | init [name] [--dir PATH]");
+        eprintln!("       publish [--dir PATH] [--registry URL] [--token TOKEN] (least safe; prefer `klang login` or KLANG_REGISTRY_TOKEN)");
+        eprintln!("       add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline] | fetch [--registry URL] [--offline]");
+        eprintln!("       install [name[@constraint]] [--registry URL] [--offline] | remove <name> | update [name] | list [--all] | init [name] [--dir PATH]");
+        eprintln!("       login [--registry URL] | logout [--registry URL]");
         std::process::exit(2);
     }
     let path = &rest[0];
@@ -649,7 +653,14 @@ fn run_file_mode(args: &[String]) {
     // Entry names never start with `-`, so non-flag args are path/entry
     // in order. Other subcommands keep the exact historical indexing.
     let (run_path, run_entry): (&str, String) = if cmd == "run" {
-        let plain: Vec<&str> = rest
+        // Positional scan stops at `--` (everything after is program
+        // argv, even entry-looking names).
+        let dash_at = rest.iter().position(|a| a == "--");
+        let pre: &[String] = match dash_at {
+            Some(pos) => &rest[..pos],
+            None => rest,
+        };
+        let plain: Vec<&str> = pre
             .iter()
             .filter(|a| !a.starts_with('-'))
             .map(String::as_str)
@@ -664,6 +675,24 @@ fn run_file_mode(args: &[String]) {
         )
     } else {
         (path.as_str(), entry.clone())
+    };
+    // Program arguments for the `args()` builtin: everything after a
+    // `--` separator, else non-flag positionals after path/entry.
+    // `klang run prog.klang -- --help` gives ["--help"]; entry stays
+    // `main`. Without `--`, historical indexing holds (second
+    // positional is the entry name).
+    let prog_argv: Vec<String> = if cmd == "run" {
+        if let Some(pos) = rest.iter().position(|a| a == "--") {
+            rest[pos + 1..].to_vec()
+        } else {
+            rest.iter()
+                .filter(|a| !a.starts_with('-'))
+                .skip(2)
+                .cloned()
+                .collect()
+        }
+    } else {
+        Vec::new()
     };
     // Errors during `run` go to stderr so stdout carries only program
     // output: `klang run bad.klang 2>/dev/null` prints nothing.
@@ -762,7 +791,7 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    match klang::runtime::run_with_output_value_partial(&mir, &run_entry, &[], &HashMap::new()) {
+    match klang::runtime::run_with_argv(&mir, &run_entry, &[], &prog_argv, &HashMap::new()) {
         (Ok(v), out) => {
             for line in &out {
                 if verbose {
@@ -808,8 +837,149 @@ fn run_file_mode(args: &[String]) {
                     println!("{line}");
                 }
             }
+            // Whole-program `exit(code)`: the low 8 bits, like normal
+            // returns (256 -> 0, -1 -> 255). Uncatchable in the program,
+            // so reaching here with E-EXIT is always a real request.
+            if d.is_exit() {
+                std::process::exit(d.exit_code() & 0xFF);
+            }
             eprintln!("run: FAIL");
             eprintln!("{}", d.to_json());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// CLI arg parsing for registry commands (B5).
+/// Splits `--flag value` / `--flag=value` from positionals, validates
+/// against `value_flags` + `bool_flags`, and rejects any other `--flag`
+/// with `unknown option --flag` (non-zero exit). Values are never
+/// mistaken for package specs (fixes `install --registry URL` treating
+/// the URL as a spec).
+struct ParsedArgs {
+    values: std::collections::HashMap<String, String>,
+    bools: std::collections::HashSet<String>,
+    positional: Vec<String>,
+}
+
+fn parse_registry_cli(
+    cmd: &str,
+    rest: &[String],
+    value_flags: &[&str],
+    bool_flags: &[&str],
+) -> ParsedArgs {
+    let mut values = std::collections::HashMap::new();
+    let mut bools = std::collections::HashSet::new();
+    let mut positional = Vec::new();
+    // `--help`/`-h` prints usage (not an unknown-option error).
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        print_registry_usage(cmd);
+        std::process::exit(0);
+    }
+    let mut i = 0;
+    while i < rest.len() {
+        let a = &rest[i];
+        if let Some((flag, inline_val)) = a.split_once('=') {
+            if flag.starts_with("--") {
+                if value_flags.contains(&flag) {
+                    if inline_val.is_empty() {
+                        eprintln!("{flag} needs a value");
+                        std::process::exit(2);
+                    }
+                    values.insert(flag.to_string(), inline_val.to_string());
+                    i += 1;
+                    continue;
+                }
+                eprintln!("unknown option {flag}");
+                std::process::exit(2);
+            }
+        }
+        if a.starts_with("--") {
+            if value_flags.contains(&a.as_str()) {
+                match rest.get(i + 1) {
+                    Some(v) if !v.starts_with("--") => {
+                        values.insert(a.clone(), v.clone());
+                        i += 2;
+                        continue;
+                    }
+                    _ => {
+                        eprintln!("{a} needs a value");
+                        std::process::exit(2);
+                    }
+                }
+            } else if bool_flags.contains(&a.as_str()) {
+                bools.insert(a.clone());
+                i += 1;
+                continue;
+            } else {
+                eprintln!("unknown option {a}");
+                std::process::exit(2);
+            }
+        } else if a.starts_with('-') && a.len() > 1 && !a.starts_with("--") {
+            // Single-dash flags are not part of the registry CLI; treat
+            // `-h`/`-V` as help/version passthrough, anything else as
+            // unknown.
+            if a == "-h" {
+                print_registry_usage(cmd);
+                std::process::exit(0);
+            }
+            eprintln!("unknown option {a}");
+            std::process::exit(2);
+        } else {
+            positional.push(a.clone());
+            i += 1;
+        }
+    }
+    ParsedArgs {
+        values,
+        bools,
+        positional,
+    }
+}
+
+fn print_registry_usage(cmd: &str) {
+    match cmd {
+        "publish" => {
+            eprintln!("usage: publish [--dir PATH] [--registry URL] [--token TOKEN]");
+            eprintln!("  --token is the least safe option (shows up in shell history); prefer `klang login` or KLANG_REGISTRY_TOKEN");
+        }
+        "add" => {
+            eprintln!("usage: add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline]");
+            eprintln!("  constraint: X.Y.Z, =X.Y.Z, ^X.Y.Z, ~X.Y.Z, >/>=/</<=X.Y.Z, * (default: latest)");
+            eprintln!("  --caret writes a ^MAJOR.MINOR.PATCH range instead of an exact pin");
+        }
+        "install" => {
+            eprintln!("usage: install [name[@constraint]] [--registry URL] [--offline]");
+        }
+        "remove" => {
+            eprintln!("usage: remove <name> [--registry URL]");
+        }
+        "update" => {
+            eprintln!("usage: update [name] [--registry URL] [--offline]");
+        }
+        "list" => {
+            eprintln!("usage: list [--all] [--registry URL]");
+            eprintln!("  --all shows transitive dependencies indented under what required them");
+        }
+        "login" => {
+            eprintln!("usage: login [--registry URL]");
+        }
+        "logout" => {
+            eprintln!("usage: logout [--registry URL]");
+        }
+        _ => {
+            eprintln!("usage: {cmd} [--registry URL]");
+        }
+    }
+}
+
+/// Resolve the registry base URL for CLI commands (PRD §3, 5 levels).
+/// Exits non-zero with `registry must use https` on rejection.
+fn resolve_cli_registry(flag: Option<&str>, project_root: Option<&std::path::Path>) -> String {
+    match klang::registry::resolve_registry_url(flag, project_root) {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("{e}");
             std::process::exit(1);
         }
     }
@@ -824,68 +994,76 @@ fn run_file_mode(args: &[String]) {
 /// Semantics (PRD § CLI, reconciled with backcompat):
 /// - `install [spec]` — vendor without editing klang.toml; no args
 ///   reproduces from klang.lock/manifest.
-/// - `add spec [--dev]` — pin + edit klang.toml + install (keeps the
-///   legacy `add name@version` form working; now also accepts ranges).
-/// - `remove name` / `update [name]` / `list` / `init [name]`
+/// - `add spec [--dev] [--caret]` — pin + edit klang.toml + install
+///   (keeps the legacy `add name@version` form working; now also
+///   accepts ranges; `--caret` writes `^X.Y.Z`).
+/// - `remove name` / `update [name]` / `list [--all]` / `init [name]`
 /// - `fetch` (legacy alias, kept) and `publish` unchanged.
+/// - `login`/`logout` manage `~/.klang/credentials` (owner-only publishing).
 fn run_registry_mode(cmd: &str, rest: &[String]) {
-    fn flag_val(rest: &[String], names: &[&str]) -> Option<String> {
-        let mut it = rest.iter().peekable();
-        while let Some(a) = it.next() {
-            for n in names {
-                if a == n {
-                    match it.next() {
-                        Some(v) if !v.starts_with("--") => return Some(v.clone()),
-                        _ => {
-                            eprintln!("{n} needs a value");
-                            std::process::exit(2);
-                        }
-                    }
-                } else if let Some(v) = a.strip_prefix(&format!("{n}=")) {
-                    if v.is_empty() {
-                        eprintln!("{n} needs a value");
-                        std::process::exit(2);
-                    }
-                    return Some(v.to_string());
-                }
-            }
-        }
-        None
-    }
-    let base = flag_val(rest, &["--registry"])
-        .or_else(|| std::env::var("KLANG_REGISTRY").ok())
-        .unwrap_or_else(|| klang::registry::DEFAULT_REGISTRY.to_string());
-    let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+    // B5: parse flags first (both `--registry URL` and `--registry=URL`);
+    // unknown `--flag` => "unknown option --flag" + exit 2. Values are
+    // excluded from positionals so a URL is never treated as a spec.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     match cmd {
         "publish" => {
-            let dir = flag_val(rest, &["--dir"])
+            let args = parse_registry_cli(cmd, rest, &["--registry", "--token", "--dir"], &[]);
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            let dir = args
+                .values
+                .get("--dir")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let token = flag_val(rest, &["--token"])
-                .or_else(|| std::env::var("KLANG_REGISTRY_TOKEN").ok())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| {
-                    eprintln!("publish needs a token: set KLANG_REGISTRY_TOKEN or pass --token");
+                .unwrap_or_else(|| cwd.clone());
+            let flag_tok = args.values.get("--token").map(|s| s.as_str());
+            let token = match klang::registry::resolve_publish_token(flag_tok, &base) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("{e}");
                     std::process::exit(2);
-                });
+                }
+            };
+            if let Err(e) = klang::registry::ensure_token_transport_ok(&base) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            // R3.4: print the registry host so a wrong URL is obvious.
+            println!("registry: {}", klang::registry::registry_host(&base));
             match klang_publish(&dir, &base, &token) {
                 Ok(line) => println!("{line}"),
                 Err(e) => {
+                    // C5: never print the token (RegistryError never holds it).
                     eprintln!("publish: FAIL\n{e}");
                     std::process::exit(1);
                 }
             }
         }
         "add" => {
-            let Some(spec) = positional.first() else {
-                eprintln!("usage: add <name[@constraint]> [--dev] [--registry URL] [--offline]");
+            let args = parse_registry_cli(
+                cmd,
+                rest,
+                &["--registry"],
+                &["--dev", "--offline", "--caret"],
+            );
+            let Some(spec) = args.positional.first() else {
+                eprintln!("usage: add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline]");
                 eprintln!("  constraint: X.Y.Z, =X.Y.Z, ^X.Y.Z, ~X.Y.Z, >/>=/</<=X.Y.Z, * (default: latest)");
+                eprintln!("  --caret writes a ^MAJOR.MINOR.PATCH range instead of an exact pin");
                 std::process::exit(2);
             };
-            let dev = rest.iter().any(|a| a == "--dev");
-            let offline = rest.iter().any(|a| a == "--offline");
-            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            match klang::package_manager::cli::cmd_add(&dir, &base, spec, dev, offline) {
+            if args.positional.len() > 1 {
+                eprintln!("usage: add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline]");
+                std::process::exit(2);
+            }
+            let dev = args.bools.contains("--dev");
+            let caret = args.bools.contains("--caret");
+            let offline = args.bools.contains("--offline");
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            if !offline {
+                println!("registry: {}", klang::registry::registry_host(&base));
+            }
+            match klang::package_manager::cli::cmd_add_full(&cwd, &base, spec, dev, caret, offline) {
                 Ok(line) => println!("{line}"),
                 Err(e) => {
                     eprintln!("add: FAIL\n{e}");
@@ -897,10 +1075,19 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
             // `install` never edits klang.toml (PRD): no args reproduces
             // the locked environment; with a spec it vendors that
             // package + transitive deps and updates klang.lock.
-            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let offline = rest.iter().any(|a| a == "--offline");
-            let spec = positional.first().map(|s| s.as_str());
-            match klang::package_manager::cli::cmd_install(&dir, &base, spec, offline) {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &["--offline"]);
+            if args.positional.len() > 1 {
+                eprintln!("usage: install [name[@constraint]] [--registry URL] [--offline]");
+                std::process::exit(2);
+            }
+            let offline = args.bools.contains("--offline");
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            if !offline {
+                println!("registry: {}", klang::registry::registry_host(&base));
+            }
+            let spec = args.positional.first().map(|s| s.as_str());
+            match klang::package_manager::cli::cmd_install(&cwd, &base, spec, offline) {
                 Ok(logs) => {
                     for l in logs {
                         println!("{l}");
@@ -913,12 +1100,16 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
             }
         }
         "remove" => {
-            let Some(name) = positional.first() else {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &[]);
+            let Some(name) = args.positional.first() else {
                 eprintln!("usage: remove <name>");
                 std::process::exit(2);
             };
-            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            match klang::package_manager::cli::cmd_remove(&dir, name) {
+            if args.positional.len() > 1 {
+                eprintln!("usage: remove <name>");
+                std::process::exit(2);
+            }
+            match klang::package_manager::cli::cmd_remove(&cwd, name) {
                 Ok(line) => println!("{line}"),
                 Err(e) => {
                     eprintln!("remove: FAIL\n{e}");
@@ -927,10 +1118,19 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
             }
         }
         "update" => {
-            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let offline = rest.iter().any(|a| a == "--offline");
-            let name = positional.first().map(|s| s.as_str());
-            match klang::package_manager::cli::cmd_update(&dir, &base, name, offline) {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &["--offline"]);
+            if args.positional.len() > 1 {
+                eprintln!("usage: update [name] [--registry URL] [--offline]");
+                std::process::exit(2);
+            }
+            let offline = args.bools.contains("--offline");
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            if !offline {
+                println!("registry: {}", klang::registry::registry_host(&base));
+            }
+            let name = args.positional.first().map(|s| s.as_str());
+            match klang::package_manager::cli::cmd_update(&cwd, &base, name, offline) {
                 Ok(logs) => {
                     for l in logs {
                         println!("{l}");
@@ -943,8 +1143,13 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
             }
         }
         "list" => {
-            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            match klang::package_manager::cli::cmd_list(&dir) {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &["--all"]);
+            if !args.positional.is_empty() {
+                eprintln!("usage: list [--all] [--registry URL]");
+                std::process::exit(2);
+            }
+            let all = args.bools.contains("--all");
+            match klang::package_manager::cli::cmd_list_all(&cwd, all) {
                 Ok(out) => print!("{out}"),
                 Err(e) => {
                     eprintln!("list: FAIL\n{e}");
@@ -954,16 +1159,19 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
         }
         "init" => {
             // `init [name] [--dir PATH]`: scaffold klang.toml + src/ + tests/.
-            let name = positional
+            let args = parse_registry_cli(cmd, rest, &["--dir"], &[]);
+            if args.positional.len() > 1 {
+                eprintln!("usage: init [name] [--dir PATH]");
+                std::process::exit(2);
+            }
+            let name = args
+                .positional
                 .first()
-                .map(|s| s.to_string())
+                .cloned()
                 .unwrap_or_else(|| "my-project".to_string());
-            let dir = flag_val(rest, &["--dir"])
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let target = if positional.first().is_some() && flag_val(rest, &["--dir"]).is_none() {
+            let dir_opt = args.values.get("--dir").map(std::path::PathBuf::from);
+            let target = if args.positional.first().is_some() && dir_opt.is_none() {
                 // `init my-project` with no --dir creates ./my-project/.
-                let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
                 let sub = cwd.join(&name);
                 if sub.exists() {
                     // Name is a project name AND the dir exists: init in place?
@@ -972,13 +1180,13 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
                     if sub.is_dir() && !sub.join("klang.toml").exists() {
                         sub
                     } else {
-                        cwd
+                        cwd.clone()
                     }
                 } else {
                     sub
                 }
             } else {
-                dir
+                dir_opt.unwrap_or_else(|| cwd.clone())
             };
             match klang::package_manager::cli::cmd_init(&target, &name) {
                 Ok(line) => println!("{line}"),
@@ -990,9 +1198,18 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
         }
         "fetch" => {
             // Legacy alias for `install` with no spec (kept for backcompat).
-            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let offline = rest.iter().any(|a| a == "--offline");
-            match klang::package_manager::cli::cmd_install(&dir, &base, None, offline) {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &["--offline"]);
+            if !args.positional.is_empty() {
+                eprintln!("usage: fetch [--registry URL] [--offline]");
+                std::process::exit(2);
+            }
+            let offline = args.bools.contains("--offline");
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            if !offline {
+                println!("registry: {}", klang::registry::registry_host(&base));
+            }
+            match klang::package_manager::cli::cmd_install(&cwd, &base, None, offline) {
                 Ok(logs) => {
                     for l in logs {
                         println!("{l}");
@@ -1004,7 +1221,106 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
                 }
             }
         }
+        "login" => {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &[]);
+            if !args.positional.is_empty() {
+                eprintln!("usage: login [--registry URL]");
+                std::process::exit(2);
+            }
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            let token = read_login_token();
+            if token.trim().is_empty() {
+                eprintln!("login: FAIL\nempty token");
+                std::process::exit(1);
+            }
+            match klang::registry::save_credential(&base, token.trim()) {
+                Ok(()) => println!("logged in to {}", klang::registry::registry_host(&base)),
+                Err(e) => {
+                    eprintln!("login: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "logout" => {
+            let args = parse_registry_cli(cmd, rest, &["--registry"], &[]);
+            if !args.positional.is_empty() {
+                eprintln!("usage: logout [--registry URL]");
+                std::process::exit(2);
+            }
+            let flag_reg = args.values.get("--registry").map(|s| s.as_str());
+            let base = resolve_cli_registry(flag_reg, Some(&cwd));
+            match klang::registry::remove_credential(&base) {
+                Ok(true) => println!("logged out from {}", klang::registry::registry_host(&base)),
+                Ok(false) => println!("not logged in to {}", klang::registry::registry_host(&base)),
+                Err(e) => {
+                    eprintln!("logout: FAIL\n{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => unreachable!("registry dispatcher"),
+    }
+}
+
+/// Read the publish token for `klang login` (C1): hidden input (no
+/// echo) when interactive, piped stdin for CI. Never echoes the token.
+fn read_login_token() -> String {
+    use std::io::{IsTerminal, Read};
+    let stdin = std::io::stdin();
+    // Piped stdin (CI): read everything.
+    if !stdin.is_terminal() {
+        let mut buf = String::new();
+        // Best-effort: read piped token (first line).
+        let mut handle = stdin.lock();
+        let _ = handle.read_to_string(&mut buf);
+        return buf.lines().next().unwrap_or("").trim().to_string();
+    }
+    // Interactive TTY: disable echo via `stty -echo`, read one line.
+    #[cfg(unix)]
+    {
+        use std::io::BufRead;
+        eprint!("token: ");
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        // Save stty state (best-effort).
+        let saved = std::process::Command::new("stty")
+            .arg("-g")
+            .stdin(std::process::Stdio::inherit())
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string());
+        let _ = std::process::Command::new("stty")
+            .arg("-echo")
+            .stdin(std::process::Stdio::inherit())
+            .status();
+        let mut line = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut line);
+        // Restore echo.
+        if let Some(state) = saved {
+            let _ = std::process::Command::new("stty")
+                .arg(state)
+                .stdin(std::process::Stdio::inherit())
+                .status();
+        } else {
+            let _ = std::process::Command::new("stty")
+                .arg("echo")
+                .stdin(std::process::Stdio::inherit())
+                .status();
+        }
+        eprintln!();
+        return line.trim().to_string();
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::BufRead;
+        eprint!("token: ");
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut line);
+        return line.trim().to_string();
     }
 }
 
@@ -1093,26 +1409,35 @@ fn ensure_registry_deps(entry: &str, offline: bool, base: &str) {
 }
 
 /// Registry base URL for dependency fetching during run/check/build
-/// (`--registry URL` or `--registry=URL`, else `KLANG_REGISTRY`, else
-/// the localhost default).
+/// (PRD §3, 5 levels: `--registry`, `KLANG_REGISTRY`, project
+/// `klang.toml`, global config, compiled-in default).
 fn fetch_registry_base(rest: &[String]) -> String {
+    let mut flag: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         if let Some(v) = a.strip_prefix("--registry=") {
             if !v.is_empty() {
-                return v.to_string();
+                flag = Some(v.to_string());
             }
         } else if a == "--registry" {
             if let Some(v) = it.next() {
                 if !v.starts_with("--") {
-                    return v.clone();
+                    flag = Some(v.clone());
                 }
             }
         }
     }
-    std::env::var("KLANG_REGISTRY")
-        .ok()
-        .unwrap_or_else(|| klang::registry::DEFAULT_REGISTRY.to_string())
+    // Project root for level 3: walk up from the entry file (first
+    // non-flag arg), if any.
+    let entry = rest.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let root = entry.and_then(|e| klang::registry::find_project_root(std::path::Path::new(e)));
+    match klang::registry::resolve_registry_url(flag.as_deref(), root.as_deref()) {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Load a file plus its transitive `import`s, prefixing each file's `NodeId`

@@ -1,0 +1,46 @@
+// cli_test.klang — package self-test. Run: klang run cli_test.klang
+import "lib.klang"
+
+fn cli_demo_spec() -> map {
+    let s = cli_spec("demo")
+    s = cli_flag(s, "verbose", "noisy output")
+    s = cli_option(s, "out", "output file")
+    s = cli_command(s, "run", "run it")
+    return s
+}
+
+fn main() -> i32 {
+    let s = cli_demo_spec()
+    let r = cli_parse(s, ["--verbose", "--out", "f.txt", "run", "a.klang"])
+    assert(r["ok"] == true)
+    assert(cli_get_flag(r, "verbose") == 1)
+    assert(cli_get_flag(r, "quiet") == 0)
+    assert(cli_get_option(r, "out", "dflt") == "f.txt")
+    assert(cli_get_option(r, "missing", "dflt") == "dflt")
+    assert(cli_command_of(r) == "run")
+    assert(cli_positionals(r).join(",") == "a.klang")
+    assert(r["help"] == 0)
+    let r2 = cli_parse(s, ["--out=x.txt", "run"])
+    assert(r2["ok"] == true)
+    assert(cli_get_option(r2, "out", "") == "x.txt")
+    let r3 = cli_parse(s, ["--bogus"])
+    assert(r3["ok"] == false)
+    let r4 = cli_parse(s, ["--verbose=x"])
+    assert(r4["ok"] == false)
+    let r5 = cli_parse(s, ["--out"])
+    assert(r5["ok"] == false)
+    let r6 = cli_parse(s, ["nope"])
+    assert(r6["ok"] == false)
+    let r7 = cli_parse(s, [])
+    assert(r7["ok"] == false)
+    let r8 = cli_parse(s, ["--", "--verbose", "run"])
+    assert(r8["ok"] == false)
+    let h = cli_help(s)
+    assert(h.contains("Usage: demo") == true)
+    assert(h.contains("--verbose") == true)
+    assert(h.contains("--out <value>") == true)
+    assert(h.contains("run  run it") == true)
+    assert(len(cli_args()) == 0)
+    print("cli: OK")
+    return 0
+}

@@ -1,0 +1,7 @@
+[project]
+name = "base64"
+version = "1.0.0"
+description = "Standard base64 over UTF-8 bytes"
+authors = ["Klang Core"]
+
+[dependencies]

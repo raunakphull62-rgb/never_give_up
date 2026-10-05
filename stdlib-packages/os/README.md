@@ -14,6 +14,16 @@ builtins (see `../BUILTINS.md`).
   "command -v <name>"`, or `""` when not found, when `sh` is missing,
   or when the name contains shell metacharacters (space `; & | $`) or
   is empty. POSIX-only: on non-POSIX hosts it returns `""`.
+- `os_args() -> array<str>` — program arguments after the `.klang`
+  file (`klang run prog.klang -- a b` → `["a","b"]`; `[]` otherwise,
+  including under MCP/test hosts).
+- `os_exit(code) -> i32` — terminates the whole program with `code`
+  (low 8 bits at the OS); uncatchable, never returns. Deliberately
+  NOT exercised in the self-test (it would kill the runner) — covered
+  by `tests/sysdata_gates.rs`.
+- `os_cwd() -> str` — current working directory.
+- `os_set_env(name, value) -> i32` — sets a variable for this process
+  and its future children (`E-ENV-INVALID` on `=`/NUL names).
 
 ## Failure convention
 

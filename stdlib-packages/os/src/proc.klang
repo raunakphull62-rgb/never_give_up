@@ -64,3 +64,19 @@ fn os_which(name: str) -> str {
     }
     return out
 }
+
+fn os_args() -> array {
+    return args()
+}
+
+fn os_exit(code: i32) -> i32 {
+    return exit(code)
+}
+
+fn os_cwd() -> str {
+    return cwd()
+}
+
+fn os_set_env(name: str, value: str) -> i32 {
+    return set_env(name, value)
+}

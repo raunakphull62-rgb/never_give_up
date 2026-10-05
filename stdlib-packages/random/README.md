@@ -4,8 +4,13 @@ Deterministic PRNG with explicit state. Park-Miller minimal standard
 (a=16807, m=2^31-1) via Schrage's method, so every intermediate fits
 Klang's checked i32 arithmetic. Klang has no bitwise operators, so this
 arithmetic formulation replaces the usual xorshift64. Deterministic for
-a given seed. NOT cryptographic — for real key material wait for the
-Phase 2 OS-seeded builtins.
+a given seed.
+
+NOT FOR SECURITY: this generator is predictable (Park-Miller with a
+32-bit state; `rand_seed_from_time` has ~1-second resolution) and must
+never be used for keys, tokens, nonces, or anything adversarial. For
+unpredictable values wait for the Phase 2 OS-seeded `random_int` /
+`random_float` builtins.
 
 ## API
 

@@ -1,0 +1,178 @@
+// hex — lowercase hex encoding over UTF-8 bytes.
+//
+// Import: import "hex/lib.klang"
+//
+// Pure. hex_utf8_encode/hex_utf8_decode twin base64_utf8_encode/decode
+// in the base64 package (duplicated, not imported: registry packages
+// stay self-contained).
+// Decoding never aborts: bad input comes back in the result map.
+
+fn hex_digit_val(c: str) -> i32 {
+    if c >= "0" {
+        if c <= "9" {
+            return parse_int(c)
+        }
+    }
+    if c == "a" {
+        return 10
+    }
+    if c == "A" {
+        return 10
+    }
+    if c == "b" {
+        return 11
+    }
+    if c == "B" {
+        return 11
+    }
+    if c == "c" {
+        return 12
+    }
+    if c == "C" {
+        return 12
+    }
+    if c == "d" {
+        return 13
+    }
+    if c == "D" {
+        return 13
+    }
+    if c == "e" {
+        return 14
+    }
+    if c == "E" {
+        return 14
+    }
+    if c == "f" {
+        return 15
+    }
+    if c == "F" {
+        return 15
+    }
+    return -1
+}
+
+fn hex_utf8_encode(s: str) -> array {
+    let out = range(0, 0)
+    for c in s.chars() {
+        let cp = ord(c)
+        if cp < 128 {
+            push(out, cp)
+        } else {
+            if cp < 2048 {
+                push(out, 192 + cp / 64)
+                push(out, 128 + cp % 64)
+            } else {
+                if cp < 65536 {
+                    push(out, 224 + cp / 4096)
+                    push(out, 128 + (cp / 64) % 64)
+                    push(out, 128 + cp % 64)
+                } else {
+                    push(out, 240 + cp / 262144)
+                    push(out, 128 + (cp / 4096) % 64)
+                    push(out, 128 + (cp / 64) % 64)
+                    push(out, 128 + cp % 64)
+                }
+            }
+        }
+    }
+    return out
+}
+
+fn hex_utf8_decode(bytes: array) -> map {
+    let out = ""
+    let i = 0
+    while i < len(bytes) {
+        let b0 = bytes[i]
+        if b0 < 0 {
+            return {"ok": false, "value": "", "error": "byte out of range"}
+        }
+        if b0 > 255 {
+            return {"ok": false, "value": "", "error": "byte out of range"}
+        }
+        if b0 < 128 {
+            out = out + chr(b0)
+            i = i + 1
+            continue
+        }
+        if b0 < 194 {
+            return {"ok": false, "value": "", "error": "bad UTF-8 lead byte"}
+        }
+        let want = 0
+        let cp = 0
+        if b0 < 224 {
+            want = 1
+            cp = b0 - 192
+        } else {
+            if b0 < 240 {
+                want = 2
+                cp = b0 - 224
+            } else {
+                if b0 < 245 {
+                    want = 3
+                    cp = b0 - 240
+                } else {
+                    return {"ok": false, "value": "", "error": "bad UTF-8 lead byte"}
+                }
+            }
+        }
+        if i + want >= len(bytes) {
+            return {"ok": false, "value": "", "error": "truncated UTF-8 sequence"}
+        }
+        let k = 1
+        while k <= want {
+            let bc = bytes[i + k]
+            if bc < 128 {
+                return {"ok": false, "value": "", "error": "bad UTF-8 continuation"}
+            }
+            if bc > 191 {
+                return {"ok": false, "value": "", "error": "bad UTF-8 continuation"}
+            }
+            cp = cp * 64 + (bc - 128)
+            k = k + 1
+        }
+        if cp > 1114111 {
+            return {"ok": false, "value": "", "error": "codepoint out of range"}
+        }
+        if cp >= 55296 {
+            if cp <= 57343 {
+                return {"ok": false, "value": "", "error": "surrogate in UTF-8"}
+            }
+        }
+        out = out + chr(cp)
+        i = i + want + 1
+    }
+    return {"ok": true, "value": out, "error": ""}
+}
+
+fn hex_encode(s: str) -> str {
+    let digits = "0123456789abcdef"
+    let dc = digits.chars()
+    let out = ""
+    for b in hex_utf8_encode(s) {
+        out = out + dc[b / 16] + dc[b % 16]
+    }
+    return out
+}
+
+fn hex_decode(s: str) -> map {
+    let cs = s.chars()
+    if len(cs) % 2 == 1 {
+        return {"ok": false, "value": "", "error": "odd hex length"}
+    }
+    let bytes = range(0, 0)
+    let i = 0
+    while i < len(cs) {
+        let hi = hex_digit_val(cs[i])
+        let lo = hex_digit_val(cs[i + 1])
+        if hi == -1 {
+            return {"ok": false, "value": "", "error": "bad hex digit"}
+        }
+        if lo == -1 {
+            return {"ok": false, "value": "", "error": "bad hex digit"}
+        }
+        push(bytes, hi * 16 + lo)
+        i = i + 2
+    }
+    return hex_utf8_decode(bytes)
+}

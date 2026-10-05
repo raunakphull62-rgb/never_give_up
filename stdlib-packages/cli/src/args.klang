@@ -1,0 +1,224 @@
+// cli — spec-driven argument parsing.
+//
+// Import: import "cli/lib.klang"
+//
+// Pure parsing over an argv array (long options only): declare a spec
+// with cli_flag/cli_option/cli_command, parse with cli_parse, render
+// usage with cli_help. cli_args() reads the live program arguments.
+// Parsing never aborts: errors come back in the result map.
+//
+// Grammar: `--flag`, `--opt value`, `--opt=value`, `pos`, `--` (rest
+// is positional). A token starting with `-` (other than lone `-`,
+// which is positional) must match the spec. `--help` sets help=1.
+// When subcommands are declared, the first positional must name one.
+
+fn cli_spec(prog: str) -> map {
+    return {"prog": prog, "flags": range(0, 0), "options": range(0, 0), "commands": range(0, 0), "descs": {}}
+}
+
+fn cli_flag(spec: map, name: str, desc: str) -> map {
+    let flags = spec["flags"]
+    push(flags, name)
+    spec["flags"] = flags
+    let descs = spec["descs"]
+    descs[name] = desc
+    spec["descs"] = descs
+    return spec
+}
+
+fn cli_option(spec: map, name: str, desc: str) -> map {
+    let options = spec["options"]
+    push(options, name)
+    spec["options"] = options
+    let descs = spec["descs"]
+    descs[name] = desc
+    spec["descs"] = descs
+    return spec
+}
+
+fn cli_command(spec: map, name: str, desc: str) -> map {
+    let commands = spec["commands"]
+    push(commands, name)
+    spec["commands"] = commands
+    let descs = spec["descs"]
+    descs[name] = desc
+    spec["descs"] = descs
+    return spec
+}
+
+fn cli_fail(msg: str) -> map {
+    return {"ok": false, "flags": {}, "options": {}, "command": "", "positionals": range(0, 0), "help": 0, "error": msg}
+}
+
+fn cli_split_eq(tok: str) -> map {
+    let cs = tok.chars()
+    let i = 0
+    while i < len(cs) {
+        if cs[i] == "=" {
+            let k = ""
+            let j = 0
+            while j < i {
+                k = k + cs[j]
+                j = j + 1
+            }
+            let v = ""
+            let m = i + 1
+            while m < len(cs) {
+                v = v + cs[m]
+                m = m + 1
+            }
+            return {"found": 1, "key": k, "value": v}
+        }
+        i = i + 1
+    }
+    return {"found": 0, "key": tok, "value": ""}
+}
+
+fn cli_parse(spec: map, argv: array) -> map {
+    let flags = {}
+    let options = {}
+    let positionals = range(0, 0)
+    let command = ""
+    let help = 0
+    let i = 0
+    let dashdash = 0
+    while i < len(argv) {
+        let tok = argv[i]
+        if dashdash == 1 {
+            push(positionals, tok)
+            i = i + 1
+            continue
+        }
+        if tok == "--" {
+            dashdash = 1
+            i = i + 1
+            continue
+        }
+        if tok == "--help" {
+            help = 1
+            i = i + 1
+            continue
+        }
+        if tok.starts_with("-") {
+            if len(tok.chars()) == 1 {
+                push(positionals, tok)
+                i = i + 1
+                continue
+            }
+            if tok.starts_with("--") == false {
+                return cli_fail("unknown option " + tok)
+            }
+            let body = ""
+            let bcs = tok.chars()
+            let b = 2
+            while b < len(bcs) {
+                body = body + bcs[b]
+                b = b + 1
+            }
+            let kv = cli_split_eq(body)
+            let name = kv["key"]
+            if spec["flags"].contains(name) {
+                if kv["found"] == 1 {
+                    return cli_fail("flag --" + name + " takes no value")
+                }
+                flags[name] = 1
+                i = i + 1
+                continue
+            }
+            if spec["options"].contains(name) {
+                if kv["found"] == 1 {
+                    options[name] = kv["value"]
+                    i = i + 1
+                    continue
+                }
+                if i + 1 >= len(argv) {
+                    return cli_fail("option --" + name + " needs a value")
+                }
+                options[name] = argv[i + 1]
+                i = i + 2
+                continue
+            }
+            return cli_fail("unknown option --" + name)
+        }
+        push(positionals, tok)
+        i = i + 1
+    }
+    if len(spec["commands"]) > 0 {
+        if len(positionals) == 0 {
+            return cli_fail("missing command")
+        }
+        if spec["commands"].contains(positionals[0]) == false {
+            return cli_fail("unknown command " + positionals[0])
+        }
+        command = positionals[0]
+        let rest = range(0, 0)
+        let p = 1
+        while p < len(positionals) {
+            push(rest, positionals[p])
+            p = p + 1
+        }
+        positionals = rest
+    }
+    return {"ok": true, "flags": flags, "options": options, "command": command, "positionals": positionals, "help": help, "error": ""}
+}
+
+fn cli_help(spec: map) -> str {
+    let out = "Usage: " + spec["prog"]
+    if len(spec["flags"]) > 0 {
+        out = out + " [flags]"
+    }
+    if len(spec["options"]) > 0 {
+        out = out + " [options]"
+    }
+    if len(spec["commands"]) > 0 {
+        out = out + " <command>"
+    }
+    out = out + "\n"
+    if len(spec["flags"]) > 0 {
+        out = out + "\nFlags:\n"
+        for f in spec["flags"] {
+            out = out + "  --" + f + "  " + spec["descs"][f] + "\n"
+        }
+    }
+    if len(spec["options"]) > 0 {
+        out = out + "\nOptions:\n"
+        for o in spec["options"] {
+            out = out + "  --" + o + " <value>  " + spec["descs"][o] + "\n"
+        }
+    }
+    if len(spec["commands"]) > 0 {
+        out = out + "\nCommands:\n"
+        for c in spec["commands"] {
+            out = out + "  " + c + "  " + spec["descs"][c] + "\n"
+        }
+    }
+    return out
+}
+
+fn cli_args() -> array {
+    return args()
+}
+
+fn cli_get_flag(parsed: map, name: str) -> i32 {
+    if parsed["flags"].contains(name) {
+        return 1
+    } else {
+        return 0
+    }
+}
+
+fn cli_get_option(parsed: map, name: str, dflt: str) -> str {
+    if parsed["options"].contains(name) {
+        return parsed["options"][name]
+    } else {
+        return dflt
+    }
+}
+
+fn cli_positionals(parsed: map) -> array {
+    return parsed["positionals"]
+}
+
+fn cli_command_of(parsed: map) -> str {
+    return parsed["command"]
+}

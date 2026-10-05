@@ -1,5 +1,5 @@
 #!/bin/sh
-# Publish all 22 stdlib packages in dependency order (PRD §5).
+# Publish all 26 stdlib packages in dependency order (PRD §5).
 # Free-tier fallback + reseed for a fresh registry.
 # Stops at the first failure; versions that already exist (409 with
 # identical bytes counts as success — the server returns 200 idempotent
@@ -10,11 +10,11 @@ set -u
 REGISTRY="${KLANG_REGISTRY:-https://klang.raunakdevelops.dpdns.org}"
 # Dependency order (every package appears after its deps):
 # - Leafs (no deps): itertools string math time testing crypto io sql
-#   sync json random csv text path fs os
+#   sync json random csv text path fs os cli base64 hex url
 # - Second layer: regex -> string; compress -> io; net -> io
 # - Third layer: http -> io, string; logging -> io, time;
 #   collections -> itertools
-PKGS="itertools string math time testing crypto io sql sync json random csv text path fs os regex compress net http logging collections"
+PKGS="itertools string math time testing crypto io sql sync json random csv text path fs os cli base64 hex url regex compress net http logging collections"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 for pkg in $PKGS; do

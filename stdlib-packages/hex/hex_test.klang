@@ -1,0 +1,25 @@
+// hex_test.klang — package self-test. Run: klang run hex_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(hex_encode("") == "")
+    assert(hex_encode("ABC") == "414243")
+    assert(hex_encode("é") == "c3a9")
+    assert(hex_encode("中") == "e4b8ad")
+    let d = hex_decode("414243")
+    assert(d["ok"] == true)
+    assert(d["value"] == "ABC")
+    let d2 = hex_decode("c3a9")
+    assert(d2["value"] == "é")
+    let d3 = hex_decode("e4b8ad")
+    assert(d3["value"] == "中")
+    assert(hex_decode("41Z")["ok"] == false)
+    let odd = hex_decode("123")
+    assert(odd["ok"] == false)
+    assert(odd["error"] == "odd hex length")
+    let rt = hex_decode(hex_encode("héllo→"))
+    assert(rt["ok"] == true)
+    assert(rt["value"] == "héllo→")
+    print("hex: OK")
+    return 0
+}

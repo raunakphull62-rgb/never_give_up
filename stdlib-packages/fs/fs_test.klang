@@ -34,6 +34,37 @@ fn main() -> i32 {
     fs_remove(base + "_crlf.txt")
     fs_remove(base + "_copy.txt")
     fs_remove(base + "_new.txt")
+    let dd = "/tmp/klang_fs_dir"
+    assert(fs_make_dirs(dd + "/sub/deep") == 1)
+    for stale in ["a.klang", "b.txt", "c.txt", "d.txt"] {
+        if fs_exists(dd + "/" + stale) {
+            fs_remove(dd + "/" + stale)
+        }
+    }
+    if fs_is_dir(dd + "_solo") == false {
+        assert(fs_make_dir(dd + "_solo") == 1)
+    }
+    assert(fs_is_dir(dd + "_solo") == true)
+    assert(fs_is_dir(dd + "/sub") == true)
+    assert(fs_is_dir(dd + ".txt") == false)
+    assert(fs_is_file(base + "_missing2.txt") == false)
+    fs_write(dd + "/a.klang", "x")
+    fs_write(dd + "/b.txt", "yy")
+    assert(fs_file_size(dd + "/b.txt") == 2)
+    assert(fs_is_file(dd + "/b.txt") == true)
+    assert(fs_list_dir(dd).join(",") == "a.klang,b.txt,sub")
+    assert(fs_glob(dd, "*.klang").join(",") == "a.klang")
+    assert(fs_glob(dd, "a.*").join(",") == "a.klang")
+    assert(fs_glob(dd, "*").join(",") == "a.klang,b.txt,sub")
+    assert(fs_glob(dd, "b.txt").join(",") == "b.txt")
+    assert(fs_copy(dd + "/b.txt", dd + "/c.txt") == 2)
+    assert(fs_read(dd + "/c.txt") == "yy")
+    assert(fs_rename(dd + "/c.txt", dd + "/d.txt") == 1)
+    assert(fs_exists(dd + "/c.txt") == false)
+    let walked = fs_walk(dd)
+    assert(walked.contains(dd + "/a.klang") == true)
+    assert(walked.contains(dd + "/sub/deep") == true)
+    assert(fs_is_dir(dd + "_solo") == true)
     print("fs: OK")
     return 0
 }

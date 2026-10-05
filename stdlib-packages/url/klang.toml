@@ -1,0 +1,7 @@
+[project]
+name = "url"
+version = "1.0.0"
+description = "URL parsing, building, and percent-encoding (pure)"
+authors = ["Klang Core"]
+
+[dependencies]

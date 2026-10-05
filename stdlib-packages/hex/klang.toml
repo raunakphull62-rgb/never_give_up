@@ -1,0 +1,7 @@
+[project]
+name = "hex"
+version = "1.0.0"
+description = "Lowercase hex encoding over UTF-8 bytes"
+authors = ["Klang Core"]
+
+[dependencies]

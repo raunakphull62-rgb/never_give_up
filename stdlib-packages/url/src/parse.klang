@@ -1,0 +1,404 @@
+// url — URL parsing, building, and percent-encoding.
+//
+// Import: import "url/lib.klang"
+//
+// Pure, no network. Absolute URLs with a scheme only (relative refs
+// are out of scope and report an error, never abort).
+
+fn url_index_of(s: str, sub: str) -> i32 {
+    let cs = s.chars()
+    let ns = sub.chars()
+    let i = 0
+    while i + len(ns) <= len(cs) {
+        let hit = 1
+        let j = 0
+        while j < len(ns) {
+            if cs[i + j] != ns[j] {
+                hit = 0
+            }
+            j = j + 1
+        }
+        if hit == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn url_chars_from(s: str, from: i32) -> str {
+    let cs = s.chars()
+    let out = ""
+    let i = from
+    while i < len(cs) {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn url_chars_range(s: str, lo: i32, hi: i32) -> str {
+    let cs = s.chars()
+    let out = ""
+    let i = lo
+    while i < hi {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn url_all_digits(s: str) -> i32 {
+    if len(s.chars()) == 0 {
+        return 0
+    }
+    for c in s.chars() {
+        if c < "0" {
+            return 0
+        }
+        if c > "9" {
+            return 0
+        }
+    }
+    return 1
+}
+
+fn url_parse_fail(msg: str) -> map {
+    return {"ok": false, "scheme": "", "user": "", "host": "", "port": "", "path": "", "query": "", "fragment": "", "error": msg}
+}
+
+fn url_parse(s: str) -> map {
+    let rest = s
+    let fragment = ""
+    let hash = url_index_of(rest, "#")
+    if hash != -1 {
+        fragment = url_chars_from(rest, hash + 1)
+        rest = url_chars_range(rest, 0, hash)
+    }
+    let scheme_end = url_index_of(rest, "://")
+    if scheme_end == -1 {
+        return url_parse_fail("missing scheme (want absolute scheme://...)")
+    }
+    let scheme = url_chars_range(rest, 0, scheme_end).lower()
+    if len(scheme.chars()) == 0 {
+        return url_parse_fail("empty scheme")
+    }
+    rest = url_chars_from(rest, scheme_end + 3)
+    let slash = url_index_of(rest, "/")
+    let authority = rest
+    let after = ""
+    if slash != -1 {
+        authority = url_chars_range(rest, 0, slash)
+        after = url_chars_from(rest, slash)
+    }
+    let user = ""
+    let hostport = authority
+    let at = url_index_of(authority, "@")
+    if at != -1 {
+        user = url_chars_range(authority, 0, at)
+        hostport = url_chars_from(authority, at + 1)
+    }
+    let host = hostport
+    let port = ""
+    if hostport.starts_with("[") {
+        let close = url_index_of(hostport, "]")
+        if close == -1 {
+            return url_parse_fail("unterminated IPv6 bracket")
+        }
+        host = url_chars_range(hostport, 0, close + 1)
+        let tail = url_chars_from(hostport, close + 1)
+        if len(tail.chars()) > 0 {
+            if tail.starts_with(":") == false {
+                return url_parse_fail("bad IPv6 port separator")
+            }
+            port = url_chars_from(tail, 1)
+            if url_all_digits(port) == 0 {
+                return url_parse_fail("non-numeric port")
+            }
+        }
+    } else {
+        let colon = url_index_of(hostport, ":")
+        if colon != -1 {
+            let maybe_port = url_chars_from(hostport, colon + 1)
+            if url_all_digits(maybe_port) == 1 {
+                host = url_chars_range(hostport, 0, colon)
+                port = maybe_port
+            }
+        }
+    }
+    if len(host.chars()) == 0 {
+        return url_parse_fail("empty host")
+    }
+    host = host.lower()
+    let path = after
+    let query = ""
+    let qm = url_index_of(after, "?")
+    if qm != -1 {
+        path = url_chars_range(after, 0, qm)
+        query = url_chars_from(after, qm + 1)
+    }
+    if len(path.chars()) == 0 {
+        path = "/"
+    }
+    return {"ok": true, "scheme": scheme, "user": user, "host": host, "port": port, "path": path, "query": query, "fragment": fragment, "error": ""}
+}
+
+fn url_build(m: map) -> str {
+    let out = m["scheme"] + "://"
+    if m["user"] != "" {
+        out = out + m["user"] + "@"
+    }
+    out = out + m["host"]
+    if m["port"] != "" {
+        out = out + ":" + m["port"]
+    }
+    out = out + m["path"]
+    if m["query"] != "" {
+        out = out + "?" + m["query"]
+    }
+    if m["fragment"] != "" {
+        out = out + "#" + m["fragment"]
+    }
+    return out
+}
+
+fn url_unreserved(c: str) -> i32 {
+    if c >= "a" {
+        if c <= "z" {
+            return 1
+        }
+    }
+    if c >= "A" {
+        if c <= "Z" {
+            return 1
+        }
+    }
+    if c >= "0" {
+        if c <= "9" {
+            return 1
+        }
+    }
+    if c == "-" {
+        return 1
+    }
+    if c == "_" {
+        return 1
+    }
+    if c == "." {
+        return 1
+    }
+    if c == "~" {
+        return 1
+    }
+    return 0
+}
+
+fn url_utf8_bytes(s: str) -> array {
+    let out = range(0, 0)
+    for c in s.chars() {
+        let cp = ord(c)
+        if cp < 128 {
+            push(out, cp)
+        } else {
+            if cp < 2048 {
+                push(out, 192 + cp / 64)
+                push(out, 128 + cp % 64)
+            } else {
+                if cp < 65536 {
+                    push(out, 224 + cp / 4096)
+                    push(out, 128 + (cp / 64) % 64)
+                    push(out, 128 + cp % 64)
+                } else {
+                    push(out, 240 + cp / 262144)
+                    push(out, 128 + (cp / 4096) % 64)
+                    push(out, 128 + (cp / 64) % 64)
+                    push(out, 128 + cp % 64)
+                }
+            }
+        }
+    }
+    return out
+}
+
+fn url_encode(s: str) -> str {
+    let digits = "0123456789ABCDEF"
+    let dc = digits.chars()
+    let out = ""
+    for b in url_utf8_bytes(s) {
+        if b < 128 {
+            let c = chr(b)
+            if url_unreserved(c) == 1 {
+                out = out + c
+                continue
+            }
+        }
+        out = out + "%" + dc[b / 16] + dc[b % 16]
+    }
+    return out
+}
+
+fn url_hex_val(c: str) -> i32 {
+    if c >= "0" {
+        if c <= "9" {
+            return parse_int(c)
+        }
+    }
+    if c == "a" {
+        return 10
+    }
+    if c == "A" {
+        return 10
+    }
+    if c == "b" {
+        return 11
+    }
+    if c == "B" {
+        return 11
+    }
+    if c == "c" {
+        return 12
+    }
+    if c == "C" {
+        return 12
+    }
+    if c == "d" {
+        return 13
+    }
+    if c == "D" {
+        return 13
+    }
+    if c == "e" {
+        return 14
+    }
+    if c == "E" {
+        return 14
+    }
+    if c == "f" {
+        return 15
+    }
+    if c == "F" {
+        return 15
+    }
+    return -1
+}
+
+fn url_decode(s: str) -> map {
+    let cs = s.chars()
+    let bytes = range(0, 0)
+    let i = 0
+    while i < len(cs) {
+        if cs[i] == "%" {
+            if i + 2 >= len(cs) {
+                return {"ok": false, "value": "", "error": "truncated percent escape"}
+            }
+            let hi = url_hex_val(cs[i + 1])
+            let lo = url_hex_val(cs[i + 2])
+            if hi == -1 {
+                return {"ok": false, "value": "", "error": "bad percent escape"}
+            }
+            if lo == -1 {
+                return {"ok": false, "value": "", "error": "bad percent escape"}
+            }
+            push(bytes, hi * 16 + lo)
+            i = i + 3
+            continue
+        }
+        if cs[i] == "+" {
+            push(bytes, 32)
+            i = i + 1
+            continue
+        }
+        for b in url_utf8_bytes(cs[i]) {
+            push(bytes, b)
+        }
+        i = i + 1
+    }
+    let out = ""
+    let j = 0
+    while j < len(bytes) {
+        let b0 = bytes[j]
+        if b0 < 128 {
+            out = out + chr(b0)
+            j = j + 1
+            continue
+        }
+        if b0 < 194 {
+            return {"ok": false, "value": "", "error": "bad UTF-8 lead byte"}
+        }
+        let want = 0
+        let cp = 0
+        if b0 < 224 {
+            want = 1
+            cp = b0 - 192
+        } else {
+            if b0 < 240 {
+                want = 2
+                cp = b0 - 224
+            } else {
+                if b0 < 245 {
+                    want = 3
+                    cp = b0 - 240
+                } else {
+                    return {"ok": false, "value": "", "error": "bad UTF-8 lead byte"}
+                }
+            }
+        }
+        if j + want >= len(bytes) {
+            return {"ok": false, "value": "", "error": "truncated UTF-8 sequence"}
+        }
+        let k = 1
+        while k <= want {
+            let bc = bytes[j + k]
+            if bc < 128 {
+                return {"ok": false, "value": "", "error": "bad UTF-8 continuation"}
+            }
+            if bc > 191 {
+                return {"ok": false, "value": "", "error": "bad UTF-8 continuation"}
+            }
+            cp = cp * 64 + (bc - 128)
+            k = k + 1
+        }
+        if cp > 1114111 {
+            return {"ok": false, "value": "", "error": "codepoint out of range"}
+        }
+        if cp >= 55296 {
+            if cp <= 57343 {
+                return {"ok": false, "value": "", "error": "surrogate in UTF-8"}
+            }
+        }
+        out = out + chr(cp)
+        j = j + want + 1
+    }
+    return {"ok": true, "value": out, "error": ""}
+}
+
+fn url_query_parse(q: str) -> array {
+    let out = range(0, 0)
+    if len(q.chars()) == 0 {
+        return out
+    }
+    for pair in q.split("&") {
+        let kv = pair.split("=")
+        let k = url_decode(kv[0])
+        let v = url_decode("")
+        if len(kv) > 1 {
+            v = url_decode(kv[1])
+        }
+        push(out, {"key": k["value"], "value": v["value"]})
+    }
+    return out
+}
+
+fn url_query_build(pairs: array) -> str {
+    let out = ""
+    let first = 1
+    for p in pairs {
+        if first == 1 {
+            first = 0
+        } else {
+            out = out + "&"
+        }
+        out = out + url_encode(p["key"]) + "=" + url_encode(p["value"])
+    }
+    return out
+}

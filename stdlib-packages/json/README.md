@@ -21,6 +21,14 @@ i32/f64, `null` → `{"$json": "null"}`, booleans →
 `{"$json": "true"/"false"}` (the runtime has no bool distinct from
 int, so markers keep `json_type` honest).
 
+`"$json"` collision (documented): a user object containing exactly the
+key `"$json"` with value `"null"`/`"true"`/`"false"` is
+indistinguishable from a marker — `json_type` reports
+`null`/`bool` and `json_is_null/true/false` match. Any other value
+under `"$json"` (numbers, objects, other strings) still reports
+`"object"` and round-trips normally. Avoid `"$json"` as a data key
+when the distinction matters.
+
 - `json_get(value, key)`, `json_at(value, index)` — raw values; a
   missing key or bad index is `E-RUNTIME` (programmer error, like
   normal indexing).
@@ -29,8 +37,8 @@ int, so markers keep `json_type` honest).
 - `json_pretty(value, indent) -> str` — indented rendering (`indent`
   spaces per level; `{}`/`[]` stay compact).
 
-Limits (Phase 1): `\u` escapes above ASCII report an error (no
-`chr()` yet); nesting depth is bounded by the interpreter call-depth
+Limits: `\u` escapes decode via `chr()` (surrogate halves report an
+error); nesting depth is bounded by the interpreter call-depth
 cap — keep it under ~100.
 
 ## Test

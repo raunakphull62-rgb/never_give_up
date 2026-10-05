@@ -1,9 +1,10 @@
-# Klang Standard Library Packages (Phase 1 + expansion)
+# Klang Standard Library Packages (Phase 1 + expansion + Phase 2A)
 
-22 publishable packages (15 PRD modules + `itertools`, the shared
-transitive leaf, + 6 Phase 1 expansion packages). Each package ships
-`klang.toml` + root `lib.klang` (import entry) + `src/*.klang` + root
-`<name>_test.klang` (runnable via `klang run`) + `README.md`.
+26 publishable packages (15 PRD modules + `itertools`, the shared
+transitive leaf, + 6 Phase 1 expansion packages + 4 Phase 2A packages).
+Each package ships `klang.toml` + root `lib.klang` (import entry) +
+`src/*.klang` + root `<name>_test.klang` (runnable via `klang run`) +
+`README.md`.
 
 Layout note: tests live at the package root (not `tests/`) because
 the import resolver rejects `..` paths — a `tests/` file could not
@@ -16,7 +17,7 @@ re-probe before wrapping a new builtin).
 
 1. Leafs (no deps): `itertools`, `string`, `math`, `time`,
    `testing`, `crypto`, `io`, `sql`, `sync`, `json`, `random`, `csv`,
-   `text`, `path`, `fs`, `os`
+   `text`, `path`, `fs`, `os`, `cli`, `base64`, `hex`, `url`
 2. Second layer: `regex` → string; `compress` → io; `net` → io
 3. Third layer: `http` → io, string; `logging` → io, time;
    `collections` → itertools
@@ -51,19 +52,22 @@ klang add collections && klang run app.klang
 
 | Package | Builtins used |
 |---|---|
+| `base64` | `ord`, `chr` (UTF-8 via twinned helpers; pure otherwise) |
+| `cli` | `args` (only `cli_args`; parsing is pure) |
 | `collections` | none (pure + `itertools`) |
 | `compress` | file builtins via `io` |
 | `crypto` | `chars`, `len` (pure) |
 | `csv` | none (pure) |
-| `fs` | `read_file`, `write_file`, `append_file`, `exists`, `remove_file` |
+| `fs` | `read_file`, `write_file`, `append_file`, `exists`, `remove_file`, `list_dir`, `make_dir`, `make_dirs`, `is_dir`, `is_file`, `rename_file`, `copy_file`, `file_size` |
+| `hex` | `ord`, `chr` (UTF-8; pure otherwise) |
 | `http` | `http_get`, `http_post`, `http_get_async`, `http_post_async` (+ `io`, `string` helpers) |
 | `io` | `read_file`, `write_file`, `append_file`, `exists`, `remove_file` |
 | `itertools` | `len`, `push`, `range` |
-| `json` | `parse_int`, `parse_float`, `chars` (+ kept encoders use `str`) |
+| `json` | `parse_int`, `parse_float`, `chars`, `chr` (`\u`), `ord` (type probes use methods) (+ kept encoders use `str`) |
 | `logging` | file builtins via `io`, `time_now` via `time` |
 | `math` | none (pure) |
 | `net` | file builtins via `io` |
-| `os` | `env`, `run_process` |
+| `os` | `env`, `run_process`, `args`, `cwd`, `set_env` (`os_exit` wraps `exit`) |
 | `path` | none (pure) |
 | `random` | `time_now` (only `rand_seed_from_time`) |
 | `regex` | `regex_is_match`, `regex_find` (+ `string` helpers) |
@@ -73,3 +77,4 @@ klang add collections && klang run app.klang
 | `text` | none (pure) |
 | `testing` | `assert`, `print`, `str` |
 | `time` | none (pure; wall-clock reads via `time_now` happen in user code) |
+| `url` | `ord`, `chr` (UTF-8/percent-coding; pure otherwise) |

@@ -1,0 +1,2 @@
+// base64/lib.klang — package entry point (re-exports src modules).
+import "src/codec.klang"

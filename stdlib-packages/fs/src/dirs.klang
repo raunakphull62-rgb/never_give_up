@@ -1,0 +1,148 @@
+// fs — directory helpers, walk, and glob-lite.
+//
+// Import: import "fs/lib.klang"
+//
+// Failure convention: builtin diagnostics propagate (E-IO-NOT-FOUND,
+// E-IO-PERMISSION, E-IO-FAILED). fs_glob prints its reason then asserts
+// on unsupported patterns (programmer error).
+
+fn fs_list_dir(path: str) -> array {
+    return list_dir(path)
+}
+
+fn fs_make_dir(path: str) -> i32 {
+    return make_dir(path)
+}
+
+fn fs_make_dirs(path: str) -> i32 {
+    return make_dirs(path)
+}
+
+fn fs_is_dir(path: str) -> bool {
+    return is_dir(path)
+}
+
+fn fs_is_file(path: str) -> bool {
+    return is_file(path)
+}
+
+fn fs_file_size(path: str) -> i32 {
+    return file_size(path)
+}
+
+fn fs_rename(from: str, to: str) -> i32 {
+    return rename_file(from, to)
+}
+
+fn fs_copy(from: str, to: str) -> i32 {
+    return copy_file(from, to)
+}
+
+fn fs_walk(dir: str) -> array {
+    let out = range(0, 0)
+    let stack = range(0, 0)
+    push(stack, dir)
+    while len(stack) > 0 {
+        let cur = pop(stack)
+        let names = fs_list_dir(cur)
+        let i = len(names) - 1
+        while i >= 0 {
+            let p = cur + "/" + names[i]
+            if out.contains(p) == false {
+                push(out, p)
+                if fs_is_dir(p) {
+                    push(stack, p)
+                }
+            }
+            i = i - 1
+        }
+        assert(len(out) < 10000)
+    }
+    return out
+}
+
+fn fs_glob_suffix(pattern: str) -> str {
+    let cs = pattern.chars()
+    let out = ""
+    let i = 1
+    while i < len(cs) {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn fs_glob_prefix(pattern: str) -> str {
+    let cs = pattern.chars()
+    let out = ""
+    let i = 0
+    while i < len(cs) - 1 {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn fs_glob_match(name: str, pattern: str) -> i32 {
+    if pattern == "*" {
+        return 1
+    }
+    if pattern.starts_with("*") {
+        if name.ends_with(fs_glob_suffix(pattern)) {
+            return 1
+        } else {
+            return 0
+        }
+    }
+    if pattern.ends_with("*") {
+        if name.starts_with(fs_glob_prefix(pattern)) {
+            return 1
+        } else {
+            return 0
+        }
+    }
+    if name == pattern {
+        return 1
+    } else {
+        return 0
+    }
+}
+
+fn fs_glob_shape_ok(pattern: str) -> i32 {
+    if pattern == "*" {
+        return 1
+    }
+    if pattern.starts_with("*") {
+        if fs_glob_suffix(pattern).contains("*") {
+            return 0
+        } else {
+            return 1
+        }
+    }
+    if pattern.ends_with("*") {
+        if fs_glob_prefix(pattern).contains("*") {
+            return 0
+        } else {
+            return 1
+        }
+    }
+    if pattern.contains("*") {
+        return 0
+    } else {
+        return 1
+    }
+}
+
+fn fs_glob(dir: str, pattern: str) -> array {
+    if fs_glob_shape_ok(pattern) == 0 {
+        print("fs_glob: unsupported pattern " + pattern)
+        assert(false)
+    }
+    let out = range(0, 0)
+    for name in fs_list_dir(dir) {
+        if fs_glob_match(name, pattern) == 1 {
+            push(out, name)
+        }
+    }
+    return out
+}
