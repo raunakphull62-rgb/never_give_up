@@ -1,0 +1,35 @@
+// text_test.klang — package self-test. Run: klang run text_test.klang
+import "lib.klang"
+
+fn main() -> i32 {
+    assert(text_pad_left("ab", 5, " ") == "   ab")
+    assert(text_pad_right("ab", 5, "-") == "ab---")
+    assert(text_pad_left("abcdef", 3, " ") == "abcdef")
+    assert(text_center("ab", 6, "-") == "--ab--")
+    assert(text_center("ab", 5, "-") == "-ab--")
+    assert(text_repeat("xy", 3) == "xyxyxy")
+    assert(text_repeat("xy", 0) == "")
+    assert(text_reverse("abc") == "cba")
+    assert(text_reverse("") == "")
+    assert(text_count("aaa", "aa") == 1)
+    assert(text_count("a,b,c", ",") == 2)
+    assert(text_count("abc", "") == 0)
+    assert(text_index_of("hello", "ll") == 2)
+    assert(text_index_of("hello", "z") == -1)
+    assert(text_strip_prefix("foobar", "foo") == "bar")
+    assert(text_strip_prefix("foobar", "z") == "foobar")
+    assert(text_strip_suffix("foobar", "bar") == "foo")
+    assert(text_strip_suffix("foobar", "z") == "foobar")
+    assert(text_snake_case("fooBar baz-qux") == "foo_bar_baz_qux")
+    assert(text_kebab_case("fooBar baz") == "foo-bar-baz")
+    assert(text_camel_case("foo bar-baz") == "fooBarBaz")
+    assert(text_camel_case("fooBar") == "fooBar")
+    assert(text_title_case("hello world") == "Hello World")
+    let wrapped = text_wrap("the quick brown fox", 10)
+    assert(len(wrapped) == 2)
+    assert(wrapped[0] == "the quick")
+    assert(wrapped[1] == "brown fox")
+    assert(len(text_wrap("hi", 10)) == 1)
+    print("text: OK")
+    return 0
+}

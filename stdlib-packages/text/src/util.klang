@@ -1,0 +1,251 @@
+// text — pure text utilities.
+//
+// Import: import "text/lib.klang"
+//
+// Pure string code; nothing here can fail. Widths shorter than the
+// input return the input unchanged; empty inputs follow the obvious
+// edge rules (documented in tests).
+
+fn text_repeat(s: str, n: i32) -> str {
+    let out = ""
+    let i = 0
+    while i < n {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+fn text_pad_left(s: str, width: i32, pad: str) -> str {
+    let need = width - len(s.chars())
+    if need <= 0 {
+        return s
+    }
+    return text_repeat(pad, need) + s
+}
+
+fn text_pad_right(s: str, width: i32, pad: str) -> str {
+    let need = width - len(s.chars())
+    if need <= 0 {
+        return s
+    }
+    return s + text_repeat(pad, need)
+}
+
+fn text_center(s: str, width: i32, pad: str) -> str {
+    let need = width - len(s.chars())
+    if need <= 0 {
+        return s
+    }
+    let left = need / 2
+    let right = need - left
+    return text_repeat(pad, left) + s + text_repeat(pad, right)
+}
+
+fn text_reverse(s: str) -> str {
+    let cs = s.chars()
+    let out = ""
+    let i = len(cs) - 1
+    while i >= 0 {
+        out = out + cs[i]
+        i = i - 1
+    }
+    return out
+}
+
+fn text_count(s: str, sub: str) -> i32 {
+    if len(sub) == 0 {
+        return 0
+    }
+    let n = 0
+    let rest = s
+    while rest.contains(sub) {
+        n = n + 1
+        let idx = text_index_of(rest, sub)
+        rest = text_skip_chars(rest, idx + len(sub.chars()))
+    }
+    return n
+}
+
+fn text_index_of(s: str, sub: str) -> i32 {
+    let cs = s.chars()
+    let ns = sub.chars()
+    let i = 0
+    while i + len(ns) <= len(cs) {
+        let hit = 1
+        let j = 0
+        while j < len(ns) {
+            if cs[i + j] != ns[j] {
+                hit = 0
+            }
+            j = j + 1
+        }
+        if hit == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn text_skip_chars(s: str, n: i32) -> str {
+    let cs = s.chars()
+    let out = ""
+    let i = n
+    while i < len(cs) {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn text_strip_prefix(s: str, prefix: str) -> str {
+    if s.starts_with(prefix) {
+        return text_skip_chars(s, len(prefix.chars()))
+    } else {
+        return s
+    }
+}
+
+fn text_strip_suffix(s: str, suffix: str) -> str {
+    if len(suffix) == 0 {
+        return s
+    }
+    if s.ends_with(suffix) {
+        let cs = s.chars()
+        let keep = len(cs) - len(suffix.chars())
+        let out = ""
+        let i = 0
+        while i < keep {
+            out = out + cs[i]
+            i = i + 1
+        }
+        return out
+    } else {
+        return s
+    }
+}
+
+fn text_is_upper_letter(c: str) -> i32 {
+    if c == c.upper() {
+        if c != c.lower() {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn text_is_lower_letter(c: str) -> i32 {
+    if c == c.lower() {
+        if c != c.upper() {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn text_camel_parts(w: str) -> array {
+    let cs = w.chars()
+    let out = range(0, 0)
+    let cur = ""
+    let prev = ""
+    for c in cs {
+        if len(cur) > 0 {
+            if text_is_upper_letter(c) == 1 {
+                if text_is_lower_letter(prev) == 1 {
+                    push(out, cur)
+                    cur = ""
+                }
+            }
+        }
+        cur = cur + c
+        prev = c
+    }
+    if len(cur) > 0 {
+        push(out, cur)
+    }
+    return out
+}
+
+fn text_split_words(s: str) -> array {
+    let norm = s.replace("_", " ").replace("-", " ").replace(".", " ")
+    let parts = norm.split(" ")
+    let out = range(0, 0)
+    for p in parts {
+        let t = p.trim()
+        if len(t) > 0 {
+            for w in text_camel_parts(t) {
+                push(out, w.lower())
+            }
+        }
+    }
+    return out
+}
+
+fn text_cap(w: str) -> str {
+    if len(w) == 0 {
+        return w
+    }
+    let cs = w.chars()
+    let out = cs[0].upper()
+    let i = 1
+    while i < len(cs) {
+        out = out + cs[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn text_snake_case(s: str) -> str {
+    return text_split_words(s).join("_")
+}
+
+fn text_kebab_case(s: str) -> str {
+    return text_split_words(s).join("-")
+}
+
+fn text_camel_case(s: str) -> str {
+    let words = text_split_words(s)
+    if len(words) == 0 {
+        return ""
+    }
+    let out = words[0]
+    let i = 1
+    while i < len(words) {
+        out = out + text_cap(words[i])
+        i = i + 1
+    }
+    return out
+}
+
+fn text_title_case(s: str) -> str {
+    let words = s.split(" ")
+    let out = range(0, 0)
+    for w in words {
+        push(out, text_cap(w.lower()))
+    }
+    return out.join(" ")
+}
+
+fn text_wrap(s: str, width: i32) -> array {
+    assert(width > 0)
+    let words = s.split(" ")
+    let lines = range(0, 0)
+    let cur = ""
+    for w in words {
+        if cur == "" {
+            cur = w
+        } else {
+            if len((cur + " " + w).chars()) <= width {
+                cur = cur + " " + w
+            } else {
+                push(lines, cur)
+                cur = w
+            }
+        }
+    }
+    if cur != "" {
+        push(lines, cur)
+    }
+    return lines
+}

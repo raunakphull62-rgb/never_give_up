@@ -1,0 +1,720 @@
+// json — real parser (this file) plus encoders (encode.klang).
+//
+// Import: import "json/lib.klang"
+//
+// Failure convention: json_parse NEVER aborts on untrusted input — it
+// returns {"ok": bool, "value": v, "error": e} with e like
+// "line 3, col 14: expected ':'" ("" on success). json_parse_or_assert
+// prints the same message then asserts, for scripts. Out-of-range
+// integers fall back to float (never abort). \u escapes above ASCII
+// are a documented Phase 1 limit (report as an error, not abort;
+// Phase 2 chr() removes it).
+//
+// Values: objects -> map, arrays -> array, strings -> str, numbers ->
+// i32/f64, null -> {"$json": "null"}, true/false ->
+// {"$json": "true"/"false"} (Klang runtime has no bool distinct from
+// int, so markers keep json_type honest). Values flow in `json`
+// (unknown-annotation) params, which stay dynamic.
+
+fn json_ws(c: str) -> i32 {
+    if c == " " {
+        return 1
+    }
+    if c == "\n" {
+        return 1
+    }
+    if c == "\r" {
+        return 1
+    }
+    if c == "\t" {
+        return 1
+    }
+    return 0
+}
+
+fn json_adv(st: map, c: str) -> map {
+    if c == "\n" {
+        return {"pos": st["pos"] + 1, "line": st["line"] + 1, "col": 1}
+    } else {
+        return {"pos": st["pos"] + 1, "line": st["line"], "col": st["col"] + 1}
+    }
+}
+
+fn json_skip_ws(cs: array, st: map) -> map {
+    let s = st
+    while s["pos"] < len(cs) {
+        if json_ws(cs[s["pos"]]) == 0 {
+            break
+        }
+        s = json_adv(s, cs[s["pos"]])
+    }
+    return s
+}
+
+fn json_err(st: map, msg: str) -> map {
+    return {"ok": false, "node": 0, "st": st, "error": "line " + str(st["line"]) + ", col " + str(st["col"]) + ": " + msg}
+}
+
+fn json_is_digit(c: str) -> i32 {
+    if c < "0" {
+        return 0
+    }
+    if c > "9" {
+        return 0
+    }
+    return 1
+}
+
+fn json_hex_val(c: str) -> i32 {
+    if json_is_digit(c) == 1 {
+        return parse_int(c)
+    }
+    if c == "a" {
+        return 10
+    }
+    if c == "A" {
+        return 10
+    }
+    if c == "b" {
+        return 11
+    }
+    if c == "B" {
+        return 11
+    }
+    if c == "c" {
+        return 12
+    }
+    if c == "C" {
+        return 12
+    }
+    if c == "d" {
+        return 13
+    }
+    if c == "D" {
+        return 13
+    }
+    if c == "e" {
+        return 14
+    }
+    if c == "E" {
+        return 14
+    }
+    if c == "f" {
+        return 15
+    }
+    if c == "F" {
+        return 15
+    }
+    return -1
+}
+
+fn json_ascii_char(n: i32) -> str {
+    let ascii = "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000A\u000B\u000C\u000D\u000E\u000F\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F\u0020\u0021\u0022\u0023\u0024\u0025\u0026\u0027\u0028\u0029\u002A\u002B\u002C\u002D\u002E\u002F\u0030\u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039\u003A\u003B\u003C\u003D\u003E\u003F\u0040\u0041\u0042\u0043\u0044\u0045\u0046\u0047\u0048\u0049\u004A\u004B\u004C\u004D\u004E\u004F\u0050\u0051\u0052\u0053\u0054\u0055\u0056\u0057\u0058\u0059\u005A\u005B\u005C\u005D\u005E\u005F\u0060\u0061\u0062\u0063\u0064\u0065\u0066\u0067\u0068\u0069\u006A\u006B\u006C\u006D\u006E\u006F\u0070\u0071\u0072\u0073\u0074\u0075\u0076\u0077\u0078\u0079\u007A\u007B\u007C\u007D\u007E\u007F"
+    return ascii.chars()[n]
+}
+
+fn json_parse_string(cs: array, st: map) -> map {
+    let s = json_adv(st, "\"")
+    let out = ""
+    while s["pos"] < len(cs) {
+        let c = cs[s["pos"]]
+        if c == "\"" {
+            return {"ok": true, "node": out, "st": json_adv(s, c), "error": ""}
+        }
+        if c == "\n" {
+            return json_err(s, "unterminated string")
+        }
+        if c == "\\" {
+            s = json_adv(s, c)
+            if s["pos"] >= len(cs) {
+                return json_err(s, "unterminated string")
+            }
+            let e = cs[s["pos"]]
+            if e == "\"" {
+                out = out + "\""
+                s = json_adv(s, e)
+            } else {
+                if e == "\\" {
+                    out = out + "\\"
+                    s = json_adv(s, e)
+                } else {
+                    if e == "/" {
+                        out = out + "/"
+                        s = json_adv(s, e)
+                    } else {
+                        if e == "n" {
+                            out = out + "\n"
+                            s = json_adv(s, e)
+                        } else {
+                            if e == "r" {
+                                out = out + "\r"
+                                s = json_adv(s, e)
+                            } else {
+                                if e == "t" {
+                                    out = out + "\t"
+                                    s = json_adv(s, e)
+                                } else {
+                                    if e == "b" {
+                                        out = out + json_ascii_char(8)
+                                        s = json_adv(s, e)
+                                    } else {
+                                        if e == "f" {
+                                            out = out + json_ascii_char(12)
+                                            s = json_adv(s, e)
+                                        } else {
+                                            if e == "u" {
+                                                s = json_adv(s, e)
+                                                if s["pos"] + 4 > len(cs) {
+                                                    return json_err(s, "bad unicode escape")
+                                                }
+                                                let v = 0
+                                                let k = 0
+                                                while k < 4 {
+                                                    let hv = json_hex_val(cs[s["pos"] + k])
+                                                    if hv == -1 {
+                                                        return json_err(s, "bad unicode escape")
+                                                    }
+                                                    v = v * 16 + hv
+                                                    k = k + 1
+                                                }
+                                                if v > 127 {
+                                                    return json_err(s, "unicode escape above ASCII not supported")
+                                                }
+                                                out = out + json_ascii_char(v)
+                                                k = 0
+                                                while k < 4 {
+                                                    s = json_adv(s, cs[s["pos"]])
+                                                    k = k + 1
+                                                }
+                                            } else {
+                                                return json_err(s, "bad escape")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            out = out + c
+            s = json_adv(s, c)
+        }
+    }
+    return json_err(s, "unterminated string")
+}
+
+fn json_num_char(c: str) -> i32 {
+    if json_is_digit(c) == 1 {
+        return 1
+    }
+    if c == "-" {
+        return 1
+    }
+    if c == "+" {
+        return 1
+    }
+    if c == "." {
+        return 1
+    }
+    if c == "e" {
+        return 1
+    }
+    if c == "E" {
+        return 1
+    }
+    return 0
+}
+
+fn json_parse_number(cs: array, st: map) -> map {
+    let s = st
+    let num = ""
+    while s["pos"] < len(cs) {
+        if json_num_char(cs[s["pos"]]) == 0 {
+            break
+        }
+        num = num + cs[s["pos"]]
+        s = json_adv(s, cs[s["pos"]])
+    }
+    let nc = num.chars()
+    let i = 0
+    if nc[0] == "-" {
+        i = 1
+        if len(nc) == 1 {
+            return json_err(st, "bad number")
+        }
+    }
+    if nc[i] == "0" {
+        i = i + 1
+        if i < len(nc) {
+            if json_is_digit(nc[i]) == 1 {
+                return json_err(st, "leading zero in number")
+            }
+        }
+    } else {
+        if json_is_digit(nc[i]) == 0 {
+            return json_err(st, "bad number")
+        }
+        while i < len(nc) {
+            if json_is_digit(nc[i]) == 0 {
+                break
+            }
+            i = i + 1
+        }
+    }
+    let is_float = 0
+    if i < len(nc) {
+        if nc[i] == "." {
+            is_float = 1
+            i = i + 1
+            if i >= len(nc) {
+                return json_err(st, "bad number")
+            }
+            if json_is_digit(nc[i]) == 0 {
+                return json_err(st, "bad number")
+            }
+            while i < len(nc) {
+                if json_is_digit(nc[i]) == 0 {
+                    break
+                }
+                i = i + 1
+            }
+        }
+    }
+    if i < len(nc) {
+        if nc[i] == "e" {
+            is_float = 1
+            i = i + 1
+            if i < len(nc) {
+                if nc[i] == "+" {
+                    i = i + 1
+                } else {
+                    if nc[i] == "-" {
+                        i = i + 1
+                    }
+                }
+            }
+            if i >= len(nc) {
+                return json_err(st, "bad number")
+            }
+            if json_is_digit(nc[i]) == 0 {
+                return json_err(st, "bad number")
+            }
+            while i < len(nc) {
+                if json_is_digit(nc[i]) == 0 {
+                    break
+                }
+                i = i + 1
+            }
+        } else {
+            if nc[i] == "E" {
+                is_float = 1
+                i = i + 1
+                if i < len(nc) {
+                    if nc[i] == "+" {
+                        i = i + 1
+                    } else {
+                        if nc[i] == "-" {
+                            i = i + 1
+                        }
+                    }
+                }
+                if i >= len(nc) {
+                    return json_err(st, "bad number")
+                }
+                if json_is_digit(nc[i]) == 0 {
+                    return json_err(st, "bad number")
+                }
+                while i < len(nc) {
+                    if json_is_digit(nc[i]) == 0 {
+                        break
+                    }
+                    i = i + 1
+                }
+            }
+        }
+    }
+    if i != len(nc) {
+        return json_err(st, "bad number")
+    }
+    if is_float == 1 {
+        let f = 0.0
+        try {
+            f = parse_float(num)
+        } catch e {
+            return json_err(st, "bad number")
+        }
+        return {"ok": true, "node": f, "st": s, "error": ""}
+    }
+    let n = 0
+    try {
+        n = parse_int(num)
+    } catch e {
+        let f2 = 0.0
+        try {
+            f2 = parse_float(num)
+        } catch e2 {
+            return json_err(st, "bad number")
+        }
+        return {"ok": true, "node": f2, "st": s, "error": ""}
+    }
+    return {"ok": true, "node": n, "st": s, "error": ""}
+}
+
+fn json_parse_lit(cs: array, st: map, word: str, node: json) -> map {
+    let wc = word.chars()
+    let s = st
+    let k = 0
+    while k < len(wc) {
+        if s["pos"] >= len(cs) {
+            return json_err(st, "expected '" + word + "'")
+        }
+        if cs[s["pos"]] != wc[k] {
+            return json_err(st, "expected '" + word + "'")
+        }
+        s = json_adv(s, cs[s["pos"]])
+        k = k + 1
+    }
+    if s["pos"] < len(cs) {
+        let c = cs[s["pos"]]
+        if c == "_" {
+            return json_err(st, "expected end of '" + word + "'")
+        }
+        if json_is_digit(c) == 1 {
+            return json_err(st, "expected end of '" + word + "'")
+        }
+        if c >= "a" {
+            if c <= "z" {
+                return json_err(st, "expected end of '" + word + "'")
+            }
+        }
+        if c >= "A" {
+            if c <= "Z" {
+                return json_err(st, "expected end of '" + word + "'")
+            }
+        }
+    }
+    return {"ok": true, "node": node, "st": s, "error": ""}
+}
+
+fn json_parse_value(cs: array, st: map) -> map {
+    if st["pos"] >= len(cs) {
+        return json_err(st, "unexpected end of input")
+    }
+    let c = cs[st["pos"]]
+    if c == "{" {
+        return json_parse_object(cs, st)
+    }
+    if c == "[" {
+        return json_parse_array(cs, st)
+    }
+    if c == "\"" {
+        return json_parse_string(cs, st)
+    }
+    if c == "t" {
+        return json_parse_lit(cs, st, "true", {"$json": "true"})
+    }
+    if c == "f" {
+        return json_parse_lit(cs, st, "false", {"$json": "false"})
+    }
+    if c == "n" {
+        return json_parse_lit(cs, st, "null", {"$json": "null"})
+    }
+    if c == "-" {
+        return json_parse_number(cs, st)
+    }
+    if json_is_digit(c) == 1 {
+        return json_parse_number(cs, st)
+    }
+    return json_err(st, "unexpected character")
+}
+
+fn json_parse_array(cs: array, st: map) -> map {
+    let s = json_adv(st, "[")
+    s = json_skip_ws(cs, s)
+    let arr = range(0, 0)
+    if s["pos"] < len(cs) {
+        if cs[s["pos"]] == "]" {
+            return {"ok": true, "node": arr, "st": json_adv(s, "]"), "error": ""}
+        }
+    } else {
+        return json_err(s, "unterminated array")
+    }
+    while true {
+        let r = json_parse_value(cs, s)
+        if r["ok"] == false {
+            return r
+        }
+        push(arr, r["node"])
+        s = json_skip_ws(cs, r["st"])
+        if s["pos"] >= len(cs) {
+            return json_err(s, "unterminated array")
+        }
+        if cs[s["pos"]] == "," {
+            s = json_adv(s, ",")
+            s = json_skip_ws(cs, s)
+            continue
+        }
+        if cs[s["pos"]] == "]" {
+            return {"ok": true, "node": arr, "st": json_adv(s, "]"), "error": ""}
+        }
+        return json_err(s, "expected ',' or ']'")
+    }
+}
+
+fn json_parse_object(cs: array, st: map) -> map {
+    let s = json_adv(st, "{")
+    s = json_skip_ws(cs, s)
+    let obj = {}
+    if s["pos"] < len(cs) {
+        if cs[s["pos"]] == "}" {
+            return {"ok": true, "node": obj, "st": json_adv(s, "}"), "error": ""}
+        }
+    } else {
+        return json_err(s, "unterminated object")
+    }
+    while true {
+        if s["pos"] >= len(cs) {
+            return json_err(s, "unterminated object")
+        }
+        if cs[s["pos"]] != "\"" {
+            return json_err(s, "expected string key")
+        }
+        let kr = json_parse_string(cs, s)
+        if kr["ok"] == false {
+            return kr
+        }
+        s = json_skip_ws(cs, kr["st"])
+        if s["pos"] >= len(cs) {
+            return json_err(s, "unterminated object")
+        }
+        if cs[s["pos"]] != ":" {
+            return json_err(s, "expected ':'")
+        }
+        s = json_adv(s, ":")
+        s = json_skip_ws(cs, s)
+        let vr = json_parse_value(cs, s)
+        if vr["ok"] == false {
+            return vr
+        }
+        obj[kr["node"]] = vr["node"]
+        s = json_skip_ws(cs, vr["st"])
+        if s["pos"] >= len(cs) {
+            return json_err(s, "unterminated object")
+        }
+        if cs[s["pos"]] == "," {
+            s = json_adv(s, ",")
+            s = json_skip_ws(cs, s)
+            continue
+        }
+        if cs[s["pos"]] == "}" {
+            return {"ok": true, "node": obj, "st": json_adv(s, "}"), "error": ""}
+        }
+        return json_err(s, "expected ',' or '}'")
+    }
+}
+
+fn json_parse(text: str) -> map {
+    let cs = text.chars()
+    let s = json_skip_ws(cs, {"pos": 0, "line": 1, "col": 1})
+    if s["pos"] >= len(cs) {
+        return {"ok": false, "value": 0, "error": "line " + str(s["line"]) + ", col " + str(s["col"]) + ": empty input"}
+    }
+    let r = json_parse_value(cs, s)
+    if r["ok"] == false {
+        return {"ok": false, "value": 0, "error": r["error"]}
+    }
+    let e = json_skip_ws(cs, r["st"])
+    if e["pos"] != len(cs) {
+        return {"ok": false, "value": 0, "error": "line " + str(e["line"]) + ", col " + str(e["col"]) + ": trailing characters"}
+    }
+    return {"ok": true, "value": r["node"], "error": ""}
+}
+
+fn json_parse_or_assert(text: str) -> json {
+    let r = json_parse(text)
+    if r["ok"] == false {
+        print(r["error"])
+        assert(false)
+    }
+    return r["value"]
+}
+
+fn json_get(v: json, key: str) -> json {
+    return v[key]
+}
+
+fn json_at(v: json, idx: i32) -> json {
+    return v[idx]
+}
+
+fn json_is_null(v: json) -> bool {
+    let m = 0
+    try {
+        m = v.contains("$json")
+    } catch e {
+        m = 0
+    }
+    if m == 1 {
+        return v["$json"] == "null"
+    } else {
+        return false
+    }
+}
+
+fn json_is_true(v: json) -> bool {
+    let m = 0
+    try {
+        m = v.contains("$json")
+    } catch e {
+        m = 0
+    }
+    if m == 1 {
+        return v["$json"] == "true"
+    } else {
+        return false
+    }
+}
+
+fn json_is_false(v: json) -> bool {
+    let m = 0
+    try {
+        m = v.contains("$json")
+    } catch e {
+        m = 0
+    }
+    if m == 1 {
+        return v["$json"] == "false"
+    } else {
+        return false
+    }
+}
+
+fn json_type(v: json) -> str {
+    let m = 0
+    try {
+        m = v.contains("$json")
+    } catch e {
+        m = 0
+    }
+    if m == 1 {
+        if v["$json"] == "null" {
+            return "null"
+        } else {
+            return "bool"
+        }
+    }
+    let a = 0
+    try {
+        v.join("")
+        a = 1
+    } catch e {
+        a = 0
+    }
+    if a == 1 {
+        return "array"
+    }
+    let o = 0
+    try {
+        keys(v)
+        o = 1
+    } catch e2 {
+        o = 0
+    }
+    if o == 1 {
+        return "object"
+    }
+    let s = 0
+    try {
+        v.upper()
+        s = 1
+    } catch e3 {
+        s = 0
+    }
+    if s == 1 {
+        return "str"
+    }
+    if str(v).contains(".") {
+        return "float"
+    } else {
+        return "int"
+    }
+}
+
+fn json_escape_str(s: str) -> str {
+    let e = s.replace("\\", "\\\\")
+    e = e.replace("\"", "\\\"")
+    e = e.replace("\n", "\\n")
+    e = e.replace("\r", "\\r")
+    e = e.replace("\t", "\\t")
+    return e
+}
+
+fn json_spaces(n: i32) -> str {
+    let out = ""
+    let i = 0
+    while i < n {
+        out = out + " "
+        i = i + 1
+    }
+    return out
+}
+
+fn json_pretty_at(v: json, indent: i32, depth: i32) -> str {
+    let t = json_type(v)
+    if t == "str" {
+        return "\"" + json_escape_str(v) + "\""
+    }
+    if t == "int" {
+        return str(v)
+    }
+    if t == "float" {
+        return str(v)
+    }
+    if t == "null" {
+        return "null"
+    }
+    if t == "bool" {
+        if json_is_true(v) {
+            return "true"
+        } else {
+            return "false"
+        }
+    }
+    if t == "array" {
+        if len(v) == 0 {
+            return "[]"
+        }
+        let out = "[\n"
+        let i = 0
+        while i < len(v) {
+            out = out + json_spaces((depth + 1) * indent) + json_pretty_at(v[i], indent, depth + 1)
+            if i + 1 < len(v) {
+                out = out + ","
+            }
+            out = out + "\n"
+            i = i + 1
+        }
+        return out + json_spaces(depth * indent) + "]"
+    }
+    let out2 = "{\n"
+    let ks = keys(v)
+    if len(ks) == 0 {
+        return "{}"
+    }
+    let j = 0
+    while j < len(ks) {
+        out2 = out2 + json_spaces((depth + 1) * indent) + "\"" + json_escape_str(ks[j]) + "\": " + json_pretty_at(v[ks[j]], indent, depth + 1)
+        if j + 1 < len(ks) {
+            out2 = out2 + ","
+        }
+        out2 = out2 + "\n"
+        j = j + 1
+    }
+    return out2 + json_spaces(depth * indent) + "}"
+}
+
+fn json_pretty(v: json, indent: i32) -> str {
+    return json_pretty_at(v, indent, 0)
+}

@@ -6,5 +6,15 @@ fn main() -> i32 {
     failures = failures + test_check(1 == 1, "truth")
     failures = failures + test_eq_int(40 + 2, 42, "answer")
     failures = failures + test_eq_str("ab" + "c", "abc", "concat")
-    return test_summary(failures)
+    let rc = test_summary(failures)
+    assert(rc == 0)
+    let passed = 0
+    let failed = test_suite("demo")
+    failed = failed + test_run("run-pass", true)
+    passed = passed + 1
+    failed = failed + test_eq_float(0.1 + 0.2, 0.3, 0.0001, "float-eps")
+    passed = passed + 1
+    let code = test_report(passed, failed)
+    print("testing: OK")
+    return code
 }

@@ -1,0 +1,7 @@
+[project]
+name = "text"
+version = "1.0.0"
+description = "Pure text utilities: padding, wrapping, case conversion"
+authors = ["Klang Core"]
+
+[dependencies]

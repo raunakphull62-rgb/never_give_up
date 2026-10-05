@@ -1,0 +1,285 @@
+// collections — heaps, deques, ordered maps, set operations.
+//
+// Import: import "collections/lib.klang"
+//
+// Value semantics throughout (pass-by-value): mutating operations
+// return the updated collection. i32 elements like the rest of the
+// package. Empty heap/deque pops assert (programmer error).
+
+struct Heap {
+    items: array
+    is_max: i32
+}
+
+fn heap_new_min() -> Heap {
+    return Heap { items: range(0, 0), is_max: 0 }
+}
+
+fn heap_new_max() -> Heap {
+    return Heap { items: range(0, 0), is_max: 1 }
+}
+
+fn heap_len(h: Heap) -> i32 {
+    return len(h.items)
+}
+
+fn heap_wins(a: i32, b: i32, is_max: i32) -> bool {
+    if is_max == 1 {
+        return a > b
+    } else {
+        return a < b
+    }
+}
+
+fn heap_peek(h: Heap) -> i32 {
+    assert(len(h.items) > 0)
+    return h.items[0]
+}
+
+fn heap_push(h: Heap, v: i32) -> Heap {
+    let items = h.items
+    push(items, v)
+    let i = len(items) - 1
+    while i > 0 {
+        let p = (i - 1) / 2
+        if heap_wins(items[i], items[p], h.is_max) {
+            let tmp = items[i]
+            items[i] = items[p]
+            items[p] = tmp
+            i = p
+        } else {
+            break
+        }
+    }
+    h.items = items
+    return h
+}
+
+fn heap_pop(h: Heap) -> map {
+    assert(len(h.items) > 0)
+    let items = h.items
+    let top = items[0]
+    items[0] = items[len(items) - 1]
+    pop(items)
+    let i = 0
+    while true {
+        let left = i * 2 + 1
+        if left >= len(items) {
+            break
+        }
+        let best = left
+        let right = left + 1
+        if right < len(items) {
+            if heap_wins(items[right], items[left], h.is_max) {
+                best = right
+            }
+        }
+        if heap_wins(items[best], items[i], h.is_max) {
+            let tmp = items[i]
+            items[i] = items[best]
+            items[best] = tmp
+            i = best
+        } else {
+            break
+        }
+    }
+    h.items = items
+    return {"value": top, "heap": h}
+}
+
+fn heap_sorted(h: Heap) -> array {
+    let out = range(0, 0)
+    let work = h
+    while heap_len(work) > 0 {
+        let r = heap_pop(work)
+        push(out, r["value"])
+        work = r["heap"]
+    }
+    return out
+}
+
+struct Deque {
+    front: array
+    back: array
+}
+
+fn deque_new() -> Deque {
+    return Deque { front: range(0, 0), back: range(0, 0) }
+}
+
+fn deque_len(d: Deque) -> i32 {
+    return len(d.front) + len(d.back)
+}
+
+fn deque_push_back(d: Deque, v: i32) -> Deque {
+    let back = d.back
+    push(back, v)
+    d.back = back
+    return d
+}
+
+fn deque_push_front(d: Deque, v: i32) -> Deque {
+    let front = d.front
+    push(front, v)
+    d.front = front
+    return d
+}
+
+fn deque_refill(d: Deque) -> Deque {
+    let front = d.front
+    let back = d.back
+    let i = len(back) - 1
+    while i >= 0 {
+        push(front, back[i])
+        i = i - 1
+    }
+    d.front = front
+    d.back = range(0, 0)
+    return d
+}
+
+fn deque_peek_front(d: Deque) -> i32 {
+    if len(d.front) > 0 {
+        return d.front[len(d.front) - 1]
+    }
+    assert(len(d.back) > 0)
+    return d.back[0]
+}
+
+fn deque_peek_back(d: Deque) -> i32 {
+    if len(d.back) > 0 {
+        return d.back[len(d.back) - 1]
+    }
+    assert(len(d.front) > 0)
+    return d.front[0]
+}
+
+fn deque_pop_front(d: Deque) -> map {
+    if len(d.front) == 0 {
+        d = deque_refill(d)
+    }
+    let front = d.front
+    assert(len(front) > 0)
+    let v = pop(front)
+    d.front = front
+    return {"value": v, "deque": d}
+}
+
+fn deque_pop_back(d: Deque) -> map {
+    if len(d.back) == 0 {
+        assert(len(d.front) > 0)
+        let rev = range(0, 0)
+        let i = len(d.front) - 1
+        while i >= 0 {
+            push(rev, d.front[i])
+            i = i - 1
+        }
+        d.back = rev
+        d.front = range(0, 0)
+    }
+    let back = d.back
+    let v = pop(back)
+    d.back = back
+    return {"value": v, "deque": d}
+}
+
+struct OrderedMap {
+    keys: array
+    vals: map
+}
+
+fn omap_new() -> OrderedMap {
+    return OrderedMap { keys: range(0, 0), vals: {} }
+}
+
+fn omap_put(m: OrderedMap, k: str, v: i32) -> OrderedMap {
+    let vals = m.vals
+    vals[k] = v
+    m.vals = vals
+    if m.keys.contains(k) == false {
+        let keys = m.keys
+        push(keys, k)
+        m.keys = keys
+    }
+    return m
+}
+
+fn omap_get(m: OrderedMap, k: str) -> i32 {
+    assert(m.vals.contains(k))
+    return m.vals[k]
+}
+
+fn omap_get_or(m: OrderedMap, k: str, dflt: i32) -> i32 {
+    if m.vals.contains(k) {
+        return m.vals[k]
+    } else {
+        return dflt
+    }
+}
+
+fn omap_contains(m: OrderedMap, k: str) -> bool {
+    return m.vals.contains(k)
+}
+
+fn omap_len(m: OrderedMap) -> i32 {
+    return len(m.keys)
+}
+
+fn omap_keys(m: OrderedMap) -> array {
+    return m.keys
+}
+
+fn omap_remove(m: OrderedMap, k: str) -> OrderedMap {
+    let keys = range(0, 0)
+    for old in m.keys {
+        if old != k {
+            push(keys, old)
+        }
+    }
+    let vals = {}
+    for kk in keys {
+        vals[kk] = m.vals[kk]
+    }
+    m.keys = keys
+    m.vals = vals
+    return m
+}
+
+fn set_union(a: array, b: array) -> array {
+    let out = range(0, 0)
+    for x in a {
+        if out.contains(x) == false {
+            push(out, x)
+        }
+    }
+    for y in b {
+        if out.contains(y) == false {
+            push(out, y)
+        }
+    }
+    return out
+}
+
+fn set_intersection(a: array, b: array) -> array {
+    let out = range(0, 0)
+    for x in a {
+        if b.contains(x) {
+            if out.contains(x) == false {
+                push(out, x)
+            }
+        }
+    }
+    return out
+}
+
+fn set_difference(a: array, b: array) -> array {
+    let out = range(0, 0)
+    for x in a {
+        if b.contains(x) == false {
+            if out.contains(x) == false {
+                push(out, x)
+            }
+        }
+    }
+    return out
+}

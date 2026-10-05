@@ -44,3 +44,43 @@ fn test_summary(failures: i32) -> i32 {
         return failures
     }
 }
+
+fn test_suite(name: str) -> i32 {
+    print("SUITE " + name)
+    return 0
+}
+
+fn test_run(name: str, passed: bool) -> i32 {
+    if passed {
+        print("PASS " + name)
+        return 0
+    } else {
+        print("FAIL " + name)
+        return 1
+    }
+}
+
+fn test_eq_float(a: f64, b: f64, eps: f64, name: str) -> i32 {
+    let d = a - b
+    if d < 0.0 {
+        d = 0.0 - d
+    }
+    if d <= eps {
+        print("PASS " + name)
+        return 0
+    } else {
+        print("FAIL " + name + ": got " + str(a) + ", want " + str(b))
+        assert(false)
+        return 1
+    }
+}
+
+fn test_report(passed: i32, failed: i32) -> i32 {
+    print("TESTS passed=" + str(passed) + " failed=" + str(failed))
+    if failed == 0 {
+        print("ALL TESTS PASSED")
+        return 0
+    } else {
+        return failed
+    }
+}
