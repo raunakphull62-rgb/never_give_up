@@ -73,6 +73,37 @@ pub fn map_spawn_error(cmd: &str, err: &std::io::Error) -> Diagnostic {
     }
 }
 
+/// Current working directory as a (lossy) UTF-8 string. A process
+/// without a reachable CWD (deleted out from under it) is `E-IO-FAILED`
+/// with the real OS message.
+pub fn cwd() -> Result<String, Diagnostic> {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| crate::stdlib::file::map_io_error("cwd", ".", &e))
+}
+
+/// Set the environment variable `name` to `value` for this process
+/// (and its future children). Names containing `=` or NUL are
+/// `E-ENV-INVALID` (`std::env::set_var` would panic on them); empty
+/// names follow the platform (allowed on Unix). Always succeeds
+/// otherwise — `set_var` itself is infallible.
+pub fn set_env(name: &str, value: &str) -> Result<(), Diagnostic> {
+    if name.contains('=') || name.contains('\0') || value.contains('\0') {
+        return Err(crate::diagnostics::Diagnostic::error(
+            "E-ENV-INVALID",
+            &format!("set_env({name:?}) failed: names cannot contain `=` or NUL"),
+            "runtime",
+            0,
+            0,
+            "environment variable names cannot contain `=` or NUL bytes",
+            &["pass a plain NAME without `=`"],
+            "env/invalid",
+        ));
+    }
+    std::env::set_var(name, value);
+    Ok(())
+}
+
 /// Captured result of one synchronous run-and-wait execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessOutput {

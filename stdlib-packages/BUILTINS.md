@@ -88,9 +88,33 @@ tested `[0,1,2].join(",") == "0,1,2"`). Map: `len/keys/contains`
 (`m.contains("b") == 1`). `m[k]` missing key → `E-RUNTIME`; `m[k] = v`
 upserts; `a[i] = v` in-bounds only.
 
-## Not available (Phase 2)
+## Not available (Phase 2 Batch B)
 
-`args`, `exit`, `cwd`, `set_env`, `list_dir`, `make_dir(s)`, `is_dir`,
-`is_file`, `rename_file`, `copy_file`, `file_size`, `ord`, `chr`, `slice`,
-`sort`, float fns (`sqrt pow abs min max floor ceil sin cos tan atan2 log
+Float fns (`sqrt pow abs min max floor ceil sin cos tan atan2 log
 exp`), `random_int`, `random_float`, `sha256`, `hmac_sha256`, sockets.
+
+## System + data (Phase 2 Batch A)
+
+Program arguments: `klang run prog.klang -- a b` puts `["a","b"]`
+into `args()`; without `--`, non-flag positionals after path/entry
+are used (second positional stays the entry name, historically).
+Entry-param binding is untouched (`main()` + CLI args is not an arity
+error). JIT and MCP paths see `[]` (builtins are interpreter-only).
+
+| Fn | Signature | Tested behavior |
+|---|---|---|
+| `args` | `() -> array<str>` | Program argv after the `.klang` file; `[]` when none. |
+| `exit` | `(code: i32) -> !` | Unwinds everything as `E-EXIT` (message `exit(N)`); **uncatchable** like `E-CANCELLED`. CLI exits with the low 8 bits. Never returns. |
+| `cwd` | `() -> str` | Process working dir; unreachable CWD is `E-IO-FAILED`. |
+| `set_env` | `(name: str, value: str) -> i32` | Returns 1. Names with `=`/NUL are `E-ENV-INVALID` (`set_var` would panic). |
+| `list_dir` | `(path: str) -> array<str>` | Entry names (no `.`/`..`), **sorted** (raw `read_dir` order is OS-dependent). Missing → `E-IO-NOT-FOUND`. |
+| `make_dir` | `(path: str) -> i32` | Single level; existing dir → `E-IO-FAILED` (use `make_dirs`). |
+| `make_dirs` | `(path: str) -> i32` | Idempotent (`create_dir_all`). |
+| `is_dir` / `is_file` | `(path: str) -> bool` | Never fail (mirror `exists`); all guarded by `reject_unsafe_path` → `E-RUNTIME` on `..`/foreign-absolute paths. |
+| `rename_file` | `(from: str, to: str) -> i32` | Returns 1; missing source → `E-IO-NOT-FOUND`. Both paths guarded. |
+| `copy_file` | `(from: str, to: str) -> i32` | Returns bytes copied. |
+| `file_size` | `(path: str) -> i32` | Bytes. Missing → `E-IO-NOT-FOUND`. Huge sizes flow as values but cannot enter checked `i32` arithmetic (same as oversized `int()`). |
+| `ord` | `(s: str) -> i32` | First char's codepoint. Empty → `E-CHAR-INVALID`; non-string → `E-CHAR-INVALID`. |
+| `chr` | `(n: i32) -> str` | Scalar → 1-char string. Surrogates/negatives/`>0x10FFFF` → `E-CHAR-INVALID`. |
+| `slice` | `(str, lo: i32, hi: i32) -> str` / `(array, lo, hi) -> array` | Char-based `[lo, hi)`. Negative, `hi < lo`, or past-the-end → `E-RUNTIME` (same loudness as `s[i]`). |
+| `sort` | `(list: array) -> array` | Homogeneous ints/floats (`total_cmp`, NaN-safe)/strings only; mixed (incl. int+float) → `E-TYPE`. Empty sorts to empty. |

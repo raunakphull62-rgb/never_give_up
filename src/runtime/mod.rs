@@ -165,7 +165,7 @@ impl Value {
     }
 }
 
-fn runtime_err(msg: &str) -> Diagnostic {
+pub(crate) fn runtime_err(msg: &str) -> Diagnostic {
     Diagnostic::error(
         "E-RUNTIME",
         msg,
@@ -247,6 +247,9 @@ struct ExecCtx {
     module: Arc<MirModule>,
     stubs: HashMap<String, i64>,
     output: Arc<Mutex<Vec<String>>>,
+    /// Program arguments after the `.klang` file (CLI `run` supplies
+    /// them; tests and MCP pass none). Read by the `args()` builtin.
+    argv: Vec<String>,
 }
 
 /// Run `entry` in `module` with joined task threads.
@@ -293,6 +296,21 @@ pub fn run_with_output_value_partial(
     args: &[Value],
     stubs: &HashMap<String, i32>,
 ) -> (Result<Value, Diagnostic>, Vec<String>) {
+    run_with_argv(module, entry, args, &[], stubs)
+}
+
+/// [`run_with_output_value_partial`] plus program arguments for the
+/// `args()` builtin. Entry-param binding is unchanged (`args` still
+/// binds entry params); `argv` is a separate channel read only by
+/// `args()`, so `main()` with no params plus CLI args is not an
+/// arity error.
+pub fn run_with_argv(
+    module: &MirModule,
+    entry: &str,
+    args: &[Value],
+    argv: &[String],
+    stubs: &HashMap<String, i32>,
+) -> (Result<Value, Diagnostic>, Vec<String>) {
     // Entry arity must match exactly (calling-convention safety), mirroring
     // the JIT backend. The CLI always passes zero args, so missing params
     // are an arity error, not silent zeros. No program output can exist
@@ -325,6 +343,7 @@ pub fn run_with_output_value_partial(
             .map(|(k, v)| (k.clone(), i64::from(*v)))
             .collect(),
         output: Arc::new(Mutex::new(Vec::new())),
+        argv: argv.to_vec(),
     };
     let r = exec_function(&ctx, entry, args, 0, &CancelToken::default());
     let out = ctx.output.lock().unwrap().clone();
@@ -651,7 +670,7 @@ fn run_instrs(
             MirOp::Call { into, func, args } => {
                 // Builtins run inline so `push` can mutate the caller's array.
                 if is_builtin(func) {
-                    let v = exec_builtin(func, args, &mut values, &ctx.stubs)?;
+                    let v = exec_builtin(func, args, &mut values, &ctx.stubs, &ctx.argv)?;
                     values.insert(into.clone(), v.clone());
                     last = v;
                     pc += 1;
@@ -1064,8 +1083,9 @@ fn run_instrs(
                     }
                     Ok(ExecFlow::Returned(v)) => return Ok(ExecFlow::Returned(v)),
                     // Cooperative cancellation is not an error to recover
-                    // from: re-raise so task groups keep draining.
-                    Err(d) if d.is_cancelled() => return Err(d),
+                    // from: re-raise so task groups keep draining. Whole-
+                    // program `exit()` behaves the same (uncatchable).
+                    Err(d) if d.is_cancelled() || d.is_exit() => return Err(d),
                     Err(d) => {
                         values.insert(
                             code_var.clone(),
@@ -1137,6 +1157,22 @@ fn is_builtin(name: &str) -> bool {
             | "parse_float"
             | "format"
             | "insert"
+            | "args"
+            | "exit"
+            | "cwd"
+            | "set_env"
+            | "list_dir"
+            | "make_dir"
+            | "make_dirs"
+            | "is_dir"
+            | "is_file"
+            | "rename_file"
+            | "copy_file"
+            | "file_size"
+            | "ord"
+            | "chr"
+            | "slice"
+            | "sort"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1174,6 +1210,7 @@ fn exec_builtin(
     args: &[String],
     values: &mut HashMap<String, Value>,
     stubs: &HashMap<String, i64>,
+    argv: &[String],
 ) -> Result<Value, Diagnostic> {    let get = |name: &String| lookup(values, stubs, name).unwrap_or(Value::Int(0));
     match func {
         "len" => {
@@ -1552,6 +1589,151 @@ fn exec_builtin(
             };
             let r = crate::stdlib::http::post_async(&url, &body, &headers)?;
             Ok(http_response_map(&r))
+        }
+        "args" => {
+            if !args.is_empty() {
+                return Err(runtime_err("args() takes 0 arguments"));
+            }
+            Ok(Value::Array(
+                argv.iter().map(|s| Value::Str(s.clone())).collect(),
+            ))
+        }
+        "exit" => {
+            if args.len() != 1 {
+                return Err(runtime_err("exit() takes 1 argument"));
+            }
+            Err(Diagnostic::exit_request(get(&args[0]).as_int() as i32))
+        }
+        "cwd" => {
+            if !args.is_empty() {
+                return Err(runtime_err("cwd() takes 0 arguments"));
+            }
+            crate::stdlib::process::cwd().map(Value::Str)
+        }
+        "set_env" => {
+            if args.len() != 2 {
+                return Err(runtime_err("set_env() takes 2 arguments"));
+            }
+            let name = get(&args[0]).render();
+            let value = get(&args[1]).render();
+            crate::stdlib::process::set_env(&name, &value).map(|()| Value::Int(1))
+        }
+        "list_dir" => {
+            if args.len() != 1 {
+                return Err(runtime_err("list_dir() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::file::list_dir(&path)
+                .map(|names| Value::Array(names.into_iter().map(Value::Str).collect()))
+        }
+        "make_dir" => {
+            if args.len() != 1 {
+                return Err(runtime_err("make_dir() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::file::make_dir(&path).map(|()| Value::Int(1))
+        }
+        "make_dirs" => {
+            if args.len() != 1 {
+                return Err(runtime_err("make_dirs() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::file::make_dirs(&path).map(|()| Value::Int(1))
+        }
+        "is_dir" => {
+            if args.len() != 1 {
+                return Err(runtime_err("is_dir() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            Ok(Value::Int(i64::from(crate::stdlib::file::is_dir(&path))))
+        }
+        "is_file" => {
+            if args.len() != 1 {
+                return Err(runtime_err("is_file() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            Ok(Value::Int(i64::from(crate::stdlib::file::is_file(&path))))
+        }
+        "rename_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("rename_file() takes 2 arguments"));
+            }
+            let from = get(&args[0]).render();
+            let to = get(&args[1]).render();
+            reject_unsafe_path(&from)?;
+            reject_unsafe_path(&to)?;
+            crate::stdlib::file::rename(&from, &to).map(|()| Value::Int(1))
+        }
+        "copy_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("copy_file() takes 2 arguments"));
+            }
+            let from = get(&args[0]).render();
+            let to = get(&args[1]).render();
+            reject_unsafe_path(&from)?;
+            reject_unsafe_path(&to)?;
+            crate::stdlib::file::copy(&from, &to).map(|n| Value::Int(n as i64))
+        }
+        "file_size" => {
+            if args.len() != 1 {
+                return Err(runtime_err("file_size() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::file::file_size(&path).map(|n| Value::Int(n as i64))
+        }
+        "ord" => {
+            if args.len() != 1 {
+                return Err(runtime_err("ord() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Str(s) => crate::stdlib::seq::ord(&s).map(|n| Value::Int(n as i64)),
+                _ => Err(crate::stdlib::seq::char_invalid("ord", "ord() needs a string")),
+            }
+        }
+        "chr" => {
+            if args.len() != 1 {
+                return Err(runtime_err("chr() takes 1 argument"));
+            }
+            crate::stdlib::seq::chr(get(&args[0]).as_int()).map(Value::Str)
+        }
+        "slice" => {
+            if args.len() != 3 {
+                return Err(runtime_err("slice() takes 3 arguments"));
+            }
+            let (lo, hi) = (get(&args[1]).as_int(), get(&args[2]).as_int());
+            match get(&args[0]) {
+                Value::Str(s) => crate::stdlib::seq::slice_str(&s, lo, hi).map(Value::Str),
+                Value::Array(items) => {
+                    if lo < 0 || hi < 0 {
+                        return Err(runtime_err("negative index"));
+                    }
+                    if hi < lo {
+                        return Err(runtime_err("slice() end before start"));
+                    }
+                    if (hi as usize) > items.len() {
+                        return Err(runtime_err("array slice index out of bounds"));
+                    }
+                    Ok(Value::Array(items[lo as usize..hi as usize].to_vec()))
+                }
+                _ => Err(runtime_err("slice() needs a string or array first")),
+            }
+        }
+        "sort" => {
+            if args.len() != 1 {
+                return Err(runtime_err("sort() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Array(items) => {
+                    crate::stdlib::seq::sort_list(&items).map(Value::Array)
+                }
+                _ => Err(runtime_err("sort() needs an array")),
+            }
         }
         "__echo_create" => {
             if args.len() != 1 {

@@ -120,6 +120,39 @@ impl Diagnostic {
         self.code == "E-CANCELLED"
     }
 
+    /// Whole-program exit request from `exit(code)`: unwinds every
+    /// frame and every task group, uncatchable like cancellation
+    /// (only `E-CANCELLED` and `E-EXIT` bypass `try/catch`). The CLI
+    /// maps it to the process exit code; other hosts (MCP, tests) see
+    /// the diagnostic.
+    pub fn exit_request(code: i32) -> Self {
+        Self::error(
+            "E-EXIT",
+            &format!("exit({code})"),
+            "runtime",
+            0,
+            0,
+            "explicit exit() call, not a failure",
+            &[],
+            "runtime/exit",
+        )
+    }
+
+    /// True for whole-program exit requests (bypass `try/catch`).
+    pub fn is_exit(&self) -> bool {
+        self.code == "E-EXIT"
+    }
+
+    /// Process exit code carried by [`Self::exit_request`]. Parses the
+    /// `exit(N)` message; anything else (never constructed) yields 1.
+    pub fn exit_code(&self) -> i32 {
+        self.message
+            .strip_prefix("exit(")
+            .and_then(|t| t.strip_suffix(')'))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1)
+    }
+
     /// Scope-violation diagnostic: a spawned handle escapes its group.
     pub fn task_leak(file: &str, start: usize, end: usize, handle: &str) -> Self {
         Self::error(

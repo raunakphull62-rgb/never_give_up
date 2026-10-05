@@ -3205,6 +3205,12 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "regex_is_match" | "regex_find" => 2,
         "time_sleep" | "time_elapsed" => 1,
         "time_now" => 0,
+        "args" | "cwd" => 0,
+        "exit" => 1,
+        "set_env" | "rename_file" | "copy_file" => 2,
+        "list_dir" | "make_dir" | "make_dirs" | "is_dir" | "is_file" | "file_size"
+        | "ord" | "chr" | "sort" => 1,
+        "slice" => 3,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -3417,6 +3423,102 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Map
         }
+        "args" => Ty::Array,
+        "exit" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`exit()` code", "i32", &args[0]));
+            }
+            Ty::Int
+        }
+        "cwd" => Ty::Str,
+        "set_env" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`set_env()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "list_dir" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`list_dir()` path", "str", &args[0]));
+            }
+            Ty::Array
+        }
+        "make_dir" | "make_dirs" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` path"), "str", &args[0]));
+            }
+            Ty::Int
+        }
+        "is_dir" | "is_file" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` path"), "str", &args[0]));
+            }
+            Ty::Bool
+        }
+        "rename_file" | "copy_file" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`{func}()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "file_size" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`file_size()` path", "str", &args[0]));
+            }
+            Ty::Int
+        }
+        "ord" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`ord()` string", "str", &args[0]));
+            }
+            Ty::Int
+        }
+        "chr" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`chr()` codepoint", "i32", &args[0]));
+            }
+            Ty::Str
+        }
+        "slice" => {
+            if !matches!(&args[0], Ty::Str | Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`slice()` value", "str/array", &args[0]));
+            }
+            for (i, a) in args.iter().enumerate().skip(1) {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`slice()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            if matches!(&args[0], Ty::Array) {
+                Ty::Array
+            } else {
+                Ty::Str
+            }
+        }
+        "sort" => {
+            if !matches!(&args[0], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`sort()` list", "array", &args[0]));
+            }
+            Ty::Array
+        }
         _ => Ty::Unknown,
     }
 }
@@ -3552,6 +3654,22 @@ pub fn is_builtin(name: &str) -> bool {
             | "parse_float"
             | "format"
             | "insert"
+            | "args"
+            | "exit"
+            | "cwd"
+            | "set_env"
+            | "list_dir"
+            | "make_dir"
+            | "make_dirs"
+            | "is_dir"
+            | "is_file"
+            | "rename_file"
+            | "copy_file"
+            | "file_size"
+            | "ord"
+            | "chr"
+            | "slice"
+            | "sort"
     )
 }
 

@@ -118,3 +118,66 @@ pub fn exists(path: &str) -> bool {
 pub fn remove(path: &str) -> Result<(), Diagnostic> {
     std::fs::remove_file(path).map_err(|e| map_io_error("remove_file", path, &e))
 }
+
+/// List entry names (files and directories, not `.`/`..`) directly
+/// inside `path`, sorted for determinism (raw `read_dir` order is
+/// OS-dependent). Missing dirs map to `E-IO-NOT-FOUND`, permission
+/// failures to `E-IO-PERMISSION` via [`map_io_error`].
+pub fn list_dir(path: &str) -> Result<Vec<String>, Diagnostic> {
+    let rd = std::fs::read_dir(path).map_err(|e| map_io_error("list_dir", path, &e))?;
+    let mut out = Vec::new();
+    for entry in rd {
+        let entry = entry.map_err(|e| map_io_error("list_dir", path, &e))?;
+        let name = entry.file_name();
+        out.push(name.to_string_lossy().into_owned());
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Create the single directory at `path` (parents must exist).
+/// Creating an existing directory is `E-IO-FAILED` (use `make_dirs`
+/// for the idempotent form); other failures map via [`map_io_error`].
+pub fn make_dir(path: &str) -> Result<(), Diagnostic> {
+    std::fs::create_dir(path).map_err(|e| map_io_error("make_dir", path, &e))
+}
+
+/// Create `path` and all missing parents (idempotent: existing dirs
+/// are fine). Failures map via [`map_io_error`].
+pub fn make_dirs(path: &str) -> Result<(), Diagnostic> {
+    std::fs::create_dir_all(path).map_err(|e| map_io_error("make_dirs", path, &e))
+}
+
+/// True when `path` exists and is a directory. Never fails (mirrors
+/// `exists()`).
+pub fn is_dir(path: &str) -> bool {
+    std::path::Path::new(path).is_dir()
+}
+
+/// True when `path` exists and is a file. Never fails (mirrors
+/// `exists()`).
+pub fn is_file(path: &str) -> bool {
+    std::path::Path::new(path).is_file()
+}
+
+/// Rename (move) `from` to `to`. Missing sources map to
+/// `E-IO-NOT-FOUND`, permission failures to `E-IO-PERMISSION` via
+/// [`map_io_error`].
+pub fn rename(from: &str, to: &str) -> Result<(), Diagnostic> {
+    std::fs::rename(from, to).map_err(|e| map_io_error("rename_file", from, &e))
+}
+
+/// Copy `from` to `to`, returning the byte count copied. Missing
+/// sources map to `E-IO-NOT-FOUND` via [`map_io_error`].
+pub fn copy(from: &str, to: &str) -> Result<u64, Diagnostic> {
+    std::fs::copy(from, to).map_err(|e| map_io_error("copy_file", from, &e))
+}
+
+/// Size of the file at `path` in bytes. Missing files map to
+/// `E-IO-NOT-FOUND` via [`map_io_error`]. Sizes above `i32::MAX` flow
+/// as values but cannot participate in checked `i32` arithmetic
+/// (same as oversized `int()` results).
+pub fn file_size(path: &str) -> Result<u64, Diagnostic> {
+    let meta = std::fs::metadata(path).map_err(|e| map_io_error("file_size", path, &e))?;
+    Ok(meta.len())
+}

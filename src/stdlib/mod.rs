@@ -48,6 +48,11 @@ pub mod http;
 /// `read_line()` / `parse_int(s)` / `parse_float(s)`.
 pub mod io;
 
+/// Value utilities: `ord` / `chr` / `slice` / `sort` (SYS-DATA-1).
+/// Wired into the interpreter as the flat builtins
+/// `ord(s)` / `chr(n)` / `slice(v, lo, hi)` / `sort(list)`.
+pub mod seq;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {
