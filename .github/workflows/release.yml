@@ -234,8 +234,7 @@ jobs:
               }
               fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
               console.log(`publish-npm: ${p} -> ${version}`);
-            }
-          }'
+            }'
 
           publish_one() { # <package-dir>
             local dir="$1"
