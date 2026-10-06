@@ -138,12 +138,16 @@ import "my-pkg/lib.klang"
 ```
 
 `klang run` / `klang check` / `klang build` fetch automatically when
-online (`--registry` / `KLANG_REGISTRY` select the server;
+online (`--registry` / `KLANG_REGISTRY` / project `klang.toml`
+`[registry] url` / `~/.klang/config.toml` select the server;
 `--offline` forbids network and uses the vendor dir or fails loudly).
-Fetched files land in `.klang_pkgs/<name>/<version>/`, pinned by
-`klang.lock` (`package <name> <version> <sha256>`).
+Downloads never send or require a token. Fetched files land in
+`.klang_pkgs/<name>/<version>/`, pinned by `klang.lock`
+(`package <name> <version> <sha256>`, written atomically via
+`klang.lock.tmp` + fsync + rename). `klang list` shows direct deps;
+`klang list --all` shows transitive deps indented under requirers.
 
-## 5. Integrity model (what is and isn't guaranteed)
+## 6. Integrity model (what is and isn't guaranteed)
 
 - Guaranteed: every download is SHA-256-checked against the hash the
   server recorded at publish; the lockfile pins that hash and any drift

@@ -46,16 +46,9 @@ impl<'a> DependencyResolver<'a> {
     }
 
     /// Order graph nodes dependencies-first.
-    pub fn topological_sort(&self, nodes: &[GraphNode]) -> Vec<(String, String)> {
-        // Selection-time resolution guarantees acyclicity; fall back
-        // to name order on skewed input rather than failing.
-        topo_inner(nodes).unwrap_or_else(|_| {
-            let mut out: Vec<(String, String)> = nodes
-                .iter()
-                .map(|n| (n.name.clone(), n.version.clone()))
-                .collect();
-            out.sort();
-            out
-        })
+    /// B3: sort failures (cycles / inconsistent graphs) are returned as
+    /// errors, never hidden behind alphabetical order.
+    pub fn topological_sort(&self, nodes: &[GraphNode]) -> Result<Vec<(String, String)>, String> {
+        topo_inner(nodes)
     }
 }

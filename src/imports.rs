@@ -232,16 +232,27 @@ fn load_from(
     while let Some(work) = queue.pop_front() {
         match work {
             Work::Whole { path, importer, raw } => {
-                let canon = canonical(&path);
+                // B1: resolve to the REAL file first (vendor fallback) so
+                // the canonical key and the base dir for nested imports
+                // are the vendored location, not the logical path.
+                let real = resolve_real(&path, &raw, &vendor).unwrap_or_else(|| path.clone());
+                let canon = canonical(&real);
                 if whole_done.contains(&canon) {
                     continue;
                 }
-                ensure_parsed(&path, &raw, &vendor, &canon, &mut parsed, &mut path_of_idx, &mut files)?;
+                let real_path =
+                    ensure_parsed(&path, &raw, &vendor, &mut parsed, &mut path_of_idx, &mut files)?;
+                // `ensure_parsed` canonicalizes the real path; recompute
+                // to stay in sync (same value as `canon` above).
+                let canon = canonical(&real_path);
+                if whole_done.contains(&canon) {
+                    continue;
+                }
                 // Mark BEFORE merging so a self-importing file terminates.
                 whole_done.insert(canon.clone());
                 let prog = parsed.get(&canon).expect("just parsed").clone();
                 if expanded.insert(canon.clone()) {
-                    enqueue_imports(&prog, &path, &mut queue)?;
+                    enqueue_imports(&prog, &real_path, &mut queue)?;
                 }
                 merged.mods.extend(prog.mods);
                 merged.enums.extend(prog.enums);
@@ -263,13 +274,14 @@ fn load_from(
                 importer,
                 raw,
             } => {
-                let canon = canonical(&path);
-                ensure_parsed(&path, &raw, &vendor, &canon, &mut parsed, &mut path_of_idx, &mut files)?;
+                let real_path =
+                    ensure_parsed(&path, &raw, &vendor, &mut parsed, &mut path_of_idx, &mut files)?;
+                let canon = canonical(&real_path);
                 let prog = parsed.get(&canon).expect("just parsed").clone();
                 // The target's own imports still apply transitively (a
                 // named function may need its file's other imports).
                 if expanded.insert(canon.clone()) {
-                    enqueue_imports(&prog, &path, &mut queue)?;
+                    enqueue_imports(&prog, &real_path, &mut queue)?;
                 }
                 for name in &names {
                     import_named(
@@ -303,18 +315,25 @@ fn canonical(path: &str) -> String {
 /// read fails and the import names a registry dependency
 /// (`pkg/file.klang`), falls back to the pinned vendor directory (local
 /// files always win — this only runs after the relative read failed).
+/// Returns the REAL path that was read, so callers can base nested
+/// imports on the vendored location (B1 fix).
+fn resolve_real(path: &str, raw: &str, vendor: &Option<VendorCtx>) -> Option<String> {
+    if std::path::Path::new(path).is_file() {
+        return Some(path.to_string());
+    }
+    vendor_fallback(raw, vendor)
+}
+
 fn ensure_parsed(
     path: &str,
     raw: &str,
     vendor: &Option<VendorCtx>,
-    canon: &str,
     parsed: &mut HashMap<String, Program>,
     path_of_idx: &mut Vec<String>,
     files: &mut Vec<LoadedFile>,
-) -> Result<(), ImportError> {
-    if parsed.contains_key(canon) {
-        return Ok(());
-    }
+) -> Result<String, ImportError> {
+    // Resolve the real file first so the canonical key is stable
+    // across different logical importers of the same vendored file.
     let (real_path, src) = match std::fs::read_to_string(path) {
         Ok(src) => (path.to_string(), src),
         Err(first) => match vendor_fallback(raw, vendor) {
@@ -341,16 +360,20 @@ fn ensure_parsed(
             }
         },
     };
+    let canon_real = canonical(&real_path);
+    if parsed.contains_key(&canon_real) {
+        return Ok(real_path);
+    }
     let mut p = Parser::new_with_file(&src, &real_path);
     let prog = p.parse_program().map_err(|d| ImportError::new("E-PARSE", d.to_json()))?;
     let idx = path_of_idx.len() as u32;
-    path_of_idx.push(canon.to_string());
+    path_of_idx.push(canon_real.clone());
     files.push(LoadedFile {
-        path: real_path,
+        path: real_path.clone(),
         bytes: src.len(),
     });
-    parsed.insert(canon.to_string(), prog.with_file_prefix(idx));
-    Ok(())
+    parsed.insert(canon_real, prog.with_file_prefix(idx));
+    Ok(real_path)
 }
 
 /// Vendor-dir fallback for one raw import string. Returns the vendored

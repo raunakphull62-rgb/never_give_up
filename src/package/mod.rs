@@ -69,6 +69,9 @@ pub struct Manifest {
     pub deps: Vec<(String, String)>,
     /// (dep name, raw value) pairs from `[dev-dependencies]`.
     pub dev_deps: Vec<(String, String)>,
+    /// Optional `[registry] url = "..."` (R3.1). `None` when absent.
+    /// Only `url` is accepted in `[registry]`; other keys are ignored.
+    pub registry_url: Option<String>,
 }
 
 impl Manifest {
@@ -88,6 +91,7 @@ impl Manifest {
         let mut build_seen = false;
         let mut deps: Vec<(String, String)> = Vec::new();
         let mut dev_deps: Vec<(String, String)> = Vec::new();
+        let mut registry_url: Option<String> = None;
         let mut section = String::new();
         for raw in text.lines() {
             let line = strip_inline_comment(raw).trim();
@@ -126,6 +130,11 @@ impl Manifest {
                         }
                         _ => {}
                     }
+                } else if section == "registry" {
+                    // R3.1: only `url` is accepted.
+                    if key == "url" && !val.is_empty() {
+                        registry_url = Some(val);
+                    }
                 } else if section.is_empty() || section == "package" {
                     match key {
                         "name" => name = Some(val),
@@ -153,6 +162,7 @@ impl Manifest {
             },
             deps,
             dev_deps,
+            registry_url,
         })
     }
 
@@ -188,6 +198,11 @@ impl Manifest {
                 .map(|a| format!("\"{}\"", escape_toml_str(a)))
                 .collect();
             out.push_str(&format!("authors = [{}]\n", quoted.join(", ")));
+        }
+        if let Some(url) = &self.registry_url {
+            out.push('\n');
+            out.push_str("[registry]\n");
+            out.push_str(&format!("url = \"{}\"\n", escape_toml_str(url)));
         }
         out.push('\n');
         out.push_str("[dependencies]\n");

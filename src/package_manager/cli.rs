@@ -34,8 +34,9 @@ pub fn cmd_install(
     }
 }
 
-/// `klang add name[@constraint] [--dev] [--offline]`: pin in
+/// `klang add name[@constraint] [--dev] [--caret] [--offline]`: pin in
 /// `klang.toml`, install immediately, update `klang.lock`.
+/// B7: `--caret` writes `^X.Y.Z` instead of an exact pin.
 pub fn cmd_add(
     root: &Path,
     base: &str,
@@ -43,8 +44,20 @@ pub fn cmd_add(
     is_dev: bool,
     offline: bool,
 ) -> Result<String, RegistryError> {
+    cmd_add_full(root, base, spec, is_dev, false, offline)
+}
+
+/// Full `add` with `--caret` support.
+pub fn cmd_add_full(
+    root: &Path,
+    base: &str,
+    spec: &str,
+    is_dev: bool,
+    caret: bool,
+    offline: bool,
+) -> Result<String, RegistryError> {
     let (name, constraint) = split_spec(spec);
-    registry::add_dependency_req(root, base, &name, &constraint, is_dev, offline)
+    registry::add_dependency_req(root, base, &name, &constraint, is_dev, caret, offline)
 }
 
 /// `klang remove <name>`: drop from `klang.toml`, delete vendor dirs,
@@ -75,9 +88,15 @@ pub fn cmd_update(
     registry::update_project(root, base, name, offline)
 }
 
-/// `klang list`: installed packages + versions.
+/// `klang list [--all]`: installed packages + versions.
+/// B6: `--all` includes transitive deps indented under requirers.
 pub fn cmd_list(root: &Path) -> Result<String, RegistryError> {
     registry::list_project(root)
+}
+
+/// `klang list --all` variant.
+pub fn cmd_list_all(root: &Path, all: bool) -> Result<String, RegistryError> {
+    registry::list_project_all(root, all)
 }
 
 /// `klang init [name]`: scaffold `klang.toml` + `src/` + `tests/`.

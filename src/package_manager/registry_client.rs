@@ -2,8 +2,9 @@
 //!
 //! Thin PRD-named struct over the [`crate::registry`] client
 //! (`fetch_metadata` / `download` / SHA-256 verification). Base URL
-//! comes from `--registry`, then `KLANG_REGISTRY`, then
-//! [`crate::registry::DEFAULT_REGISTRY`].
+//! resolves via the 5-level precedence in
+//! [`crate::registry::resolve_registry_url`] (flag → env → project
+//! manifest → global config → compiled-in default).
 
 use crate::registry::{self, PackageMeta, RegistryError};
 
@@ -22,12 +23,14 @@ impl RegistryClient {
     }
 
     /// Resolve the base URL from `--registry`-value → `KLANG_REGISTRY`
-    /// env → localhost default (same precedence as the CLI).
+    /// env → project manifest → global config → compiled-in default
+    /// (same precedence as the CLI). Falls back to
+    /// [`crate::registry::DEFAULT_REGISTRY`] when validation fails so
+    /// offline unit tests never panic; CLI paths validate strictly.
     pub fn from_env(registry_flag: Option<&str>) -> Self {
-        let base = registry_flag
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("KLANG_REGISTRY").ok())
-            .unwrap_or_else(|| registry::DEFAULT_REGISTRY.to_string());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let base = registry::resolve_registry_url(registry_flag, Some(&cwd))
+            .unwrap_or_else(|_| registry::DEFAULT_REGISTRY.to_string());
         Self::new(&base)
     }
 

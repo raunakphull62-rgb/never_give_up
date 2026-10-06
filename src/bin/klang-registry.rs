@@ -32,7 +32,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut port: Option<u16> = std::env::var("PORT").ok().and_then(|v| v.parse().ok());
     let mut data_dir: Option<String> = std::env::var("REGISTRY_DATA_DIR").ok();
-    let mut token: Option<String> = std::env::var("REGISTRY_ADMIN_TOKEN").ok();
+    // PRD §4: canonical env is KLANG_REGISTRY_TOKEN; REGISTRY_ADMIN_TOKEN
+    // stays as a backcompat alias.
+    let mut token: Option<String> = std::env::var("KLANG_REGISTRY_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("REGISTRY_ADMIN_TOKEN").ok());
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {

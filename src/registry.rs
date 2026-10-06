@@ -95,10 +95,23 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 // vendor directory reproduces the identical hash for lock verification.
 //
 // Caps (zip-bomb defense, enforced on pack AND unpack):
+// S7: max files 500, max archive 5 MiB by default (env override).
 const ARCHIVE_MAGIC: &[u8; 9] = b"KLANGPKG1";
-const MAX_FILES: usize = 512;
+const MAX_FILES: usize = 500;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Default max published archive bytes (S7). Overridden by
+/// `KLANG_MAX_ARCHIVE_BYTES`.
+pub const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Effective max archive bytes (env `KLANG_MAX_ARCHIVE_BYTES` or default).
+pub fn max_archive_bytes() -> u64 {
+    std::env::var("KLANG_MAX_ARCHIVE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_ARCHIVE_BYTES)
+}
 
 /// Archive-safe relative path: `*.klang` or exactly `klang.toml`, no
 /// `..`, no absolute paths, no backslashes, no control characters.
@@ -1096,10 +1109,25 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
 }
 
 fn respond(stream: &mut TcpStream, status: u16, reason: &str, content_type: &str, body: &[u8]) {
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    respond_with_headers(stream, status, reason, content_type, None, body)
+}
+
+fn respond_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    retry_after: Option<u64>,
+    body: &[u8],
+) {
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
         body.len()
     );
+    if let Some(secs) = retry_after {
+        head.push_str(&format!("Retry-After: {secs}\r\n"));
+    }
+    head.push_str("Connection: close\r\n\r\n");
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
     let _ = stream.flush();
@@ -1113,7 +1141,7 @@ fn err_json(message: &str) -> Vec<u8> {
     Json::Obj(vec![("error".to_string(), Json::Str(message.to_string()))]).render().into_bytes()
 }
 
-fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
+fn handle(server: &Server, req: Request, client_ip: &str, stream: &mut TcpStream) {
     let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     // GET / (health) and GET /api/packages (index).
     if req.method == "GET" && segs.is_empty() {
@@ -1293,12 +1321,36 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
     // S4: never log the token, Authorization header, or bodies; error
     // bodies never echo the supplied token.
     if req.method == "POST" && segs == ["api", "publish"] {
-        let authed = req
-            .headers
-            .get("authorization")
-            .map(|v| v == &format!("Bearer {}", server.cfg.admin_token))
-            .unwrap_or(false);
+        // S1: fail closed — reads still work, writes get 503.
+        if !publishing_enabled(&server.cfg.admin_token) {
+            respond(
+                stream,
+                503,
+                "Service Unavailable",
+                "application/json",
+                &err_json("publishing disabled: server token not configured"),
+            );
+            return;
+        }
+        // S5: rate-limit failed auth per client IP (10/min -> 429).
+        if is_rate_limited(server, client_ip) {
+            respond_with_headers(
+                stream,
+                429,
+                "Too Many Requests",
+                "application/json",
+                Some(60),
+                &err_json("too many failed auth attempts (retry later)"),
+            );
+            return;
+        }
+        let authed = bearer_auth_ok(
+            req.headers.get("authorization").map(|s| s.as_str()),
+            &server.cfg.admin_token,
+        );
         if !authed {
+            record_auth_failure(server, client_ip);
+            // S4: generic message, never echoes the supplied token.
             respond(stream, 401, "Unauthorized", "application/json", &err_json("bad or missing token"));
             return;
         }
@@ -1317,16 +1369,34 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
             respond(stream, 400, "Bad Request", "application/json", &err_json("bad name or version"));
             return;
         }
+        // S7: max archive size (413 when exceeded).
+        if req.body.len() as u64 > max_archive_bytes() {
+            respond(
+                stream,
+                413,
+                "Payload Too Large",
+                "application/json",
+                &err_json("archive exceeds size limit"),
+            );
+            return;
+        }
         let files = match unpack_archive(&req.body) {
             Ok(f) => f,
-            Err(_) => {
-                respond(
-                    stream,
-                    400,
-                    "Bad Request",
-                    "application/json",
-                    &err_json("body is not a valid package archive"),
-                );
+            Err(e) => {
+                // Distinguish traversal/unsafe names (400) from generic
+                // corruption (400). Oversize already handled above.
+                let msg = e.to_string();
+                if msg.contains("unsafe") || msg.contains("traversal") {
+                    respond(stream, 400, "Bad Request", "application/json", &err_json("archive contains unsafe name"));
+                } else {
+                    respond(
+                        stream,
+                        400,
+                        "Bad Request",
+                        "application/json",
+                        &err_json("body is not a valid package archive"),
+                    );
+                }
                 return;
             }
         };
@@ -1490,9 +1560,18 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
 }
 
 fn handle_conn(server: Arc<Server>, mut stream: TcpStream) {
+    // Peer IP for rate limiting (fallback when X-Forwarded-For is absent).
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     match read_request(&mut stream) {
         Err(e) => respond(&mut stream, 400, "Bad Request", "application/json", &err_json(&e)),
-        Ok(req) => handle(&server, req, &mut stream),
+        Ok(req) => {
+            let ip = effective_client_ip(&req.headers, &peer);
+            // S4: never log headers/bodies/tokens here.
+            handle(&server, req, &ip, &mut stream)
+        }
     }
 }
 
@@ -1711,6 +1790,14 @@ pub fn publish_pkg(
     if !valid_pkg_name(name) || !valid_version(version) {
         return Err(RegistryError::protocol("bad name or version".to_string()));
     }
+    // C6: never send a token over a non-HTTPS URL (except localhost).
+    // The check lives here so every publish path enforces it.
+    if validate_registry_url(base).is_err() {
+        return Err(RegistryError::new(
+            "auth",
+            "refusing to send credentials over an insecure registry URL (use https or localhost)".to_string(),
+        ));
+    }
     let url = format!("{base}/api/publish?name={name}&version={version}");
     let res = agent()
         .post(&url)
@@ -1726,6 +1813,18 @@ pub fn publish_pkg(
         409 => Err(RegistryError::new(
             "conflict",
             format!("`{name}@{version}` is already published (no overwrite)"),
+        )),
+        503 => Err(RegistryError::new(
+            "unavailable",
+            "publishing disabled: server token not configured".to_string(),
+        )),
+        429 => Err(RegistryError::new(
+            "rate-limited",
+            "too many failed auth attempts (retry later)".to_string(),
+        )),
+        413 => Err(RegistryError::new(
+            "too-large",
+            "archive exceeds size limit".to_string(),
         )),
         _ => Err(RegistryError::protocol(format!("publish: HTTP {status}: {text}"))),
     }
@@ -1832,6 +1931,8 @@ pub struct PackageLock {
 
 /// Parse `package <name> <version> <sha256>` lock lines (old file-hash
 /// lines pass through untouched elsewhere).
+/// Lenient: skips malformed lines. New security-sensitive paths should
+/// prefer [`parse_package_locks_strict`] which rejects bad checksums.
 pub fn parse_package_locks(text: &str) -> Vec<PackageLock> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -1844,7 +1945,7 @@ pub fn parse_package_locks(text: &str) -> Vec<PackageLock> {
             continue;
         }
         if let (Some(name), Some(version), Some(sha)) = (parts.next(), parts.next(), parts.next()) {
-            if valid_pkg_name(name) && valid_version(version) && sha.len() == 64 {
+            if valid_pkg_name(name) && valid_version(version) && is_valid_checksum(sha) {
                 out.push(PackageLock {
                     name: name.to_string(),
                     version: version.to_string(),
@@ -1856,13 +1957,112 @@ pub fn parse_package_locks(text: &str) -> Vec<PackageLock> {
     out
 }
 
+/// Strict lock parse (B2): any `package` line with a missing/empty/
+/// non-64-hex checksum (or bad name/version/extra fields) is an error.
+/// Non-`package` lines are ignored (legacy file-hash lines, blanks).
+pub fn parse_package_locks_strict(text: &str) -> Result<Vec<PackageLock>, RegistryError> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("package") {
+            continue;
+        }
+        let (name, version, sha) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(n), Some(v), Some(s)) => (n, v, s),
+            _ => {
+                return Err(RegistryError::new(
+                    "integrity",
+                    format!("bad lock line (want `package <name> <version> <sha256>`): `{line}`"),
+                ));
+            }
+        };
+        if parts.next().is_some() {
+            return Err(RegistryError::new(
+                "integrity",
+                format!("bad lock line (extra fields): `{line}`"),
+            ));
+        }
+        if !valid_pkg_name(name) || !valid_version(version) {
+            return Err(RegistryError::new(
+                "integrity",
+                format!("bad lock line (bad name/version): `{line}`"),
+            ));
+        }
+        if !is_valid_checksum(sha) {
+            return Err(RegistryError::new(
+                "integrity",
+                format!("bad checksum in lock for `{name}@{version}` (want 64 hex chars)"),
+            ));
+        }
+        out.push(PackageLock {
+            name: name.to_string(),
+            version: version.to_string(),
+            sha256: sha.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// True when `s` is a 64-char hex SHA-256 (B2 gate).
+pub fn is_valid_checksum(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Atomic file write (B4): write to `<path>.tmp` in the same directory,
+/// fsync, then rename. A crash never leaves a half-written `klang.lock`.
+/// A leftover `.tmp` from an interrupted write is ignored (overwritten).
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // `<name>.tmp` in the same directory (e.g. `klang.lock.tmp`).
+    let tmp_path = {
+        let mut p = path.to_path_buf();
+        let fname = p
+            .file_name()
+            .map(|n| {
+                let mut s = n.to_owned();
+                s.push(".tmp");
+                s
+            })
+            .unwrap_or_else(|| std::ffi::OsString::from("klang.lock.tmp"));
+        p.set_file_name(fname);
+        p
+    };
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    // Best-effort dir fsync so the rename itself is durable.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 fn render_package_lock(lock: &PackageLock) -> String {
     format!("package {} {} {}\n", lock.name, lock.version, lock.sha256)
 }
 
 /// Rewrite/add one package pin, preserving every other line byte-wise
 /// (including legacy file-hash lines no other writer owns).
+/// B2: refuses to write an empty/non-hex checksum. B4: atomic write.
 fn upsert_package_lock(root: &Path, lock: &PackageLock) -> Result<(), RegistryError> {
+    if !is_valid_checksum(&lock.sha256) {
+        return Err(RegistryError::new(
+            "integrity",
+            format!(
+                "refusing to pin `{}@{}` with bad checksum (want 64 hex chars)",
+                lock.name, lock.version
+            ),
+        ));
+    }
     let path = lock_path(root);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut lines: Vec<String> = Vec::new();
@@ -1885,7 +2085,8 @@ fn upsert_package_lock(root: &Path, lock: &PackageLock) -> Result<(), RegistryEr
     }
     let mut text = lines.join("\n");
     text.push('\n');
-    std::fs::write(&path, text).map_err(|e| RegistryError::new("io", format!("cannot write lock: {e}")))?;
+    atomic_write(&path, text.as_bytes())
+        .map_err(|e| RegistryError::new("io", format!("cannot write lock: {e}")))?;
     Ok(())
 }
 
@@ -2047,7 +2248,7 @@ pub fn fetch_project(root: &Path, base: &str, offline: bool) -> Result<Vec<Strin
     }
     let resolved = resolve_online(base, &roots)?;
     let lock_text = std::fs::read_to_string(lock_path(root)).unwrap_or_default();
-    let locks = parse_package_locks(&lock_text);
+    let locks = parse_package_locks_strict(&lock_text)?;
     let mut logs = Vec::new();
     for r in &resolved {
         logs.push(ensure_fetched(root, base, &r.name, &r.version, &locks, false)?);
@@ -2066,7 +2267,7 @@ pub fn fetch_project(root: &Path, base: &str, offline: bool) -> Result<Vec<Strin
 /// too; anything missing is a loud `offline` error.
 fn fetch_offline(root: &Path, roots: &[(String, String, String)]) -> Result<Vec<String>, RegistryError> {
     let lock_text = std::fs::read_to_string(lock_path(root)).unwrap_or_default();
-    let locks = parse_package_locks(&lock_text);
+    let locks = parse_package_locks_strict(&lock_text)?;
     let mut logs = Vec::new();
     // Verify roots resolve within the lock.
     for (name, req, _) in roots {
@@ -2185,7 +2386,19 @@ fn map_resolve_kind(msg: &str) -> &'static str {
 
 /// Drop lock pins that are no longer reachable from the resolved set,
 /// preserving legacy file-hash lines and ordering otherwise.
+/// B4: atomic write; B2: validates checksums before writing.
 fn prune_stale_pins(root: &Path, resolved: &[crate::package::resolver::Resolved]) -> Result<(), RegistryError> {
+    for r in resolved {
+        if !is_valid_checksum(&r.sha256) {
+            return Err(RegistryError::new(
+                "integrity",
+                format!(
+                    "refusing to pin `{}@{}` with bad checksum (want 64 hex chars)",
+                    r.name, r.version
+                ),
+            ));
+        }
+    }
     let path = lock_path(root);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let keep_file_lines: Vec<String> = existing
@@ -2210,6 +2423,9 @@ fn prune_stale_pins(root: &Path, resolved: &[crate::package::resolver::Resolved]
     let mut text = out.join("\n");
     text.push('\n');
     let current = std::fs::read_to_string(&path).unwrap_or_default();
+    // Lenient compare here: a lock with a bad line will be rewritten to
+    // the resolved (good) pins below, which is the repair path. Strict
+    // validation already happened on the fetch path above.
     let mut cur_pins = parse_package_locks(&current);
     cur_pins.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
     let mut new_pins: Vec<PackageLock> = sorted
@@ -2222,7 +2438,7 @@ fn prune_stale_pins(root: &Path, resolved: &[crate::package::resolver::Resolved]
         .collect();
     new_pins.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
     if cur_pins != new_pins {
-        std::fs::write(&path, text)
+        atomic_write(&path, text.as_bytes())
             .map_err(|e| RegistryError::new("io", format!("cannot write lock: {e}")))?;
     }
     Ok(())
@@ -2252,7 +2468,11 @@ pub fn install_spec(
     }
     let resolved = resolve_online(base, &roots)?;
     let lock_text = std::fs::read_to_string(lock_path(root)).unwrap_or_default();
-    let locks = parse_package_locks(&lock_text);
+    let locks = if lock_text.trim().is_empty() {
+        Vec::new()
+    } else {
+        parse_package_locks_strict(&lock_text)?
+    };
     let mut logs = Vec::new();
     for r in &resolved {
         logs.push(ensure_fetched(root, base, &r.name, &r.version, &locks, false)?);
@@ -2304,16 +2524,19 @@ pub fn add_dependency(
     version: &str,
     offline: bool,
 ) -> Result<String, RegistryError> {
-    add_dependency_req(root, base, name, version, false, offline)
+    add_dependency_req(root, base, name, version, false, false, offline)
 }
 
-/// Full `add`: constraint-aware + `--dev` support.
+/// Full `add`: constraint-aware + `--dev`/`--caret` support.
+/// B7: `caret=true` writes `registry:name@^X.Y.Z` instead of an exact pin.
+/// The default (`caret=false`) keeps the exact-pin behavior.
 pub fn add_dependency_req(
     root: &Path,
     base: &str,
     name: &str,
     constraint_raw: &str,
     dev: bool,
+    caret: bool,
     offline: bool,
 ) -> Result<String, RegistryError> {
     if !valid_pkg_name(name) {
@@ -2340,7 +2563,7 @@ pub fn add_dependency_req(
     // what the lock pins — reproducible from day one).
     let exact = if offline {
         let lock_text = std::fs::read_to_string(lock_path(root)).unwrap_or_default();
-        let locks = parse_package_locks(&lock_text);
+        let locks = parse_package_locks_strict(&lock_text)?;
         let c = crate::package::version::parse_constraint(constraint)
             .map_err(RegistryError::protocol)?;
         let mut cands: Vec<&PackageLock> = locks.iter().filter(|l| l.name == name).collect();
@@ -2368,7 +2591,9 @@ pub fn add_dependency_req(
             .ok_or_else(|| RegistryError::protocol(format!("could not resolve `{name}@{constraint}`")))?
     };
     let section = if dev { "dev-dependencies" } else { "dependencies" };
-    let line = format!("{name} = \"registry:{name}@{exact}\"");
+    // B7: `--caret` writes a `^X.Y.Z` range; default keeps the exact pin.
+    let pin = if caret { format!("^{exact}") } else { exact.clone() };
+    let line = format!("{name} = \"registry:{name}@{pin}\"");
     let mut new_text = text;
     if !new_text.ends_with('\n') {
         new_text.push('\n');
@@ -2386,7 +2611,7 @@ pub fn add_dependency_req(
     // Fetch the full closure (the new pin + its transitive deps).
     let logs = fetch_project(root, base, offline)?;
     let _ = logs;
-    Ok(format!("added {name}@{exact}"))
+    Ok(format!("added {name}@{pin}"))
 }
 
 /// Remove a dependency: edit klang.toml, delete its vendor dirs, and
@@ -2475,6 +2700,7 @@ fn prune_after_remove(root: &Path, removed: &str) -> Result<(), RegistryError> {
         build: crate::package::BuildConfig::default(),
         deps: vec![],
         dev_deps: vec![],
+        registry_url: None,
     });
     // Direct requirement names still present.
     let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2522,7 +2748,7 @@ fn prune_after_remove(root: &Path, removed: &str) -> Result<(), RegistryError> {
     }
     let mut text_out = out.join("\n");
     text_out.push('\n');
-    std::fs::write(&lock_path_buf, text_out)
+    atomic_write(&lock_path_buf, text_out.as_bytes())
         .map_err(|e| RegistryError::new("io", format!("cannot write lock: {e}")))?;
     Ok(())
 }
@@ -2570,6 +2796,16 @@ pub fn update_project(
 
 /// Human-readable installed package list (manifest + lock join).
 pub fn list_project(root: &Path) -> Result<String, RegistryError> {
+    list_project_inner(root, false)
+}
+
+/// B6: `klang list --all` shows transitive dependencies indented under
+/// what required them. Default (`all=false`) output is unchanged.
+pub fn list_project_all(root: &Path, all: bool) -> Result<String, RegistryError> {
+    list_project_inner(root, all)
+}
+
+fn list_project_inner(root: &Path, all: bool) -> Result<String, RegistryError> {
     let text = std::fs::read_to_string(root.join("klang.toml"))
         .map_err(|e| RegistryError::new("io", format!("cannot read klang.toml: {e}")))?;
     let manifest =
@@ -2612,6 +2848,63 @@ pub fn list_project(root: &Path) -> Result<String, RegistryError> {
             }
         }
     }
+    if all {
+        // Transitive deps: every locked pin not shown above, indented
+        // under what required it (from vendored manifests when available,
+        // else grouped as transitive).
+        let mut direct: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (k, v) in manifest.deps.iter().chain(manifest.dev_deps.iter()) {
+            if let Some((pkg, _)) = parse_registry_req(v, k).or_else(|| parse_registry_dep(v)) {
+                direct.insert(pkg);
+            } else {
+                direct.insert(k.clone());
+            }
+        }
+        // Map requirer -> Vec<dep> from vendored klang.toml files.
+        let mut edges: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for pin in &pins {
+            let mut vers: Vec<String> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(vendor_dir(root).join(&pin.name)) {
+                for e in entries.flatten() {
+                    let mtoml = e.path().join("klang.toml");
+                    if let Ok(t) = std::fs::read_to_string(mtoml) {
+                        if let Ok(m) = crate::package::Manifest::parse(&t) {
+                            for (k, v) in m.deps.iter().chain(m.dev_deps.iter()) {
+                                if let Some((pkg, _)) = parse_registry_req(v, k).or_else(|| parse_registry_dep(v)) {
+                                    vers.push(pkg);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            vers.sort();
+            vers.dedup();
+            if !vers.is_empty() {
+                edges.insert(pin.name.clone(), vers);
+            }
+        }
+        let mut transitive: Vec<&PackageLock> = pins.iter().filter(|l| !direct.contains(&l.name)).collect();
+        transitive.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
+        if !transitive.is_empty() {
+            out.push_str("\nTransitive dependencies:\n");
+            for t in transitive {
+                // Find requirers.
+                let mut requirers: Vec<String> = edges
+                    .iter()
+                    .filter(|(_, deps)| deps.contains(&t.name))
+                    .map(|(r, _)| r.clone())
+                    .collect();
+                requirers.sort();
+                let by = if requirers.is_empty() {
+                    "transitive".to_string()
+                } else {
+                    format!("required by {}", requirers.join(", "))
+                };
+                out.push_str(&format!("    {:<16} {} ({})\n", t.name, t.version, by));
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -2636,6 +2929,7 @@ pub fn init_project(dir: &Path, name: &str) -> Result<String, String> {
         build: crate::package::BuildConfig::default(),
         deps: vec![],
         dev_deps: vec![],
+        registry_url: None,
     };
     std::fs::write(dir.join("klang.toml"), manifest.write_manifest())
         .map_err(|e| format!("cannot write klang.toml: {e}"))?;
@@ -2708,4 +3002,406 @@ fn max_locked_version(root: &Path, name: &str) -> Option<String> {
     let mut cands: Vec<&PackageLock> = pins.iter().filter(|l| l.name == name).collect();
     cands.sort_by(|a, b| crate::package::version::version_cmp(&a.version, &b.version));
     cands.last().map(|l| l.version.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Registry URL resolution (PRD §3)
+// ---------------------------------------------------------------------------
+
+/// Extract `host[:port]` from a registry base URL for display
+/// (`"registry: <host>"`).
+pub fn registry_host(base: &str) -> String {
+    let after_scheme = base.split("://").nth(1).unwrap_or(base);
+    after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme)
+        .to_string()
+}
+
+/// R3.2: reject non-HTTPS registry URLs unless the host is localhost,
+/// 127.0.0.1 or ::1 (tests and local dev).
+/// Error text is exactly `"registry must use https"`.
+pub fn validate_registry_url(url: &str) -> Result<(), RegistryError> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(RegistryError::new("protocol", "registry must use https".to_string()));
+    }
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s.to_ascii_lowercase(), r),
+        None => {
+            return Err(RegistryError::new("protocol", "registry must use https".to_string()));
+        }
+    };
+    if scheme == "https" {
+        if rest.is_empty() {
+            return Err(RegistryError::new("protocol", "registry must use https".to_string()));
+        }
+        return Ok(());
+    }
+    if scheme != "http" {
+        return Err(RegistryError::new("protocol", "registry must use https".to_string()));
+    }
+    // http: only loopback hosts.
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    // Strip port (but careful with IPv6 `[::1]:port`).
+    let host = if let Some(stripped) = host_port.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped).to_string()
+    } else {
+        // For bare `::1` (no brackets, no port) keep as-is; otherwise
+        // strip a single `:port` suffix.
+        if host_port == "::1" {
+            host_port.to_string()
+        } else if host_port.matches(':').count() == 1 {
+            host_port.split(':').next().unwrap_or(host_port).to_string()
+        } else if host_port.contains(':') && !host_port.contains('.') {
+            // Likely bare IPv6 without port.
+            host_port.to_string()
+        } else {
+            host_port.split(':').next().unwrap_or(host_port).to_string()
+        }
+    };
+    let h = host.to_ascii_lowercase();
+    if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+        return Ok(());
+    }
+    Err(RegistryError::new("protocol", "registry must use https".to_string()))
+}
+
+/// Directory holding user-global registry state (`~/.klang`).
+/// Respects `$HOME` (tests override it with a temp dir).
+pub fn klang_home_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".klang");
+        }
+    }
+    // Fallback: `.klang` under the current dir (never panics).
+    PathBuf::from(".klang")
+}
+
+/// Parse a `url = "..."` value out of a tiny TOML snippet. Accepts both
+/// `[registry] url = "..."` and a top-level `url = "..."`.
+fn parse_config_url(text: &str) -> Option<String> {
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim().eq_ignore_ascii_case("url") {
+                let mut val = v.trim();
+                // Strip inline comments outside quotes (best-effort).
+                if let Some(hash) = val.find('#') {
+                    // Only strip when the `#` is outside quotes.
+                    let before = &val[..hash];
+                    let dq = before.matches('"').count();
+                    let sq = before.matches('\'').count();
+                    if dq % 2 == 0 && sq % 2 == 0 {
+                        val = before.trim();
+                    }
+                }
+                val = val.trim();
+                if val.len() >= 2
+                    && ((val.starts_with('"') && val.ends_with('"'))
+                        || (val.starts_with('\'') && val.ends_with('\'')))
+                {
+                    val = &val[1..val.len() - 1];
+                }
+                let val = val.trim();
+                if val.is_empty() {
+                    continue;
+                }
+                // Accept `[registry] url` always; accept top-level `url`
+                // only when no section (config.toml shape).
+                if section == "registry" || section.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `url` from `~/.klang/config.toml` (level 4), if present.
+pub fn global_config_registry_url() -> Option<String> {
+    let path = klang_home_dir().join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_config_url(&text)
+}
+
+/// `[registry] url` from the project's `klang.toml` (level 3), if present.
+pub fn project_registry_url(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("klang.toml")).ok()?;
+    crate::package::Manifest::parse(&text).ok()?.registry_url
+}
+
+/// Resolve the registry base URL (first match wins):
+/// 1. `--registry` flag, 2. `KLANG_REGISTRY` env,
+/// 3. `[registry] url` in the project's `klang.toml`,
+/// 4. `url` in `~/.klang/config.toml`, 5. [`DEFAULT_REGISTRY`].
+/// The result is validated (R3.2).
+pub fn resolve_registry_url(
+    flag: Option<&str>,
+    project_root: Option<&Path>,
+) -> Result<String, RegistryError> {
+    let from_flag = flag.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(url) = from_flag {
+        validate_registry_url(&url)?;
+        return Ok(url);
+    }
+    if let Ok(env) = std::env::var("KLANG_REGISTRY") {
+        let env = env.trim().to_string();
+        if !env.is_empty() {
+            validate_registry_url(&env)?;
+            return Ok(env);
+        }
+    }
+    if let Some(root) = project_root {
+        if let Some(url) = project_registry_url(root) {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                validate_registry_url(&url)?;
+                return Ok(url);
+            }
+        }
+    }
+    if let Some(url) = global_config_registry_url() {
+        let url = url.trim().to_string();
+        if !url.is_empty() {
+            validate_registry_url(&url)?;
+            return Ok(url);
+        }
+    }
+    Ok(DEFAULT_REGISTRY.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Credentials (PRD §4.3 client C1-C5)
+// ---------------------------------------------------------------------------
+
+/// Path to `~/.klang/credentials`.
+pub fn credentials_path() -> PathBuf {
+    klang_home_dir().join("credentials")
+}
+
+/// Normalize a registry URL for credential lookup (trim, strip trailing `/`).
+pub fn normalize_registry_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+/// Check Unix permissions of the credentials file. Returns an error when
+/// the file is group/world readable (refuse to use until fixed, C5).
+#[cfg(unix)]
+fn check_credentials_perms(path: &Path) -> Result<(), RegistryError> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).map_err(|e| RegistryError::new("io", format!("cannot stat credentials: {e}")))?;
+    let mode = meta.permissions().mode();
+    if mode & 0o044 != 0 {
+        return Err(RegistryError::new(
+            "auth",
+            format!(
+                "credentials file {} is group/world readable (mode {:o}); run `chmod 600 {}` to fix",
+                path.display(),
+                mode & 0o777,
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_credentials_perms(_path: &Path) -> Result<(), RegistryError> {
+    Ok(())
+}
+
+/// Load the token saved for `registry_url`, if any. Refuses to use a
+/// group/world-readable file (C5). Never logs the token.
+pub fn load_credential(registry_url: &str) -> Result<Option<String>, RegistryError> {
+    let path = credentials_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(RegistryError::new(
+                "io",
+                format!("cannot read credentials: {e}"),
+            ))
+        }
+    };
+    check_credentials_perms(&path)?;
+    let want = normalize_registry_url(registry_url);
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let (url_part, tok_part) = match (parts.next(), parts.next()) {
+            (Some(u), Some(t)) => (u, t),
+            _ => continue,
+        };
+        // Support both `URL TOKEN` and `registry URL TOKEN` shapes.
+        let (url, tok) = if url_part == "registry" {
+            match parts.next() {
+                Some(_) => continue, // `registry` shape not used; skip
+                None => continue,
+            }
+        } else {
+            (url_part, tok_part)
+        };
+        if normalize_registry_url(url) == want && !tok.is_empty() {
+            return Ok(Some(tok.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Save `token` for `registry_url` (C1). Creates `~/.klang` (0700) and
+/// `credentials` (0600). Prints nothing (caller prints host only).
+pub fn save_credential(registry_url: &str, token: &str) -> Result<(), RegistryError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(RegistryError::new("auth", "refusing to save an empty token".to_string()));
+    }
+    let dir = klang_home_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| RegistryError::new("io", format!("cannot create {}: {e}", dir.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = credentials_path();
+    let want = normalize_registry_url(registry_url);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut kept: Vec<String> = Vec::new();
+    for raw in existing.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        if let Some(u) = parts.next() {
+            if normalize_registry_url(u) == want {
+                continue; // drop old entry for this registry
+            }
+        }
+        kept.push(raw.to_string());
+    }
+    kept.push(format!("{want} {token}"));
+    let mut text = kept.join("\n");
+    text.push('\n');
+    // Write via tmp + rename so a crash never half-writes the file.
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text.as_bytes())
+        .map_err(|e| RegistryError::new("io", format!("cannot write credentials: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| RegistryError::new("io", format!("cannot write credentials: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Remove the token for `registry_url` (C2). Deletes the file when empty.
+/// Returns `true` when an entry was removed.
+pub fn remove_credential(registry_url: &str) -> Result<bool, RegistryError> {
+    let path = credentials_path();
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(RegistryError::new(
+                "io",
+                format!("cannot read credentials: {e}"),
+            ))
+        }
+    };
+    let want = normalize_registry_url(registry_url);
+    let mut kept: Vec<String> = Vec::new();
+    let mut removed = false;
+    for raw in existing.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        if let Some(u) = parts.next() {
+            if normalize_registry_url(u) == want {
+                removed = true;
+                continue;
+            }
+        }
+        kept.push(raw.to_string());
+    }
+    if !removed {
+        return Ok(false);
+    }
+    if kept.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let mut text = kept.join("\n");
+        text.push('\n');
+        std::fs::write(&path, text.as_bytes())
+            .map_err(|e| RegistryError::new("io", format!("cannot write credentials: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(true)
+}
+
+/// Token resolution for publish (C3, first match wins): `--token` flag,
+/// `KLANG_REGISTRY_TOKEN` env, credentials file entry for the resolved
+/// registry URL. A token saved for registry A is never sent to B (lookup
+/// is keyed by the resolved URL). The missing-token error tells the user
+/// to run `klang login` (C4).
+pub fn resolve_publish_token(
+    flag: Option<&str>,
+    registry_url: &str,
+) -> Result<String, RegistryError> {
+    if let Some(t) = flag.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return Ok(t.to_string());
+    }
+    if let Ok(env) = std::env::var("KLANG_REGISTRY_TOKEN") {
+        let env = env.trim().to_string();
+        if !env.is_empty() {
+            return Ok(env);
+        }
+    }
+    match load_credential(registry_url)? {
+        Some(t) => Ok(t),
+        None => Err(RegistryError::new(
+            "auth",
+            "publish needs a token: run `klang login` first (or set KLANG_REGISTRY_TOKEN / pass --token)".to_string(),
+        )),
+    }
+}
+
+/// C6: refuse to send a token over a non-HTTPS URL (except localhost).
+pub fn ensure_token_transport_ok(registry_url: &str) -> Result<(), RegistryError> {
+    // Reuse the R3.2 gate: only https or http-loopback may carry a token.
+    // `validate_registry_url` already encodes exactly that set.
+    validate_registry_url(registry_url).map_err(|_| {
+        RegistryError::new(
+            "auth",
+            "refusing to send credentials over an insecure registry URL (use https or localhost)".to_string(),
+        )
+    })
 }

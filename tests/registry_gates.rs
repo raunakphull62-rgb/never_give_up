@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use klang::parser::Parser;
 
-const TOKEN: &str = "test-token-1";
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn tmp(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("klang-reg-{tag}"));
@@ -153,14 +153,20 @@ fn publish_then_metadata() {
 
 #[test]
 fn republish_conflict() {
-    // Same name+version twice: 409-style conflict, original untouched.
+    // S6: same bytes -> 200 idempotent; different bytes -> 409, original untouched.
     let (base, _) = start_server("conflict");
     let dir = tmp("conflict-pkg");
     write_pkg(&dir, "calc", "1.0.0", &[("lib.klang", "fn t(n: i32) -> i32 { return n }")]);
     let files = klang::registry::collect_package_files(&dir).expect("collects");
     let archive = klang::registry::pack_archive(&files).expect("packs");
     klang::registry::publish_pkg(&base, TOKEN, "calc", "1.0.0", &archive).expect("publishes");
-    let err = klang::registry::publish_pkg(&base, TOKEN, "calc", "1.0.0", &archive).expect_err("conflicts");
+    // Identical bytes republish is idempotent (200).
+    klang::registry::publish_pkg(&base, TOKEN, "calc", "1.0.0", &archive).expect("idempotent");
+    // Different bytes at the same version conflict.
+    write_pkg(&dir, "calc", "1.0.0", &[("lib.klang", "fn t(n: i32) -> i32 { return n + 1 }")]);
+    let files2 = klang::registry::collect_package_files(&dir).expect("collects");
+    let archive2 = klang::registry::pack_archive(&files2).expect("packs");
+    let err = klang::registry::publish_pkg(&base, TOKEN, "calc", "1.0.0", &archive2).expect_err("conflicts");
     assert_eq!(err.kind, "conflict", "{err}");
     let meta = klang::registry::fetch_metadata(&base, "calc").expect("metadata");
     assert_eq!(meta.versions.len(), 1, "no overwrite, no duplicate");
