@@ -220,6 +220,10 @@ jobs:
           PKG_VERSION="$VERSION" node -e '
             const fs = require("fs");
             const version = process.env.PKG_VERSION;
+            const repository = {
+              type: "git",
+              url: "https://github.com/raunakphull62-rgb/never_give_up.git"
+            };
             const pkgs = ["klang-cli", "klang-cli-linux-x64", "klang-cli-linux-arm64",
               "klang-cli-android-arm64", "klang-cli-darwin-x64",
               "klang-cli-darwin-arm64", "klang-cli-win32-x64"];
@@ -227,6 +231,7 @@ jobs:
               const f = `npm-package/${p}/package.json`;
               const j = JSON.parse(fs.readFileSync(f, "utf8"));
               j.version = version;
+              j.repository = repository;
               if (j.optionalDependencies) {
                 for (const k of Object.keys(j.optionalDependencies)) {
                   j.optionalDependencies[k] = version;
@@ -236,6 +241,7 @@ jobs:
               console.log(`publish-npm: ${p} -> ${version}`);
             }'
 
+          publish_failures=()
           publish_one() { # <package-dir>
             local dir="$1"
             local name
@@ -255,7 +261,12 @@ jobs:
               return 0
             fi
             echo "publish-npm: WARNING: publish with --provenance failed for $name, retrying without provenance."
-            npm publish "./npm-package/$dir" --access public
+            if npm publish "./npm-package/$dir" --access public; then
+              return 0
+            fi
+            echo "publish-npm: ERROR: could not publish $name@$VERSION; continuing with remaining packages."
+            publish_failures+=("$name@$VERSION")
+            return 0
           }
 
           # Platform packages first, wrapper last (idempotent per package).
@@ -266,4 +277,8 @@ jobs:
           publish_one "klang-cli-darwin-arm64"
           publish_one "klang-cli-win32-x64"
           publish_one "klang-cli"
+          if [ "${#publish_failures[@]}" -gt 0 ]; then
+            echo "publish-npm: failed packages: ${publish_failures[*]}"
+            exit 1
+          fi
           echo "publish-npm: done."
