@@ -15,7 +15,22 @@ The current language includes functions, control flow, structs, arrays, maps, st
 
 ## Quick start
 
-Install a precompiled release binary; you do **not** need Cargo or a Rust toolchain. The commands below install the latest Linux x86_64 release in your user-local `~/.local/bin` directory:
+The easiest install needs no Rust toolchain and no compiling — just Node.js
+16 or newer:
+
+```sh
+npm install -g klang-cli
+klang --help
+```
+
+The npm package is named `klang-cli` but the installed command is `klang`.
+`npx klang-cli --help` runs it without installing. On Termux (Android) the
+same commands work: Node there reports `android`/`arm64` and the launcher
+picks the Android build automatically.
+
+Alternatively, install a precompiled release binary directly; you do **not**
+need Cargo or a Rust toolchain. The commands below install the latest Linux
+x86_64 release in your user-local `~/.local/bin` directory:
 
 ```sh
 mkdir -p "$HOME/.local/bin"

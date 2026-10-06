@@ -6,8 +6,16 @@ name: Release Binaries
 #     Termux/Android build — a static musl binary runs fine under Termux's
 #     proot environment, same trick ripgrep/fd/starship use; no NDK needed)
 #   - Windows x86_64
-#   - macOS aarch64 (Apple Silicon M1-M4). Intel Mac dropped — macos-13
-#     runners have unreliable queue times on GitHub's hosted pool.
+#   - macOS aarch64 (Apple Silicon M1-M4)
+#   - macOS x86_64 (Intel Mac, cross-compiled on the Apple Silicon runner —
+#     plain `cargo build --target x86_64-apple-darwin` works there, no
+#     osxcross needed; kept so the klang-cli-darwin-x64 npm package stays
+#     in sync with the other platforms)
+#
+# After the GitHub Release is created, the publish-npm job stages the same
+# binaries into the klang-cli npm packages and publishes them (platform
+# packages first, klang-cli wrapper last). Publishing needs the NPM_TOKEN
+# repo secret; without it the job logs a skip message and succeeds.
 #
 # Triggers on pushing a version tag (v0.1.0, v0.2.0, etc.) or manually via
 # the Actions tab ("workflow_dispatch"). Attaches all binaries to a GitHub
@@ -46,6 +54,11 @@ jobs:
           - name: macos-aarch64-apple-silicon
             os: macos-latest
             target: aarch64-apple-darwin
+            use_cross: false
+
+          - name: macos-x86_64-intel
+            os: macos-latest
+            target: x86_64-apple-darwin
             use_cross: false
 
     runs-on: ${{ matrix.os }}
@@ -111,3 +124,147 @@ jobs:
         with:
           files: artifacts/*/*
           generate_release_notes: true
+
+  # Publishes the prebuilt npm packages (esbuild/biome pattern: no install
+  # scripts, no network at install time – the binary ships inside the
+  # matching optionalDependency). Runs only on version tags, after the
+  # binaries are built and the GitHub Release exists.
+  #
+  # Needs the NPM_TOKEN repo secret (an npm automation/granular token with
+  # publish rights on klang-cli and all klang-cli-* packages). Without it
+  # the job logs a skip message and succeeds – the GitHub Release is
+  # unaffected. Nothing is published from local sandboxes; only this job
+  # publishes, and only from tags. The token is passed via environment and
+  # is never printed or written to any file.
+  publish-npm:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      id-token: write # required for `npm publish --provenance`
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org/"
+
+      - name: Publish klang-cli packages to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "publish-npm: NPM_TOKEN is not set – skipping npm publish."
+            echo "The GitHub Release above is unaffected. To enable npm publishing,"
+            echo "add an npm token as the NPM_TOKEN repository secret (see docs/releasing.md)."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "publish-npm: staging klang-cli@${VERSION}"
+
+          # Unpack each release asset next to its npm package. The tarballs
+          # contain a single top-level binary (klang / klang.exe).
+          tmpdir=$(mktemp -d)
+          unpack_tar() { tar -xzf "$1" -C "$tmpdir"; }
+          unpack_zip() { unzip -o -j "$1" -d "$tmpdir"; }
+          artifact() { ls artifacts/*/"$1" 2>/dev/null | head -n 1; }
+
+          install_unix() { # <asset> <pkg>
+            local src
+            src=$(artifact "$1" || true)
+            if [ -z "${src:-}" ]; then
+              echo "publish-npm: WARNING: asset $1 missing – skipping $2."
+              return 0
+            fi
+            rm -f "$tmpdir/klang"
+            unpack_tar "$src"
+            mkdir -p "npm-package/$2/bin"
+            cp -f "$tmpdir/klang" "npm-package/$2/bin/klang"
+            chmod +x "npm-package/$2/bin/klang"
+            echo "publish-npm: staged $2/bin/klang"
+          }
+          install_win() { # <asset> <pkg>
+            local src
+            src=$(artifact "$1" || true)
+            if [ -z "${src:-}" ]; then
+              echo "publish-npm: WARNING: asset $1 missing – skipping $2."
+              return 0
+            fi
+            rm -f "$tmpdir/klang.exe"
+            unpack_zip "$src"
+            mkdir -p "npm-package/$2/bin"
+            cp -f "$tmpdir/klang.exe" "npm-package/$2/bin/klang.exe"
+            echo "publish-npm: staged $2/bin/klang.exe"
+          }
+
+          install_unix "klang-linux-x86_64.tar.gz" "klang-cli-linux-x64"
+          install_unix "klang-linux-aarch64-musl-termux.tar.gz" "klang-cli-linux-arm64"
+          # Termux/Android gets the same static musl binary; Node on Termux
+          # reports process.platform === "android".
+          install_unix "klang-linux-aarch64-musl-termux.tar.gz" "klang-cli-android-arm64"
+          install_unix "klang-macos-aarch64-apple-silicon.tar.gz" "klang-cli-darwin-arm64"
+          install_unix "klang-macos-x86_64-intel.tar.gz" "klang-cli-darwin-x64"
+          install_win "klang-windows-x86_64.zip" "klang-cli-win32-x64"
+
+          # Pin every package version (and the wrapper's optionalDependencies)
+          # to the git tag (vX.Y.Z -> X.Y.Z).
+          PKG_VERSION="$VERSION" node -e '
+            const fs = require("fs");
+            const version = process.env.PKG_VERSION;
+            const pkgs = ["klang-cli", "klang-cli-linux-x64", "klang-cli-linux-arm64",
+              "klang-cli-android-arm64", "klang-cli-darwin-x64",
+              "klang-cli-darwin-arm64", "klang-cli-win32-x64"];
+            for (const p of pkgs) {
+              const f = `npm-package/${p}/package.json`;
+              const j = JSON.parse(fs.readFileSync(f, "utf8"));
+              j.version = version;
+              if (j.optionalDependencies) {
+                for (const k of Object.keys(j.optionalDependencies)) {
+                  j.optionalDependencies[k] = version;
+                }
+              }
+              fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
+              console.log(`publish-npm: ${p} -> ${version}`);
+            }
+          }'
+
+          publish_one() { # <package-dir>
+            local dir="$1"
+            local name
+            name=$(node -p "require('./npm-package/$dir/package.json').name")
+            if [ ! -f "npm-package/$dir/bin/klang" ] && [ ! -f "npm-package/$dir/bin/klang.exe" ]; then
+              echo "publish-npm: WARNING: no binary staged for $name – skipping."
+              return 0
+            fi
+            local published
+            published=$(npm view "${name}@${VERSION}" version 2>/dev/null || true)
+            if [ "$published" = "$VERSION" ]; then
+              echo "publish-npm: $name@$VERSION already published – skipping."
+              return 0
+            fi
+            echo "publish-npm: publishing $name@$VERSION"
+            if npm publish "./npm-package/$dir" --provenance --access public; then
+              return 0
+            fi
+            echo "publish-npm: WARNING: publish with --provenance failed for $name, retrying without provenance."
+            npm publish "./npm-package/$dir" --access public
+          }
+
+          # Platform packages first, wrapper last (idempotent per package).
+          publish_one "klang-cli-linux-x64"
+          publish_one "klang-cli-linux-arm64"
+          publish_one "klang-cli-android-arm64"
+          publish_one "klang-cli-darwin-x64"
+          publish_one "klang-cli-darwin-arm64"
+          publish_one "klang-cli-win32-x64"
+          publish_one "klang-cli"
+          echo "publish-npm: done."

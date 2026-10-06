@@ -1,0 +1,9 @@
+{
+  "name": "klang-cli-android-arm64",
+  "version": "0.6.0",
+  "description": "Prebuilt klang binary for android-arm64 (Termux; musl static)",
+  "license": "MIT",
+  "os": ["android"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}

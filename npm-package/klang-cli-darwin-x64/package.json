@@ -1,6 +1,6 @@
 {
-  "name": "klang-darwin-x64",
-  "version": "0.1.0",
+  "name": "klang-cli-darwin-x64",
+  "version": "0.6.0",
   "description": "Prebuilt klang binary for darwin-x64 (Intel Mac)",
   "license": "MIT",
   "os": ["darwin"],

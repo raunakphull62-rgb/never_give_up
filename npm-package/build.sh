@@ -10,7 +10,7 @@
 #   ./npm-package/build.sh linux-x64       # build one (npm platform name)
 #   ./npm-package/build.sh linux-x64 win32-x64
 #
-# Output: each binary lands in npm-package/klang-<platform>/bin/
+# Output: each binary lands in npm-package/klang-cli-<platform>/bin/
 #   (bin/klang on unix, bin/klang.exe on Windows).
 #
 # Notes:
@@ -46,16 +46,17 @@ CRATE_NAME="klang"
 
 # npm-platform -> "rust_target;dest_dir;dest_file;link_hint"
 declare -A TARGETS=(
-  ["linux-x64"]="x86_64-unknown-linux-musl;klang-linux-x64;klang;need musl-tools (sudo apt install musl-tools)"
-  ["linux-arm64"]="aarch64-unknown-linux-musl;klang-linux-arm64;klang;need musl-tools + aarch64 musl cross gcc"
-  ["darwin-x64"]="x86_64-apple-darwin;klang-darwin-x64;klang;need osxcross for darwin linking from Linux"
-  ["darwin-arm64"]="aarch64-apple-darwin;klang-darwin-arm64;klang;need osxcross for darwin linking from Linux"
-  ["win32-x64"]="x86_64-pc-windows-gnu;klang-win32-x64;klang.exe;need mingw-w64 (sudo apt install mingw-w64)"
+  ["linux-x64"]="x86_64-unknown-linux-musl;klang-cli-linux-x64;klang;need musl-tools (sudo apt install musl-tools)"
+  ["linux-arm64"]="aarch64-unknown-linux-musl;klang-cli-linux-arm64;klang;need musl-tools + aarch64 musl cross gcc"
+  ["android-arm64"]="aarch64-unknown-linux-musl;klang-cli-android-arm64;klang;same static binary as linux-arm64 (Termux reports android/arm64)"
+  ["darwin-x64"]="x86_64-apple-darwin;klang-cli-darwin-x64;klang;need osxcross for darwin linking from Linux"
+  ["darwin-arm64"]="aarch64-apple-darwin;klang-cli-darwin-arm64;klang;need osxcross for darwin linking from Linux"
+  ["win32-x64"]="x86_64-pc-windows-gnu;klang-cli-win32-x64;klang.exe;need mingw-w64 (sudo apt install mingw-w64)"
 )
 
 WANT=("$@")
 if [ "${#WANT[@]}" -eq 0 ]; then
-  WANT=(linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64)
+  WANT=(linux-x64 linux-arm64 android-arm64 darwin-x64 darwin-arm64 win32-x64)
 fi
 
 build_one() {

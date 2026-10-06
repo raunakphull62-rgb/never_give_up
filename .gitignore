@@ -3,3 +3,7 @@ target/
 Cargo.lock.bak
 target/
 .klang_pkgs/
+# Prebuilt npm binaries are staged by the release workflow from build
+# artifacts at publish time – never commit them. (The klang-cli wrapper's
+# bin/klang.js launcher stays tracked; only klang-cli-*/bin/ is ignored.)
+npm-package/klang-cli-*/bin/

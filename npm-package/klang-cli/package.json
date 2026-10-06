@@ -1,0 +1,28 @@
+{
+  "name": "klang-cli",
+  "version": "0.6.0",
+  "description": "Klang language CLI – wrapper that resolves to the prebuilt platform binary",
+  "license": "MIT",
+  "bin": {
+    "klang": "bin/klang.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "optionalDependencies": {
+    "klang-cli-linux-x64": "0.6.0",
+    "klang-cli-linux-arm64": "0.6.0",
+    "klang-cli-android-arm64": "0.6.0",
+    "klang-cli-darwin-x64": "0.6.0",
+    "klang-cli-darwin-arm64": "0.6.0",
+    "klang-cli-win32-x64": "0.6.0"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raunakphull62-rgb/never_give_up.git"
+  },
+  "homepage": "https://github.com/raunakphull62-rgb/never_give_up#readme"
+}
