@@ -321,6 +321,12 @@ impl TypedHIR {
             if sigs.contains_key(&f.name) {
                 diags.push(duplicate(file, &format!("duplicate function `{}`", f.name)));
             }
+            // A user definition sharing a builtin's name could never
+            // run (builtins win every call dispatch): fail loudly with
+            // W-SHADOW instead of letting it silently shadow.
+            if is_builtin(&f.name) {
+                diags.push(shadowed_builtin(file, &f.name));
+            }
             check_type_params_dup(file, &f.name, &f.type_params, &mut diags);
             // Non-generic functions keep the exact historical resolution
             // (`parse_ty` on the return type); generic ones preserve `Param`.
@@ -1433,6 +1439,29 @@ fn duplicate(file: &str, message: &str) -> Diagnostic {
         "two items share one name",
         &["rename one of them"],
         "names/duplicate",
+    )
+}
+
+/// A user-defined function reuses a builtin name. Builtins win every
+/// call dispatch, so the definition could never execute.
+///
+/// Coded `W-SHADOW` (warning lineage) but surfaced as an error: the
+/// diagnostics model has no passing-with-warnings channel (`check`
+/// fails on any diagnostic; LSP/CLI treat every check diagnostic as a
+/// failure), so an error is the only way to guarantee a builtin never
+/// silently overrides user code.
+fn shadowed_builtin(file: &str, name: &str) -> Diagnostic {
+    Diagnostic::error(
+        "W-SHADOW",
+        &format!(
+            "`{name}` shadows a builtin (builtins win every call; this definition would never run)"
+        ),
+        file,
+        0,
+        0,
+        "user functions cannot reuse builtin names",
+        &["rename the function"],
+        "names/shadow",
     )
 }
 

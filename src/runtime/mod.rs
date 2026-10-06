@@ -1898,6 +1898,12 @@ fn exec_builtin(
             if y.is_nan() {
                 return Err(runtime_err(&format!("{func}() result is not a number")));
             }
+            if y.is_infinite() {
+                // Only `pow` can get here (`atan2` is bounded by pi):
+                // magnitude overflow is loud like the NaN case above
+                // (E-RUNTIME), never a quiet inf.
+                return Err(runtime_err(&format!("{func}() overflows to infinity")));
+            }
             Ok(Value::Float(y))
         }
         "abs" => {

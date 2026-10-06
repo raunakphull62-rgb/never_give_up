@@ -10,6 +10,16 @@ index) is a wildcard that skips type checks. Errors are JSON diagnostics
 with `code`; all runtime failures are catchable with `try {} catch e {}`
 except `E-CANCELLED`.
 
+Shadowing policy: builtins win every call dispatch, so a user-defined
+function may not reuse a builtin name — the checker rejects it with
+`W-SHADOW` (coded as a warning lineage, surfaced as an error: the
+diagnostics model has no passing-with-warnings channel, so an error is
+the only way to guarantee a builtin never silently overrides user
+code). All 63 documented names below plus the 9 `__`-prefixed MIR
+internals (`__echo_*`, `__tune_validate`, `__verify_validate`) resolve
+as builtins at runtime; user code must avoid all of them (the `mymax`
+convention in tests/examples shows the rename pattern).
+
 ## Core
 
 | Fn | Signature | Tested behavior |
@@ -93,7 +103,7 @@ upserts; `a[i] = v` in-bounds only.
 | Fn | Signature | Tested behavior |
 |---|---|---|
 | `sqrt` | `(x: int \| float) -> f64` | `sqrt(16.0) == 4.0`. Negative → `E-RUNTIME` (`sqrt() of negative number`), never quiet NaN. |
-| `pow` | `(base, exp: int \| float) -> f64` | `pow(2.0, 10.0) == 1024.0`. A NaN result (e.g. negative base, fractional exp) → `E-RUNTIME`, never quiet NaN; `+inf` magnitude overflow is a normal value. |
+| `pow` | `(base, exp: int \| float) -> f64` | `pow(2.0, 10.0) == 1024.0`. A NaN result (e.g. negative base, fractional exp) → `E-RUNTIME`, never quiet NaN. Magnitude overflow (e.g. `pow(10, 1000)`) → `E-RUNTIME` (`overflows to infinity`), never quiet inf. |
 | `abs` | `(x: int) -> i32` / `(x: float) -> f64` | Ints stay exact (`abs(-5) == 5`); `i64::MIN` → `E-OVERFLOW` (same loudness as `0 - n`). Floats keep kind (`abs(-2.5) == 2.5`). |
 | `min` / `max` | `(a, b: int) -> i32`, else `-> f64` | Both-int stays exact; mixed int/float widens (`min(3, 7.5) == 3.0`). NaN-tolerant like IEEE `fmin`/`fmax` (a lone NaN loses to the other side). Unlike `sort`, two values coerce instead of rejecting mixed kinds. |
 | `floor` / `ceil` | `(x: int \| float) -> f64` | `floor(2.9) == 2.0`, `floor(-2.1) == -3.0`, `ceil(2.1) == 3.0`. |

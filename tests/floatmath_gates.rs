@@ -200,6 +200,60 @@ fn float_domain_errors() {
     );
 }
 
+// ---- W-SHADOW: user functions cannot reuse builtin names ----
+
+#[test]
+fn shadow_builtin_name_fails_loudly() {
+    // Builtins win every call dispatch, so a user definition with a
+    // builtin name could never run. The checker rejects it with
+    // W-SHADOW — surfaced as an error because the diagnostics model
+    // has no passing-with-warnings channel, which is exactly what
+    // guarantees the override can never happen silently.
+    for name in ["max", "sqrt", "len", "sha256", "random_int", "sort", "pow"] {
+        let src =
+            format!("fn {name}(a: i32) -> i32 {{ return a }} fn main() -> i32 {{ return 0 }}");
+        let mut p = Parser::new(&src);
+        let prog = p.parse_program().expect("parses");
+        let err = klang::hir::TypedHIR::check(prog).expect_err("shadowing must fail");
+        let codes: Vec<_> = err.iter().map(|d| d.code.as_str()).collect();
+        assert!(
+            codes.contains(&"W-SHADOW"),
+            "want W-SHADOW for `{name}`, got {codes:?}"
+        );
+        let msg = &err
+            .iter()
+            .find(|d| d.code == "W-SHADOW")
+            .expect("W-SHADOW present")
+            .message;
+        assert!(msg.contains(name), "{msg}");
+        assert!(msg.contains("never run"), "{msg}");
+    }
+    // Distinct names still check clean (the `mymax` convention used
+    // across the test suite and examples).
+    let mut p = Parser::new(
+        "fn mymax(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return mymax(1, 2) }",
+    );
+    let prog = p.parse_program().expect("parses");
+    assert!(klang::hir::TypedHIR::check(prog).is_ok());
+}
+
+// ---- pow magnitude overflow is loud ----
+
+#[test]
+fn pow_overflow_is_loud() {
+    // 10^1000 overflows f64: E-RUNTIME, never quiet inf (same rule as
+    // the NaN case).
+    assert_eq!(
+        run_err_code("fn main() -> f64 { return pow(10.0, 1000.0) }"),
+        "E-RUNTIME"
+    );
+    // atan2 is bounded by pi: no overflow possible, still computes.
+    approx(
+        "fn main() -> f64 { return atan2(1.0, 1.0) }",
+        std::f64::consts::FRAC_PI_4,
+    );
+}
+
 // ---- random: shape + range, never exact values ----
 
 #[test]
