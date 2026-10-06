@@ -246,8 +246,13 @@ jobs:
             local dir="$1"
             local name
             name=$(node -p "require('./npm-package/$dir/package.json').name")
-            if [ ! -f "npm-package/$dir/bin/klang" ] && [ ! -f "npm-package/$dir/bin/klang.exe" ]; then
-              echo "publish-npm: WARNING: no binary staged for $name – skipping."
+            if [ "$dir" = "klang-cli" ]; then
+              if [ ! -f "npm-package/$dir/bin/klang.js" ]; then
+                echo "publish-npm: WARNING: no JavaScript launcher staged for $name – skipping."
+                return 0
+              fi
+            elif [ ! -f "npm-package/$dir/bin/klang" ] && [ ! -f "npm-package/$dir/bin/klang.exe" ]; then
+              echo "publish-npm: WARNING: no platform binary staged for $name – skipping."
               return 0
             fi
             local published
