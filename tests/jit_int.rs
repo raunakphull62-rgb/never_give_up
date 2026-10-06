@@ -53,7 +53,7 @@ fn jit_calls_and_let() {
 #[test]
 fn jit_if_else_and_logic() {
     let (v, _) = diff(
-        "fn max(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return max(20, 22) }",
+        "fn mymax(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return mymax(20, 22) }",
         "main",
     );
     assert_eq!(v, 22);

@@ -3211,6 +3211,10 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "list_dir" | "make_dir" | "make_dirs" | "is_dir" | "is_file" | "file_size"
         | "ord" | "chr" | "sort" => 1,
         "slice" => 3,
+        "sqrt" | "sin" | "cos" | "tan" | "log" | "exp" | "floor" | "ceil" | "abs"
+        | "sha256" => 1,
+        "pow" | "atan2" | "min" | "max" | "random_int" | "hmac_sha256" => 2,
+        "random_float" => 0,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -3272,6 +3276,89 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "str" => Ty::Str,
         "int" => Ty::Int,
         "float" => Ty::Float,
+        // Phase 2 Batch B: float math. Ints widen at runtime; anything
+        // else is `E-TYPE` here (literals) and in `exec_builtin`
+        // (`Unknown`-typed values that arrive misshapen).
+        "sqrt" | "sin" | "cos" | "tan" | "log" | "exp" | "floor" | "ceil" => {
+            if !matches!(&args[0], Ty::Int | Ty::Float | Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` argument"), "int or float", &args[0]));
+            }
+            Ty::Float
+        }
+        "pow" | "atan2" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Float | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`{func}()` arg {i}"),
+                        "int or float",
+                        a,
+                    ));
+                }
+            }
+            Ty::Float
+        }
+        "abs" => {
+            if !matches!(&args[0], Ty::Int | Ty::Float | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`abs()` argument", "int or float", &args[0]));
+            }
+            // Ints stay ints at runtime; floats stay floats.
+            match &args[0] {
+                Ty::Int => Ty::Int,
+                _ => Ty::Float,
+            }
+        }
+        "min" | "max" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Float | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`{func}()` arg {i}"),
+                        "int or float",
+                        a,
+                    ));
+                }
+            }
+            // Both-int stays int; anything else widens to float.
+            if matches!(&args[0], Ty::Int) && matches!(&args[1], Ty::Int) {
+                Ty::Int
+            } else {
+                Ty::Float
+            }
+        }
+        "random_int" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`random_int()` bound {i}"),
+                        "int",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "random_float" => Ty::Float,
+        "sha256" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`sha256()` text", "str", &args[0]));
+            }
+            Ty::Str
+        }
+        "hmac_sha256" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`hmac_sha256()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Str
+        }
         "read_line" => Ty::Str,
         "parse_int" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
@@ -3670,6 +3757,23 @@ pub fn is_builtin(name: &str) -> bool {
             | "chr"
             | "slice"
             | "sort"
+            | "sqrt"
+            | "pow"
+            | "abs"
+            | "min"
+            | "max"
+            | "floor"
+            | "ceil"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "atan2"
+            | "log"
+            | "exp"
+            | "random_int"
+            | "random_float"
+            | "sha256"
+            | "hmac_sha256"
     )
 }
 

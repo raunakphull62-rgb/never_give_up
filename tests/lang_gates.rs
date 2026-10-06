@@ -69,10 +69,10 @@ fn lang_function_args() {
 
 #[test]
 fn lang_if_else() {
-    let src = "fn max(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return max(20, 22) }";
+    let src = "fn mymax(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return mymax(20, 22) }";
     let (v, _) = run_src(src, "main");
     assert_eq!(v, 22);
-    let src2 = "fn max(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return max(30, 12) }";
+    let src2 = "fn mymax(a: i32, b: i32) -> i32 { if a < b { return b } else { return a } } fn main() -> i32 { return mymax(30, 12) }";
     let (v, _) = run_src(src2, "main");
     assert_eq!(v, 30);
     // if without else, equality.

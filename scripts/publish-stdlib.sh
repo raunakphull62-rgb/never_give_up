@@ -1,6 +1,9 @@
 #!/bin/sh
 # Publish all 26 stdlib packages in dependency order (PRD §5).
 # Free-tier fallback + reseed for a fresh registry.
+# Batch B ships math 1.1.0 + crypto 1.1.0 as NEW versions alongside the
+# immutable older ones (versions never overwrite: identical bytes republish
+# idempotent-200, different bytes 409 — the skip logic below relies on it).
 # Stops at the first failure; versions that already exist (409 with
 # identical bytes counts as success — the server returns 200 idempotent
 # for identical bytes, 409 only for different bytes which IS a failure

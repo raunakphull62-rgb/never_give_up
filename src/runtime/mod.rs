@@ -27,7 +27,7 @@ pub mod v2;
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread::JoinHandle;
@@ -176,6 +176,37 @@ pub(crate) fn runtime_err(msg: &str) -> Diagnostic {
         &[],
         "runtime/execution",
     )
+}
+
+/// Wrong-type operand at run time (Phase 2 Batch B float/math builtins).
+/// Static checking catches mistyped literals with the same code; this
+/// covers values whose static type was `Unknown` (map lookups, dynamic
+/// index) but whose runtime value has the wrong shape. Loud, never a
+/// silent coercion.
+pub(crate) fn type_err(op: &str, want: &str, got: &Value) -> Diagnostic {
+    Diagnostic::error(
+        "E-TYPE",
+        &format!("`{op}` needs {want}, got {}", value_type_name(got)),
+        "runtime",
+        0,
+        0,
+        "builtin operand has the wrong runtime type",
+        &["convert the value first", "check the operand types"],
+        "types/mismatch",
+    )
+}
+
+/// Runtime type name for [`type_err`] (`int`/`float`/`str`/...).
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Str(_) => "str",
+        Value::Array(_) => "array",
+        Value::Map(_) => "map",
+        Value::Struct { .. } => "struct",
+        Value::Closure { .. } => "closure",
+    }
 }
 
 /// Integer overflow: an `i32` arithmetic result left the
@@ -1124,6 +1155,81 @@ fn run_instrs(
     Ok(ExecFlow::Done(last))
 }
 
+/// Coerce a builtin operand to `f64` (`Int` widens; anything else is a
+/// caller-reported `E-TYPE`, never a silent `0.0`).
+fn builtin_number(op: &str, v: Value) -> Result<f64, Diagnostic> {
+    match v {
+        Value::Int(x) => Ok(x as f64),
+        Value::Float(x) => Ok(x),
+        other => Err(type_err(op, "a number (int or float)", &other)),
+    }
+}
+
+/// OS entropy for `random_int` / `random_float`.
+///
+/// Unix: 8 bytes from `/dev/urandom` (read once per draw — never a
+/// bulk read, since the device is an infinite stream). Anywhere else,
+/// or when the device is unreadable: SplitMix64 over
+/// (wall-clock nanos ^ pid ^ per-process counter).
+///
+/// NOT FOR KEYS OR TOKENS: the fallback is predictable, and even the
+/// `/dev/urandom` path feeds game/sampling draws with no
+/// cryptographic analysis. Documented in `BUILTINS.md`.
+fn os_random_u64() -> u64 {
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let mut buf = [0u8; 8];
+        if f.read_exact(&mut buf).is_ok() {
+            return u64::from_le_bytes(buf);
+        }
+    }
+    fallback_random_u64()
+}
+
+static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0x243F6A8885A308D3);
+
+fn fallback_random_u64() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x12345678);
+    let mix = nanos
+        ^ (std::process::id() as u64).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ FALLBACK_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0xBF58476D1CE4E5B9);
+    splitmix64(mix)
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// Uniform `i64` in `[lo, hi]` (both inclusive) via rejection sampling
+/// (no modulo bias). The full-range case (`hi - lo == u64::MAX`) maps
+/// every `u64` bijectively. Callers must ensure `lo <= hi`.
+fn random_int_inclusive(lo: i64, hi: i64) -> i64 {
+    let span = (hi as i128 - lo as i128 + 1) as u128;
+    if span > u64::MAX as u128 {
+        return lo.wrapping_add(os_random_u64() as i64);
+    }
+    let bound = span as u64;
+    // Largest multiple-of-`bound` threshold: draws below it map evenly.
+    let threshold = u64::MAX - u64::MAX % bound;
+    for _ in 0..1024 {
+        let r = os_random_u64();
+        if r < threshold {
+            return lo.wrapping_add((r % bound) as i64);
+        }
+    }
+    // Practically unreachable (rejection chance < 1/2 per round);
+    // bounded fallback keeps termination total.
+    lo.wrapping_add((os_random_u64() % bound) as i64)
+}
+
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -1173,6 +1279,23 @@ fn is_builtin(name: &str) -> bool {
             | "chr"
             | "slice"
             | "sort"
+            | "sqrt"
+            | "pow"
+            | "abs"
+            | "min"
+            | "max"
+            | "floor"
+            | "ceil"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "atan2"
+            | "log"
+            | "exp"
+            | "random_int"
+            | "random_float"
+            | "sha256"
+            | "hmac_sha256"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1733,6 +1856,149 @@ fn exec_builtin(
                     crate::stdlib::seq::sort_list(&items).map(Value::Array)
                 }
                 _ => Err(runtime_err("sort() needs an array")),
+            }
+        }
+        // Phase 2 Batch B: float math. Ints widen to `f64`; any other
+        // runtime shape is `E-TYPE` (never a silent `0.0`). Domain
+        // violations are loud `E-RUNTIME`, never quiet NaN.
+        "sqrt" | "sin" | "cos" | "tan" | "log" | "exp" | "floor" | "ceil" => {
+            if args.len() != 1 {
+                return Err(runtime_err(&format!("{func}() takes 1 argument")));
+            }
+            let x = builtin_number(func, get(&args[0]))?;
+            let y = match func {
+                "sqrt" => {
+                    if x < 0.0 {
+                        return Err(runtime_err("sqrt() of negative number"));
+                    }
+                    x.sqrt()
+                }
+                "log" => {
+                    if x <= 0.0 {
+                        return Err(runtime_err("log() of non-positive number"));
+                    }
+                    x.ln()
+                }
+                "sin" => x.sin(),
+                "cos" => x.cos(),
+                "tan" => x.tan(),
+                "exp" => x.exp(),
+                "floor" => x.floor(),
+                _ => x.ceil(),
+            };
+            Ok(Value::Float(y))
+        }
+        "pow" | "atan2" => {
+            if args.len() != 2 {
+                return Err(runtime_err(&format!("{func}() takes 2 arguments")));
+            }
+            let a = builtin_number(func, get(&args[0]))?;
+            let b = builtin_number(func, get(&args[1]))?;
+            let y = if func == "pow" { a.powf(b) } else { a.atan2(b) };
+            if y.is_nan() {
+                return Err(runtime_err(&format!("{func}() result is not a number")));
+            }
+            Ok(Value::Float(y))
+        }
+        "abs" => {
+            if args.len() != 1 {
+                return Err(runtime_err("abs() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Int(v) => v
+                    .checked_abs()
+                    .map(Value::Int)
+                    .ok_or_else(|| overflow_err("abs")),
+                Value::Float(v) => Ok(Value::Float(v.abs())),
+                other => Err(type_err("abs", "a number (int or float)", &other)),
+            }
+        }
+        "min" | "max" => {
+            if args.len() != 2 {
+                return Err(runtime_err(&format!("{func}() takes 2 arguments")));
+            }
+            match (get(&args[0]), get(&args[1])) {
+                // Ints stay exact (no float round-trip).
+                (Value::Int(a), Value::Int(b)) => {
+                    Ok(Value::Int(if func == "min" { a.min(b) } else { a.max(b) }))
+                }
+                (a, b) => {
+                    // Mixed int/float widens to `f64` (documented in
+                    // BUILTINS.md; unlike `sort`, two values coerce
+                    // exactly). `f64::min/max` keep the non-NaN side.
+                    let x = builtin_number(func, a)?;
+                    let y = builtin_number(func, b)?;
+                    Ok(Value::Float(if func == "min" {
+                        x.min(y)
+                    } else {
+                        x.max(y)
+                    }))
+                }
+            }
+        }
+        // Phase 2 Batch B: OS-seeded draws. NOT FOR KEYS OR TOKENS
+        // (see `os_random_u64` + BUILTINS.md).
+        "random_int" => {
+            if args.len() != 2 {
+                return Err(runtime_err("random_int() takes 2 arguments (lo, hi)"));
+            }
+            let lo = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("random_int", "int bounds", &other)),
+            };
+            let hi = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("random_int", "int bounds", &other)),
+            };
+            if lo > hi {
+                return Err(runtime_err("random_int() needs lo <= hi"));
+            }
+            Ok(Value::Int(random_int_inclusive(lo, hi)))
+        }
+        "random_float" => {
+            if !args.is_empty() {
+                return Err(runtime_err("random_float() takes no arguments"));
+            }
+            // 53 random bits over 2^53: uniform in [0.0, 1.0).
+            let mantissa = os_random_u64() >> 11;
+            Ok(Value::Float(mantissa as f64 / 9007199254740992.0))
+        }
+        // Phase 2 Batch B: hashing (real SHA-256 / HMAC-SHA256 over the
+        // existing `sha2` + `hmac` crates — NOT the pedagogical
+        // `crypto_hash` checksum in the crypto package).
+        "sha256" => {
+            if args.len() != 1 {
+                return Err(runtime_err("sha256() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Str(s) => {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(s.as_bytes());
+                    Ok(Value::Str(format!("{:x}", h.finalize())))
+                }
+                other => Err(type_err("sha256", "a string", &other)),
+            }
+        }
+        "hmac_sha256" => {
+            if args.len() != 2 {
+                return Err(runtime_err("hmac_sha256() takes 2 arguments (key, message)"));
+            }
+            let key = match get(&args[0]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("hmac_sha256", "string key and message", &other)),
+            };
+            let msg = match get(&args[1]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("hmac_sha256", "string key and message", &other)),
+            };
+            {
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+                    .map_err(|_| runtime_err("hmac_sha256() cannot use key"))?;
+                mac.update(msg.as_bytes());
+                Ok(Value::Str(format!("{:x}", mac.finalize().into_bytes())))
             }
         }
         "__echo_create" => {

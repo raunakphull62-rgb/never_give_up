@@ -9,8 +9,9 @@ a given seed.
 NOT FOR SECURITY: this generator is predictable (Park-Miller with a
 32-bit state; `rand_seed_from_time` has ~1-second resolution) and must
 never be used for keys, tokens, nonces, or anything adversarial. For
-unpredictable values wait for the Phase 2 OS-seeded `random_int` /
-`random_float` builtins.
+unpredictable draws use the OS-seeded `random_int` / `random_float`
+compiler builtins (see BUILTINS.md) — which are likewise NOT for keys
+or tokens.
 
 ## API
 

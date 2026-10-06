@@ -1,13 +1,18 @@
 // math — constants and integer/float functions.
 //
+// The float functions below delegate to the same-named compiler
+// builtins (`sqrt`, `pow`, `sin`, …), which widen ints, reject wrong
+// types with `E-TYPE`, and fail loudly on domain errors — see
+// BUILTINS.md.
+//
 // Import: import "math/lib.klang"
 
 fn math_pi() -> f64 {
-    return 3.14159
+    return 3.141592653589793
 }
 
 fn math_e() -> f64 {
-    return 2.71828
+    return 2.718281828459045
 }
 
 fn math_abs(n: i32) -> i32 {
@@ -68,4 +73,56 @@ fn math_fact(n: i32) -> i32 {
 
 fn math_circle_area(r: f64) -> f64 {
     return math_pi() * r * r
+}
+
+fn math_sqrt(x: f64) -> f64 {
+    return sqrt(x)
+}
+
+fn math_powf(base: f64, exp: f64) -> f64 {
+    return pow(base, exp)
+}
+
+fn math_absf(x: f64) -> f64 {
+    return abs(x)
+}
+
+fn math_minf(a: f64, b: f64) -> f64 {
+    return min(a, b)
+}
+
+fn math_maxf(a: f64, b: f64) -> f64 {
+    return max(a, b)
+}
+
+fn math_floor(x: f64) -> f64 {
+    return floor(x)
+}
+
+fn math_ceil(x: f64) -> f64 {
+    return ceil(x)
+}
+
+fn math_sin(x: f64) -> f64 {
+    return sin(x)
+}
+
+fn math_cos(x: f64) -> f64 {
+    return cos(x)
+}
+
+fn math_tan(x: f64) -> f64 {
+    return tan(x)
+}
+
+fn math_atan2(y: f64, x: f64) -> f64 {
+    return atan2(y, x)
+}
+
+fn math_log(x: f64) -> f64 {
+    return log(x)
+}
+
+fn math_exp(x: f64) -> f64 {
+    return exp(x)
 }

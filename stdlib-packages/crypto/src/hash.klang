@@ -1,8 +1,10 @@
-// crypto — demo checksum + comparison helpers.
+// crypto — checksum, real hashing, and comparison helpers.
 //
-// NOTE: `crypto_hash` is a pedagogical FNV-style checksum over
-// characters, NOT a cryptographic hash. Real SHA-256 verification of
-// package archives happens in the registry client (Rust `sha2`).
+// `crypto_hash` is a pedagogical FNV-style checksum over characters:
+// NON-CRYPTOGRAPHIC (small output, trivial collisions) — kept for
+// teaching and for non-adversarial bucketing only. Real integrity
+// uses `crypto_sha256` / `crypto_hmac_sha256` below (compiler
+// builtins over Rust `sha2`/`hmac`).
 //
 // Import: import "crypto/lib.klang"
 
@@ -45,4 +47,12 @@ fn crypto_pin4(n: i32) -> str {
             }
         }
     }
+}
+
+fn crypto_sha256(s: str) -> str {
+    return sha256(s)
+}
+
+fn crypto_hmac_sha256(key: str, msg: str) -> str {
+    return hmac_sha256(key, msg)
 }

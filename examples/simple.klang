@@ -6,7 +6,7 @@ fn add(a: i32, b: i32) -> i32 {
     return a + b
 }
 
-fn max(a: i32, b: i32) -> i32 {
+fn mymax(a: i32, b: i32) -> i32 {
     if a < b {
         return b
     } else {
@@ -21,7 +21,7 @@ fn fetch(n: i32) -> i32 {
 fn main() -> i32 {
     let x = 2 + 3 * 4
     print(x)
-    print(max(add(20, 2), 21))
+    print(mymax(add(20, 2), 21))
     if x == 14 {
         return add(40, 2)
     } else {

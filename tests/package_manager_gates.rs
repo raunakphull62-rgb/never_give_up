@@ -406,4 +406,13 @@ fn pm_stdlib_layout() {
         assert!(seen.insert(name), "unique");
     }
     assert_eq!(seen.len(), 26);
+    // Batch B floor: math/crypto ship the float + hashing wrappers.
+    for (name, want) in [("math", "1.1.0"), ("crypto", "1.1.0")] {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("stdlib-packages")
+            .join(name);
+        let toml = std::fs::read_to_string(dir.join("klang.toml")).expect("manifest readable");
+        let m = klang::package::Manifest::parse(&toml).expect("manifest parses");
+        assert_eq!(m.version, want, "{name} carries the Batch B version");
+    }
 }
