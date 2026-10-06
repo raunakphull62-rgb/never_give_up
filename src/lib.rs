@@ -23,6 +23,7 @@ pub mod package;
 pub mod package_manager;
 pub mod parser;
 pub mod registry;
+pub mod registry_storage;
 pub mod repair;
 pub mod runtime;
 pub mod sema;

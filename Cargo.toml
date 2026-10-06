@@ -14,3 +14,6 @@ ureq = "3.4.2"
 # Registry package integrity (SHA-256 of package archives). Pure Rust,
 # no system dependencies — same offline-install story as the rest.
 sha2 = "0.10"
+# HMAC-SHA256 for AWS SigV4 request signing (Backblaze B2 S3-compatible
+# API). Pure Rust, no system dependencies, no AWS SDK.
+hmac = "0.12"

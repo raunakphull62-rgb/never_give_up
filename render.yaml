@@ -1,11 +1,18 @@
-# Klang package registry — Render deployment manifest (FOUNDATION-3 Part 2B).
+# Klang package registry — Render deployment manifest (FOUNDATION-3 Part 2B
+# + PRD §4 owner-only publishing, B2 storage backend).
 #
-# This file is applied by the operator (see docs/deploy-registry.md). It
-# contains NO secrets: REGISTRY_ADMIN_TOKEN is declared with `sync: false`
-# so Render prompts for / preserves the dashboard-set value instead of
-# reading it from this file. Never commit a real token here.
+# Storage lives in a Backblaze B2 bucket (S3-compatible API), so the
+# service itself holds NO state: no persistent disk is attached and the
+# free Render tier stays free. See docs/deploy-registry.md for the
+# bucket + application-key setup.
 #
-# Verified locally end-to-end (tests/registry_gates.rs); Render itself
+# This file contains NO secrets: every credential is declared with
+# `sync: false` (names only) so Render prompts for / preserves the
+# dashboard-set values instead of reading them from this file. Never
+# commit a real token or B2 key here.
+#
+# Verified locally end-to-end (tests/registry_gates.rs and
+# tests/registry_b2_storage.rs with a mock S3 server); Render itself
 # was not exercised from the build environment (no API credentials were
 # requested or used, per review).
 
@@ -14,21 +21,33 @@ services:
     name: klang-registry
     runtime: rust
     buildCommand: cargo build --release --bin klang-registry
-    # $PORT is injected by Render; the binary reads PORT, REGISTRY_DATA_DIR,
-    # and REGISTRY_ADMIN_TOKEN from the environment.
-    startCommand: ./target/release/klang-registry --data-dir /data/registry
+    # $PORT is injected by Render; the binary reads PORT,
+    # KLANG_REGISTRY_TOKEN (REGISTRY_ADMIN_TOKEN stays as a backcompat
+    # alias), KLANG_STORAGE=b2, and the B2_* variables below.
+    startCommand: ./target/release/klang-registry
     healthCheckPath: /api/packages
-    disk:
-      name: registry-data
-      mountPath: /data
-      # 1 GB holds ~hundreds of small source packages at v1 sizes
-      # (8 MiB unpacked cap each). Raise when the index outgrows files.
-      sizeGB: 1
     envVars:
-      - key: REGISTRY_DATA_DIR
-        value: /data/registry
-      - key: REGISTRY_ADMIN_TOKEN
+      - key: KLANG_STORAGE
+        # Non-secret config: the service stores everything in B2.
+        value: b2
+      - key: KLANG_REGISTRY_TOKEN
         # Set manually in the Render dashboard (sync: false keeps it out
         # of this file and out of git). Generate with e.g.:
-        #   python3 -c "import secrets; print(secrets.token_hex(32))"
+        #   openssl rand -hex 24   (48 hex chars)
         sync: false
+      - key: B2_KEY_ID
+        # Application key ID restricted to the registry bucket
+        # (see docs/deploy-registry.md). Dashboard-set only.
+        sync: false
+      - key: B2_APP_KEY
+        # Application key itself. Dashboard-set only, never in git.
+        sync: false
+      - key: B2_BUCKET
+        # Private bucket name, e.g. set alongside the key. Dashboard-set only.
+        sync: false
+      - key: B2_ENDPOINT
+        # S3 endpoint of the bucket's region,
+        # e.g. s3.us-west-004.backblazeb2.com (no scheme). Dashboard-set only.
+        sync: false
+      # B2_REGION is optional (derived from B2_ENDPOINT when unset); add it
+      # as a dashboard variable only when the endpoint is non-standard.

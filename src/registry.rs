@@ -29,17 +29,23 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::mcp::{parse_json, Json};
+use crate::registry_storage::{
+    local_archive_key, local_index_key, s3_archive_key, s3_checksum_key, s3_index_key,
+    PutOutcome, Storage,
+};
 
 // ---------------------------------------------------------------------------
 // Names, versions, hashing
 // ---------------------------------------------------------------------------
 
-/// Default registry base URL (localhost v1). Overridden by
-/// `--registry` / `KLANG_REGISTRY`.
-pub const DEFAULT_REGISTRY: &str = "http://127.0.0.1:8765";
+/// Official registry (PRD §3). Resolution order (first match wins):
+/// 1. `--registry URL`, 2. `KLANG_REGISTRY` env, 3. `[registry] url` in
+/// the project's `klang.toml`, 4. `url` in `~/.klang/config.toml`,
+/// 5. this constant.
+pub const DEFAULT_REGISTRY: &str = "https://klang.raunakdevelops.dpdns.org";
 
 /// Default port for `klang-registry` when none is given.
 pub const DEFAULT_PORT: u16 = 8765;
@@ -451,73 +457,515 @@ fn index_from_json(json: &Json) -> Result<Index, String> {
 }
 
 /// Server configuration. The data dir holds `index.json` plus
-/// `<name>/<version>.kpkg` archives.
+/// `<name>/<version>.kpkg` archives on local disk; with the B2 backend
+/// the data dir is unused (state lives in the bucket) but kept so the
+/// CLI shape and local dev behave as before.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
     pub data_dir: PathBuf,
     pub admin_token: String,
 }
 
+/// TTL for the per-package version-list cache (B2 backend only). Reads
+/// refresh a package from the bucket when its entry is older than this;
+/// publishes invalidate the entry immediately.
+const INDEX_CACHE_TTL: Duration = Duration::from_secs(30);
+
 struct Server {
     cfg: RegistryConfig,
     index: Mutex<Index>,
+    /// Failed publish auth per client IP (timestamps). S5 rate limiting.
+    auth_failures: Mutex<HashMap<String, Vec<std::time::Instant>>>,
+    /// Object store (local disk or B2). All persistence goes through it.
+    storage: Arc<dyn Storage>,
+    /// Backend name for logs/health (`local` / `b2`). Never a secret.
+    backend: &'static str,
+    /// Per-package version lists: (fetched_at, entries). B2 only.
+    index_cache: Mutex<HashMap<String, (Instant, Vec<VersionEntry>)>>,
+}
+
+/// S1: publishing is enabled only when the server token is at least 32 chars.
+pub fn publishing_enabled(token: &str) -> bool {
+    token.len() >= 32
+}
+
+/// S9 + S2: constant-time bearer check that does not leak token length.
+/// Both sides are hashed with SHA-256 first so the comparison is always
+/// over 32-byte digests (no early exit, no length oracle).
+fn bearer_auth_ok(provided: Option<&str>, expected_token: &str) -> bool {
+    let expected = format!("Bearer {expected_token}");
+    let prov = provided.unwrap_or("");
+    let h_prov = sha256_bytes(prov.as_bytes());
+    let h_exp = sha256_bytes(expected.as_bytes());
+    constant_time_eq(&h_prov, &h_exp)
+}
+
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let d = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&d);
+    out
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Effective client IP for S5 rate limiting. Behind Render's proxy, use
+/// `X-Forwarded-For` carefully: first hop only (left-most entry). The
+/// header is spoofable unless a trusted proxy strips it — documented in
+/// `docs/deploy-registry.md`. Falls back to the TCP peer IP.
+fn effective_client_ip(headers: &HashMap<String, String>, peer: &str) -> String {
+    if let Some(xff) = headers.get("x-forwarded-for") {
+        let first = xff.split(',').next().unwrap_or("").trim();
+        if !first.is_empty() {
+            return first.to_string();
+        }
+    }
+    peer.to_string()
+}
+
+/// S5: true when `ip` has ≥10 failed auths in the last 60s.
+fn is_rate_limited(server: &Server, ip: &str) -> bool {
+    let mut map = server.auth_failures.lock().expect("auth lock");
+    let now = std::time::Instant::now();
+    let entry = map.entry(ip.to_string()).or_default();
+    entry.retain(|t| now.duration_since(*t).as_secs() < 60);
+    entry.len() >= 10
+}
+
+fn record_auth_failure(server: &Server, ip: &str) {
+    let mut map = server.auth_failures.lock().expect("auth lock");
+    let now = std::time::Instant::now();
+    let entry = map.entry(ip.to_string()).or_default();
+    entry.retain(|t| now.duration_since(*t).as_secs() < 60);
+    entry.push(now);
 }
 
 impl Server {
     fn load(cfg: &RegistryConfig) -> Result<Self, String> {
+        let storage = crate::registry_storage::open_storage(
+            &crate::registry_storage::StorageBackend::Local,
+            &cfg.data_dir,
+        )?;
+        Self::load_with_storage(cfg, storage, "local")
+    }
+
+    fn load_with_storage(
+        cfg: &RegistryConfig,
+        storage: Arc<dyn Storage>,
+        backend: &'static str,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(&cfg.data_dir)
             .map_err(|e| format!("cannot create data dir: {e}"))?;
-        let index_path = cfg.data_dir.join("index.json");
-        let index = match std::fs::read_to_string(&index_path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Index::default(),
-            Err(e) => return Err(format!("cannot read index: {e}")),
-            Ok(text) => {
-                let json = parse_json(&text).map_err(|e| format!("bad index.json: {e}"))?;
-                index_from_json(&json)?
-            }
+        let mut index = if backend == "b2" {
+            Self::load_b2_index(&storage)?
+        } else {
+            Self::load_local_index(&storage)?
         };
-        // Reconcile: entries whose archive is missing are dropped loudly
-        // at startup (fail closed, never serve phantom metadata).
-        let mut index = index;
-        let mut dropped = Vec::new();
-        for (name, versions) in index.packages.iter_mut() {
-            versions.retain(|v| {
-                let keep = archive_path(&cfg.data_dir, name, &v.version).exists();
-                if !keep {
-                    dropped.push(format!("{name}@{}", v.version));
-                }
-                keep
-            });
-        }
-        if !dropped.is_empty() {
-            eprintln!(
-                "registry: dropping {} packages with missing archives: {}",
-                dropped.len(),
-                dropped.join(", ")
-            );
+        if backend != "b2" {
+            // Reconcile: entries whose archive is missing are dropped loudly
+            // at startup (fail closed, never serve phantom metadata).
+            let mut dropped = Vec::new();
+            for (name, versions) in index.packages.iter_mut() {
+                versions.retain(|v| {
+                    let keep = storage
+                        .exists(&local_archive_key(name, &v.version))
+                        .unwrap_or(false);
+                    if !keep {
+                        dropped.push(format!("{name}@{}", v.version));
+                    }
+                    keep
+                });
+            }
+            if !dropped.is_empty() {
+                eprintln!(
+                    "registry: dropping {} packages with missing archives: {}",
+                    dropped.len(),
+                    dropped.join(", ")
+                );
+            }
         }
         index.packages.retain(|_, vs| !vs.is_empty());
         Ok(Self {
             cfg: cfg.clone(),
             index: Mutex::new(index),
+            auth_failures: Mutex::new(HashMap::new()),
+            storage,
+            backend,
+            index_cache: Mutex::new(HashMap::new()),
         })
     }
 
+    /// Load the full index from local-disk storage (`index.json`).
+    fn load_local_index(storage: &Arc<dyn Storage>) -> Result<Index, String> {
+        match storage.get(&local_index_key())? {
+            None => Ok(Index::default()),
+            Some(bytes) => {
+                let text =
+                    String::from_utf8(bytes).map_err(|_| "bad index.json: not UTF-8".to_string())?;
+                let json = parse_json(&text).map_err(|e| format!("bad index.json: {e}"))?;
+                index_from_json(&json)
+            }
+        }
+    }
+
+    /// Load the full index from a bucket. Archives under `packages/` are
+    /// the source of truth: each stored `index/<name>.json` is used when
+    /// it covers exactly the archived versions, otherwise it is repaired
+    /// from the listing (and the repaired doc is written back).
+    fn load_b2_index(storage: &Arc<dyn Storage>) -> Result<Index, String> {
+        let mut found: HashMap<String, Vec<String>> = HashMap::new();
+        for key in storage.list("packages/")? {
+            let Some(rest) = key.strip_prefix("packages/") else {
+                continue;
+            };
+            let Some((name, file)) = rest.split_once('/') else {
+                continue;
+            };
+            if rest.contains("//") {
+                continue;
+            }
+            if let Some(version) = file.strip_suffix(".klangpkg") {
+                if valid_pkg_name(name) && valid_version(version) {
+                    found
+                        .entry(name.to_string())
+                        .or_default()
+                        .push(version.to_string());
+                }
+            }
+        }
+        let mut names: Vec<String> = found.keys().cloned().collect();
+        names.sort();
+        let mut index = Index::default();
+        for name in names {
+            let mut versions = found.remove(&name).unwrap_or_default();
+            versions.sort_by(|a, b| version_cmp(a, b));
+            versions.dedup();
+            let stored = match storage.get(&s3_index_key(&name)) {
+                Ok(Some(bytes)) => versions_from_meta_json(&name, &bytes).ok(),
+                _ => None,
+            };
+            let entries = match stored {
+                Some(vs) if same_version_set(&vs, &versions) => vs,
+                _ => {
+                    let repaired = Self::repair_package_index(storage, &name, &versions)?;
+                    if let Ok(doc) = package_meta_json(&name, &repaired) {
+                        // Best-effort: a failed write heals on next load.
+                        let _ = storage.put(&s3_index_key(&name), doc.as_bytes());
+                    }
+                    repaired
+                }
+            };
+            if !entries.is_empty() {
+                index.packages.insert(name, entries);
+            }
+        }
+        Ok(index)
+    }
+
+    /// Rebuild one package's entries from archived versions: checksum
+    /// from the `.sha256` sidecar when valid (else hashed from the
+    /// archive bytes), size from the archive, dependencies extracted
+    /// from the embedded manifest when present.
+    fn repair_package_index(
+        storage: &Arc<dyn Storage>,
+        name: &str,
+        versions: &[String],
+    ) -> Result<Vec<VersionEntry>, String> {
+        let mut out = Vec::new();
+        for version in versions {
+            let bytes = match storage.get(&s3_archive_key(name, version))? {
+                Some(b) => b,
+                None => continue, // vanished between list and get; skip
+            };
+            let sha256 = match storage.get(&s3_checksum_key(name, version)) {
+                Ok(Some(raw)) => {
+                    let s = String::from_utf8_lossy(&raw).trim().to_string();
+                    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                        // Repair a missing sidecar is unnecessary; keep it.
+                        s
+                    } else {
+                        let h = sha256_hex(&bytes);
+                        let _ = storage.put(&s3_checksum_key(name, version), h.as_bytes());
+                        h
+                    }
+                }
+                _ => {
+                    let h = sha256_hex(&bytes);
+                    let _ = storage.put(&s3_checksum_key(name, version), h.as_bytes());
+                    h
+                }
+            };
+            let dependencies = unpack_archive(&bytes)
+                .ok()
+                .map(|files| manifest_deps(&files, name))
+                .unwrap_or_default();
+            out.push(VersionEntry {
+                version: version.clone(),
+                sha256,
+                size: bytes.len() as u64,
+                dependencies,
+            });
+        }
+        out.sort_by(|a, b| version_cmp(&a.version, &b.version));
+        Ok(out)
+    }
+
+    /// Refresh one package from bucket storage when its cache entry is
+    /// missing or older than [`INDEX_CACHE_TTL`] (B2 only; local disk is
+    /// single-writer so memory is always fresh). Never holds both locks
+    /// at once (publish takes them in the opposite order).
+    fn refresh_package_if_stale(&self, name: &str) {
+        if self.backend != "b2" || !valid_pkg_name(name) {
+            return;
+        }
+        let stale = match self.index_cache.lock().expect("cache lock").get(name) {
+            None => true,
+            Some((at, _)) => at.elapsed() >= INDEX_CACHE_TTL,
+        };
+        if !stale {
+            return;
+        }
+        let keys = match self.storage.list(&format!("packages/{name}/")) {
+            Ok(k) => k,
+            Err(_) => return, // transient: keep serving memory
+        };
+        let mut versions: Vec<String> = Vec::new();
+        for key in &keys {
+            let prefix = format!("packages/{name}/");
+            if let Some(file) = key.strip_prefix(&prefix) {
+                if let Some(v) = file.strip_suffix(".klangpkg") {
+                    if valid_version(v) && !file.contains('/') {
+                        versions.push(v.to_string());
+                    }
+                }
+            }
+        }
+        versions.sort_by(|a, b| version_cmp(a, b));
+        versions.dedup();
+        let entries = if versions.is_empty() {
+            Vec::new()
+        } else {
+            match self.storage.get(&s3_index_key(name)) {
+                Ok(Some(bytes)) => match versions_from_meta_json(name, &bytes) {
+                    Ok(vs) if same_version_set(&vs, &versions) => vs,
+                    _ => match Self::repair_package_index(&self.storage, name, &versions) {
+                        Ok(vs) => vs,
+                        Err(_) => return,
+                    },
+                },
+                _ => match Self::repair_package_index(&self.storage, name, &versions) {
+                    Ok(vs) => vs,
+                    Err(_) => return,
+                },
+            }
+        };
+        {
+            let mut index = self.index.lock().expect("index lock");
+            if entries.is_empty() {
+                index.packages.remove(name);
+            } else {
+                index.packages.insert(name.to_string(), entries.clone());
+            }
+        }
+        self.index_cache
+            .lock()
+            .expect("cache lock")
+            .insert(name.to_string(), (Instant::now(), entries));
+    }
+
+    /// Drop a package's cache entry (called on publish).
+    fn invalidate_package(&self, name: &str) {
+        self.index_cache.lock().expect("cache lock").remove(name);
+    }
+
     fn save(&self) -> Result<(), String> {
+        if self.backend == "b2" {
+            // The publish path writes the touched `index/<name>.json`
+            // directly; a full save rewrites every package doc (used by
+            // tests and as a repair helper).
+            let docs: Vec<(String, String)> = {
+                let index = self.index.lock().expect("index lock");
+                index
+                    .packages
+                    .iter()
+                    .filter_map(|(name, versions)| {
+                        package_meta_json(name, versions)
+                            .ok()
+                            .map(|doc| (s3_index_key(name), doc))
+                    })
+                    .collect()
+            };
+            for (key, doc) in &docs {
+                self.storage.put(key, doc.as_bytes())?;
+            }
+            return Ok(());
+        }
         let json = {
             let index = self.index.lock().expect("index lock");
             index_to_json(&index).render()
         };
-        let tmp = self.cfg.data_dir.join("index.json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("cannot write index: {e}"))?;
-        std::fs::rename(&tmp, self.cfg.data_dir.join("index.json"))
-            .map_err(|e| format!("cannot commit index: {e}"))?;
-        Ok(())
+        self.storage.put(&local_index_key(), json.as_bytes())
     }
 }
 
-fn archive_path(data_dir: &Path, name: &str, version: &str) -> PathBuf {
-    data_dir.join(name).join(format!("{version}.kpkg"))
+/// True when the stored entries cover exactly the archived versions.
+fn same_version_set(entries: &[VersionEntry], versions: &[String]) -> bool {
+    if entries.len() != versions.len() {
+        return false;
+    }
+    let mut have: Vec<&str> = entries.iter().map(|e| e.version.as_str()).collect();
+    have.sort_unstable();
+    let mut want: Vec<&str> = versions.iter().map(|s| s.as_str()).collect();
+    want.sort_unstable();
+    have == want
+}
+
+/// Render one package's metadata doc (also the stored `index/<name>.json`
+/// shape on B2).
+fn package_meta_json(name: &str, versions: &[VersionEntry]) -> Result<String, String> {
+    let mut vs = versions.to_vec();
+    vs.sort_by(|a, b| version_cmp(&a.version, &b.version));
+    let latest = Index::latest(&vs).map(|v| v.version.clone()).unwrap_or_default();
+    let doc = Json::Obj(vec![
+        ("name".to_string(), Json::Str(name.to_string())),
+        ("latest".to_string(), Json::Str(latest)),
+        (
+            "versions".to_string(),
+            Json::Arr(
+                vs.iter()
+                    .map(|v| {
+                        Json::Obj(vec![
+                            ("version".to_string(), Json::Str(v.version.clone())),
+                            ("sha256".to_string(), Json::Str(v.sha256.clone())),
+                            ("size".to_string(), Json::Int(v.size as i64)),
+                            (
+                                "dependencies".to_string(),
+                                Json::Arr(
+                                    v.dependencies
+                                        .iter()
+                                        .map(|(n, c)| {
+                                            Json::Obj(vec![
+                                                ("name".to_string(), Json::Str(n.clone())),
+                                                ("constraint".to_string(), Json::Str(c.clone())),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ]);
+    Ok(doc.render())
+}
+
+/// Parse one package's metadata doc back into entries.
+fn versions_from_meta_json(name: &str, bytes: &[u8]) -> Result<Vec<VersionEntry>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("index for `{name}` is not UTF-8"))?;
+    let json = parse_json(text).map_err(|e| format!("bad index for `{name}`: {e}"))?;
+    let got = json
+        .get("name")
+        .and_then(|j| j.as_str())
+        .ok_or_else(|| format!("index for `{name}` has no name"))?;
+    if got != name {
+        return Err(format!("index name mismatch for `{name}`"));
+    }
+    let arr = json
+        .get("versions")
+        .and_then(|j| j.as_arr())
+        .ok_or_else(|| format!("index for `{name}` has no versions"))?;
+    let mut out = Vec::new();
+    for v in arr {
+        let version = v
+            .get("version")
+            .and_then(|j| j.as_str())
+            .ok_or_else(|| format!("index for `{name}` has a version without number"))?;
+        let sha256 = v
+            .get("sha256")
+            .and_then(|j| j.as_str())
+            .ok_or_else(|| format!("index for `{name}` has a version without sha256"))?;
+        if !valid_version(version) || sha256.len() != 64 {
+            return Err(format!("index for `{name}` has a bad version entry"));
+        }
+        let size = match v.get("size") {
+            Some(Json::Int(n)) => (*n).max(0) as u64,
+            _ => 0,
+        };
+        let mut dependencies = Vec::new();
+        if let Some(ds) = v.get("dependencies").and_then(|j| j.as_arr()) {
+            for d in ds {
+                let (Some(n), Some(c)) = (
+                    d.get("name").and_then(|j| j.as_str()),
+                    d.get("constraint")
+                        .or_else(|| d.get("req"))
+                        .and_then(|j| j.as_str()),
+                ) else {
+                    continue;
+                };
+                if valid_pkg_name(n) && !c.is_empty() && c.len() <= 32 {
+                    dependencies.push((n.to_string(), c.to_string()));
+                }
+            }
+        }
+        out.push(VersionEntry {
+            version: version.to_string(),
+            sha256: sha256.to_string(),
+            size,
+            dependencies,
+        });
+    }
+    out.sort_by(|a, b| version_cmp(&a.version, &b.version));
+    Ok(out)
+}
+
+/// Extract transitive registry requirements from the embedded klang.toml
+/// (if any). Malformed manifests yield no deps rather than failing the
+/// publish; self-dependencies are dropped (unresolvable cycle).
+fn manifest_deps(files: &[(String, Vec<u8>)], pkg_name: &str) -> Vec<(String, String)> {
+    files
+        .iter()
+        .find(|(n, _)| n == "klang.toml")
+        .and_then(|(_, b)| String::from_utf8(b.clone()).ok())
+        .and_then(|t| crate::package::Manifest::parse(&t).ok())
+        .map(|m| {
+            let mut out = Vec::new();
+            for (k, v) in m.deps.iter().chain(m.dev_deps.iter()) {
+                if let Some((pn, c)) = parse_registry_req(v, k) {
+                    if pn != pkg_name {
+                        out.push((pn, c));
+                    }
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
+        })
+        .unwrap_or_default()
+}
+
+/// Small `{"published":...}` response body shared by the publish paths.
+fn published_json(name: &str, version: &str, sha256: &str, size: u64) -> Vec<u8> {
+    json_body(&Json::Obj(vec![
+        ("published".to_string(), Json::Bool(true)),
+        ("name".to_string(), Json::Str(name.to_string())),
+        ("version".to_string(), Json::Str(version.to_string())),
+        ("sha256".to_string(), Json::Str(sha256.to_string())),
+        ("size".to_string(), Json::Int(size as i64)),
+    ]))
 }
 
 struct Request {
@@ -676,6 +1124,41 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
         respond(stream, 200, "OK", "application/json", &json_body(&body));
         return;
     }
+    // GET /health: same liveness proof, never touches storage.
+    if req.method == "GET" && segs == ["health"] {
+        let body = Json::Obj(vec![
+            ("ok".to_string(), Json::Bool(true)),
+            ("service".to_string(), Json::Str("klang-registry".to_string())),
+        ]);
+        respond(stream, 200, "OK", "application/json", &json_body(&body));
+        return;
+    }
+    // GET /health/storage: cheap storage probe (an empty-prefix list
+    // that stays one page on an empty bucket). Reports ok/error with
+    // only the backend name — never credentials or bucket details.
+    if req.method == "GET" && segs == ["health", "storage"] {
+        match server.storage.list("health/") {
+            Ok(_) => {
+                let body = Json::Obj(vec![
+                    ("ok".to_string(), Json::Bool(true)),
+                    ("storage".to_string(), Json::Str(server.backend.to_string())),
+                ]);
+                respond(stream, 200, "OK", "application/json", &json_body(&body));
+            }
+            Err(_) => {
+                let body = Json::Obj(vec![
+                    ("ok".to_string(), Json::Bool(false)),
+                    ("storage".to_string(), Json::Str(server.backend.to_string())),
+                    (
+                        "error".to_string(),
+                        Json::Str("storage unreachable".to_string()),
+                    ),
+                ]);
+                respond(stream, 503, "Service Unavailable", "application/json", &json_body(&body));
+            }
+        }
+        return;
+    }
     if req.method == "GET" && segs == ["api", "packages"] {
         let body = {
             let index = server.index.lock().expect("index lock");
@@ -697,6 +1180,9 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
             respond(stream, 400, "Bad Request", "application/json", &err_json("bad package name"));
             return;
         }
+        // B2: refresh the package when its cache entry is stale (a
+        // sibling instance may have published since). Local: no-op.
+        server.refresh_package_if_stale(&name);
         let body = {
             let index = server.index.lock().expect("index lock");
             match index.packages.get(&name) {
@@ -777,20 +1263,35 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
             respond(stream, 400, "Bad Request", "application/json", &err_json("bad name or version"));
             return;
         }
-        let path = archive_path(&server.cfg.data_dir, &name, &version);
-        match std::fs::read(&path) {
-            Err(_) => respond(
+        let key = if server.backend == "b2" {
+            s3_archive_key(&name, &version)
+        } else {
+            local_archive_key(&name, &version)
+        };
+        match server.storage.get(&key) {
+            Ok(Some(bytes)) => respond(stream, 200, "OK", "application/octet-stream", &bytes),
+            Ok(None) => respond(
                 stream,
                 404,
                 "Not Found",
                 "application/json",
                 &err_json(&format!("unknown package `{name}@{version}`")),
             ),
-            Ok(bytes) => respond(stream, 200, "OK", "application/octet-stream", &bytes),
+            Err(_) => respond(
+                stream,
+                500,
+                "Server Error",
+                "application/json",
+                &err_json("storage error"),
+            ),
         }
         return;
     }
     // POST /api/publish?name=&version= (raw archive body, bearer auth).
+    // S1-S2/S4-S9: fail-closed when unconfigured, constant-time auth,
+    // rate-limited failures, idempotent republish, size caps.
+    // S4: never log the token, Authorization header, or bodies; error
+    // bodies never echo the supplied token.
     if req.method == "POST" && segs == ["api", "publish"] {
         let authed = req
             .headers
@@ -829,37 +1330,69 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
                 return;
             }
         };
-        // Extract transitive registry requirements from the embedded
-        // klang.toml (if any). Malformed manifests publish with no deps
-        // rather than failing the whole publish.
-        let dependencies: Vec<(String, String)> = files
-            .iter()
-            .find(|(n, _)| n == "klang.toml")
-            .and_then(|(_, b)| String::from_utf8(b.clone()).ok())
-            .and_then(|t| crate::package::Manifest::parse(&t).ok())
-            .map(|m| {
-                let mut out = Vec::new();
-                for (k, v) in m.deps.iter().chain(m.dev_deps.iter()) {
-                    if let Some((pn, c)) = parse_registry_req(&v, k) {
-                        // No self-dependency (would be an unresolvable cycle).
-                        if pn != name {
-                            out.push((pn, c));
-                        }
-                    }
-                }
-                out.sort();
-                out.dedup();
-                out
-            })
-            .unwrap_or_default();
-        {
+        // Transitive registry requirements from the embedded klang.toml
+        // (malformed manifests publish with no deps, never fail here).
+        let dependencies: Vec<(String, String)> = manifest_deps(&files, &name);
+        let archive_key = if server.backend == "b2" {
+            s3_archive_key(&name, &version)
+        } else {
+            local_archive_key(&name, &version)
+        };
+        // S6 immutability: same bytes -> 200 idempotent; different bytes
+        // -> 409 Conflict (never overwrite).
+        let already_published = {
             let index = server.index.lock().expect("index lock");
-            if index
+            index
                 .packages
                 .get(&name)
                 .map(|vs| vs.iter().any(|v| v.version == version))
                 .unwrap_or(false)
-            {
+        };
+        if already_published {
+            let identical = server
+                .storage
+                .get(&archive_key)
+                .map(|old| old.map(|b| b == req.body).unwrap_or(false))
+                .unwrap_or(false);
+            if identical {
+                // Idempotent republish: return current metadata.
+                let (sha256, size) = {
+                    let idx = server.index.lock().expect("index lock");
+                    idx.packages
+                        .get(&name)
+                        .and_then(|vs| vs.iter().find(|v| v.version == version))
+                        .map(|v| (v.sha256.clone(), v.size))
+                        .unwrap_or_else(|| (sha256_hex(&req.body), req.body.len() as u64))
+                };
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    "application/json",
+                    &published_json(&name, &version, &sha256, size),
+                );
+                return;
+            }
+            respond(
+                stream,
+                409,
+                "Conflict",
+                "application/json",
+                &err_json(&format!("`{name}@{version}` already published (no overwrite)")),
+            );
+            return;
+        }
+        let sha256 = sha256_hex(&req.body);
+        let size = req.body.len() as u64;
+        // Create-if-absent at the object layer: identical bytes racing
+        // here stay idempotent; different bytes report a conflict. (See
+        // the race note on `Storage::put_if_absent`.)
+        match server.storage.put_if_absent(&archive_key, &req.body) {
+            Err(_) => {
+                respond(stream, 500, "Server Error", "application/json", &err_json("cannot store"));
+                return;
+            }
+            Ok(PutOutcome::AlreadyExistsDifferent) => {
                 respond(
                     stream,
                     409,
@@ -869,43 +1402,88 @@ fn handle(server: &Server, req: Request, stream: &mut TcpStream) {
                 );
                 return;
             }
+            Ok(PutOutcome::AlreadyExistsSame) => {
+                let (sha256, size) = {
+                    let idx = server.index.lock().expect("index lock");
+                    idx.packages
+                        .get(&name)
+                        .and_then(|vs| vs.iter().find(|v| v.version == version))
+                        .map(|v| (v.sha256.clone(), v.size))
+                        .unwrap_or_else(|| (sha256_hex(&req.body), req.body.len() as u64))
+                };
+                respond(
+                    stream,
+                    200,
+                    "OK",
+                    "application/json",
+                    &published_json(&name, &version, &sha256, size),
+                );
+                return;
+            }
+            Ok(PutOutcome::Created) => {}
         }
-        let dir = server.cfg.data_dir.join(&name);
-        if std::fs::create_dir_all(&dir).is_err() {
-            respond(stream, 500, "Server Error", "application/json", &err_json("cannot store"));
-            return;
+        if server.backend == "b2" {
+            // Checksum sidecar + per-package index doc; then drop the
+            // cached version list so the next read is fresh.
+            if server
+                .storage
+                .put(&s3_checksum_key(&name, &version), sha256.as_bytes())
+                .is_err()
+            {
+                respond(stream, 500, "Server Error", "application/json", &err_json("cannot store"));
+                return;
+            }
+            let doc = {
+                let mut index = server.index.lock().expect("index lock");
+                let entry = index.packages.entry(name.clone()).or_default();
+                if !entry.iter().any(|v| v.version == version) {
+                    entry.push(VersionEntry {
+                        version: version.clone(),
+                        sha256: sha256.clone(),
+                        size,
+                        dependencies: dependencies.clone(),
+                    });
+                }
+                let current = index.packages.get(&name).cloned().unwrap_or_default();
+                match package_meta_json(&name, &current) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        respond(stream, 500, "Server Error", "application/json", &err_json("cannot save index"));
+                        return;
+                    }
+                }
+            };
+            if server.storage.put(&s3_index_key(&name), doc.as_bytes()).is_err() {
+                respond(stream, 500, "Server Error", "application/json", &err_json("cannot save index"));
+                return;
+            }
+            server.invalidate_package(&name);
+        } else {
+            {
+                let mut index = server.index.lock().expect("index lock");
+                index
+                    .packages
+                    .entry(name.clone())
+                    .or_default()
+                    .push(VersionEntry {
+                        version: version.clone(),
+                        sha256: sha256.clone(),
+                        size,
+                        dependencies: dependencies.clone(),
+                    });
+            }
+            if server.save().is_err() {
+                respond(stream, 500, "Server Error", "application/json", &err_json("cannot save index"));
+                return;
+            }
         }
-        let sha256 = sha256_hex(&req.body);
-        let size = req.body.len() as u64;
-        if std::fs::write(archive_path(&server.cfg.data_dir, &name, &version), &req.body).is_err() {
-            respond(stream, 500, "Server Error", "application/json", &err_json("cannot store"));
-            return;
-        }
-        {
-            let mut index = server.index.lock().expect("index lock");
-            index
-                .packages
-                .entry(name.clone())
-                .or_default()
-                .push(VersionEntry {
-                    version: version.clone(),
-                    sha256: sha256.clone(),
-                    size,
-                    dependencies: dependencies.clone(),
-                });
-        }
-        if server.save().is_err() {
-            respond(stream, 500, "Server Error", "application/json", &err_json("cannot save index"));
-            return;
-        }
-        let body = Json::Obj(vec![
-            ("published".to_string(), Json::Bool(true)),
-            ("name".to_string(), Json::Str(name)),
-            ("version".to_string(), Json::Str(version)),
-            ("sha256".to_string(), Json::Str(sha256)),
-            ("size".to_string(), Json::Int(size as i64)),
-        ]);
-        respond(stream, 200, "OK", "application/json", &json_body(&body));
+        respond(
+            stream,
+            200,
+            "OK",
+            "application/json",
+            &published_json(&name, &version, &sha256, size),
+        );
         return;
     }
     respond(stream, 404, "Not Found", "application/json", &err_json("unknown route"));
@@ -918,9 +1496,26 @@ fn handle_conn(server: Arc<Server>, mut stream: TcpStream) {
     }
 }
 
-/// Serve forever on `listener` (thread-per-connection).
+/// Serve forever on `listener` (thread-per-connection) with local-disk
+/// storage (the default; dev and tests behave as before).
 pub fn serve(listener: TcpListener, cfg: RegistryConfig) -> Result<(), String> {
-    let server = Arc::new(Server::load(&cfg)?);
+    let storage = crate::registry_storage::open_storage(
+        &crate::registry_storage::StorageBackend::Local,
+        &cfg.data_dir,
+    )?;
+    serve_with_storage(listener, cfg, storage, "local")
+}
+
+/// Serve forever on `listener` with an explicit storage backend.
+/// Logs only the backend name — never credentials or bucket details.
+pub fn serve_with_storage(
+    listener: TcpListener,
+    cfg: RegistryConfig,
+    storage: Arc<dyn Storage>,
+    backend: &'static str,
+) -> Result<(), String> {
+    let server = Arc::new(Server::load_with_storage(&cfg, storage, backend)?);
+    eprintln!("registry: storage backend `{}`", server.backend);
     for stream in listener.incoming() {
         match stream {
             Err(e) => eprintln!("registry: accept: {e}"),
@@ -936,6 +1531,21 @@ pub fn serve(listener: TcpListener, cfg: RegistryConfig) -> Result<(), String> {
 /// Spawn a test/ephemeral server on 127.0.0.1:0; returns its base URL.
 /// The accept thread is detached (process exit reaps it).
 pub fn spawn_ephemeral(data_dir: &Path, admin_token: &str) -> Result<String, String> {
+    let storage = crate::registry_storage::open_storage(
+        &crate::registry_storage::StorageBackend::Local,
+        data_dir,
+    )?;
+    spawn_ephemeral_with_storage(data_dir, admin_token, storage, "local")
+}
+
+/// Spawn an ephemeral server on 127.0.0.1:0 with an explicit storage
+/// backend (used by the B2/mock-S3 tests); returns its base URL.
+pub fn spawn_ephemeral_with_storage(
+    data_dir: &Path,
+    admin_token: &str,
+    storage: Arc<dyn Storage>,
+    backend: &'static str,
+) -> Result<String, String> {
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot bind: {e}"))?;
     let port = listener
@@ -947,7 +1557,7 @@ pub fn spawn_ephemeral(data_dir: &Path, admin_token: &str) -> Result<String, Str
         admin_token: admin_token.to_string(),
     };
     std::thread::spawn(move || {
-        if let Err(e) = serve(listener, cfg) {
+        if let Err(e) = serve_with_storage(listener, cfg, storage, backend) {
             eprintln!("registry: {e}");
         }
     });
