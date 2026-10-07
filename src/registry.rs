@@ -2614,6 +2614,160 @@ pub fn add_dependency_req(
     Ok(format!("added {name}@{pin}"))
 }
 
+/// Add several specs at once (`klang add a b@^2 c@~1`).
+///
+/// All-or-none: every spec is validated and resolved to an exact version
+/// BEFORE anything is written (bad names, bad constraints, duplicates in
+/// the one call, already-present deps, and unresolvable specs all fail up
+/// front). Then `klang.toml` is edited once and a single `fetch_project`
+/// pass vendors everything and rewrites the lock (one fetch pass, one
+/// final atomic prune rewrite). If that fetch fails, the manifest edit,
+/// the lockfile, and any newly vendored dirs are rolled back, so a failed
+/// multi-add leaves the project exactly as it found it.
+/// `dev`/`caret` apply to every spec, like the single form.
+pub fn add_dependencies_req(
+    root: &Path,
+    base: &str,
+    specs: &[(String, String)],
+    dev: bool,
+    caret: bool,
+    offline: bool,
+) -> Result<String, RegistryError> {
+    if specs.is_empty() {
+        return Err(RegistryError::protocol("add needs at least one package".to_string()));
+    }
+    // 1. Validate everything (no side effects yet).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reqs: Vec<(String, String)> = Vec::with_capacity(specs.len());
+    for (name, constraint_raw) in specs {
+        if !valid_pkg_name(name) {
+            return Err(RegistryError::protocol(format!("bad package name `{name}`")));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(RegistryError::new(
+                "conflict",
+                format!("`{name}` is listed twice (add it once)"),
+            ));
+        }
+        let constraint = constraint_raw.trim();
+        let constraint = if constraint.is_empty() { "latest" } else { constraint };
+        crate::package::version::parse_constraint(constraint)
+            .map_err(RegistryError::protocol)?;
+        reqs.push((name.clone(), constraint.to_string()));
+    }
+    let path = root.join("klang.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| RegistryError::new("io", format!("cannot read klang.toml: {e}")))?;
+    let manifest =
+        crate::package::Manifest::parse(&text).map_err(|e| RegistryError::new("io", e))?;
+    for (name, _) in &reqs {
+        let already = manifest.deps.iter().any(|(n, _)| n == name)
+            || manifest.dev_deps.iter().any(|(n, _)| n == name);
+        if already {
+            return Err(RegistryError::new(
+                "conflict",
+                format!("`{name}` is already a dependency"),
+            ));
+        }
+    }
+    // 2. Resolve every spec to an exact version together (one resolution
+    // over all roots, so shared transitive deps resolve once).
+    let roots: Vec<(String, String, String)> = reqs
+        .iter()
+        .map(|(n, c)| (n.clone(), c.clone(), "root".to_string()))
+        .collect();
+    let exacts: Vec<(String, String)> = if offline {
+        let lock_text = std::fs::read_to_string(lock_path(root)).unwrap_or_default();
+        let locks = parse_package_locks_strict(&lock_text)?;
+        reqs.iter()
+            .map(|(name, constraint)| {
+                let c = crate::package::version::parse_constraint(constraint)
+                    .map_err(RegistryError::protocol)?;
+                let mut cands: Vec<&PackageLock> =
+                    locks.iter().filter(|l| l.name == *name).collect();
+                cands.sort_by(|a, b| crate::package::version::version_cmp(&a.version, &b.version));
+                cands
+                    .iter()
+                    .filter(|l| crate::package::version::matches(&l.version, &c))
+                    .last()
+                    .map(|l| (name.clone(), l.version.clone()))
+                    .ok_or_else(|| {
+                        RegistryError::new(
+                            "offline",
+                            format!("package `{name}@{constraint}` is not locked (run online first)"),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        let resolved = resolve_online(base, &roots)?;
+        reqs.iter()
+            .map(|(name, constraint)| {
+                resolved
+                    .iter()
+                    .find(|r| r.name == *name)
+                    .map(|r| (name.clone(), r.version.clone()))
+                    .ok_or_else(|| {
+                        RegistryError::protocol(format!("could not resolve `{name}@{constraint}`"))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    // 3. Single manifest edit with every new pin.
+    let section = if dev { "dev-dependencies" } else { "dependencies" };
+    let pins: Vec<(String, String)> = exacts
+        .iter()
+        .map(|(name, exact)| {
+            let pin = if caret { format!("^{exact}") } else { exact.clone() };
+            (name.clone(), pin)
+        })
+        .collect();
+    let mut new_text = text.clone();
+    if !new_text.ends_with('\n') {
+        new_text.push('\n');
+    }
+    let has_section = new_text.lines().any(|l| l.trim() == format!("[{section}]"));
+    if !has_section {
+        new_text.push_str(&format!("[{section}]\n"));
+    }
+    for (name, pin) in &pins {
+        new_text.push_str(&format!("{name} = \"registry:{name}@{pin}\"\n"));
+    }
+    // Snapshots for rollback: the manifest, the lock (if any), and the
+    // vendor dirs of the newly resolved pins (all-or-none on fetch).
+    let lock_file = lock_path(root);
+    let lock_snapshot = std::fs::read(&lock_file).ok();
+    let mut vendor_pre: Vec<(String, bool)> = Vec::with_capacity(exacts.len());
+    for (name, version) in &exacts {
+        vendor_pre.push((format!("{}@{}", name, version), pkg_dir(root, name, version).is_dir()));
+    }
+    std::fs::write(&path, &new_text)
+        .map_err(|e| RegistryError::new("io", format!("cannot write klang.toml: {e}")))?;
+    // 4. One fetch pass for the whole new closure.
+    if let Err(e) = fetch_project(root, base, offline) {
+        // Roll back: manifest, lock, and any vendor dirs this fetch
+        // created. Best-effort (a rollback write failing must not mask
+        // the original failure).
+        let _ = std::fs::write(&path, &text);
+        match lock_snapshot {
+            Some(bytes) => {
+                let _ = atomic_write(&lock_file, &bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&lock_file);
+            }
+        }
+        for ((name, version), existed) in exacts.iter().zip(vendor_pre.iter().map(|(_, b)| *b)) {
+            if !existed {
+                let _ = std::fs::remove_dir_all(pkg_dir(root, name, version));
+            }
+        }
+        return Err(e);
+    }
+    let added: Vec<String> = pins.iter().map(|(n, p)| format!("{n}@{p}")).collect();
+    Ok(format!("added {}", added.join(", ")))
+}
+
 /// Remove a dependency: edit klang.toml, delete its vendor dirs, and
 /// prune orphaned lock pins. Keeps packages still reachable from the
 /// remaining manifest (including transitive pins).

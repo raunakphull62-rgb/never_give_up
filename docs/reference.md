@@ -31,13 +31,16 @@ a minimal program demonstrating the trigger.
 | `f64`, `float`, `f32` | 64-bit float |
 | `str`, `string` | string |
 | `bool` | boolean |
-| `void`, `()` | no value |
+| `void` | no value (there is no `()` spelling: `-> ()` is `E-PARSE`) |
 | enum name (e.g. `Opt`) | that nominal enum |
 | struct name (e.g. `Point`, `m::Token`) | that nominal struct |
 | type parameter (e.g. `T` inside `fn f<T>`) | rigid type variable |
 | anything else (`array`, `map`, unknown names) | `unknown` (dynamic) |
 
-`int` coerces to `float` wherever a float is wanted. `unknown` is the
+`int` coerces to `float` wherever a float is wanted. `i64`, `u32`, and
+`u64` are aliases enforced as the `i32` range (each use warns
+`W-TYPE-NARROW`; real widths are future work); other integer spellings
+such as `u8` are unchecked (`unknown`). `unknown` is the
 documented escape hatch: map lookups, dynamic indexes, unknown names,
 and generic-variable positions never emit `E-TYPE` — dynamic code
 keeps working while concrete mismatches (`"hi" - 1`, `1 + true`,
@@ -60,7 +63,11 @@ fn main() -> i32 {
 
 - Signature: `fn name(p: ty, ...) -> ret [throws] [async] [cancel]`.
   Arity is exact (`E-ARITY`); argument and return types are checked
-  (`E-TYPE`); duplicate parameter names are `E-DUPLICATE`.
+  (`E-TYPE`); duplicate parameter names are `E-DUPLICATE`. The return
+  type is required on every function, including `main` (a missing `->`
+  is `E-PARSE` naming the function with an `add -> i32` fix); `main`
+  itself may return any type — an `Int` return becomes the process exit
+  code, any other value exits 0.
 - `let x = expr` binds (re-`let` shadows with the new type);
   `x = expr` rebinds and checks against the bound type; assigning an
   unbound name is `E-UNDEFINED`.
@@ -97,7 +104,7 @@ fn main() -> i32 {
 | `%` | integers only |
 | `== !=` | same type, int/float mix, or anything-`unknown` |
 | `< <= > >=` | numbers, or Str/Str; result Bool |
-| `&& \|\| !` | Bool/Int operands, Bool result — **eager**: both sides always evaluate (see [limitations](limitations.md)) |
+| `&& \|\| !` | Bool/Int operands, Bool result — short-circuit: the right side runs only when the left side does not decide the result |
 | unary `-` | numbers (`-x` on a variable stays checked) |
 
 Anything else is `E-TYPE`. Match arms unify order-independently

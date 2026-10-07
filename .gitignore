@@ -3,6 +3,11 @@ target/
 Cargo.lock.bak
 target/
 .klang_pkgs/
+# Generated during tests: `run`/`check`/`fetch` write klang.lock next to a
+# package manifest. No package tracks one (verified: no klang.lock is
+# tracked anywhere), so ignore test residue inside stdlib-packages only —
+# a future intentionally-tracked lock elsewhere must stay visible.
+stdlib-packages/**/klang.lock
 # Prebuilt npm binaries are staged by the release workflow from build
 # artifacts at publish time – never commit them. (The klang-cli wrapper's
 # bin/klang.js launcher stays tracked; only klang-cli-*/bin/ is ignored.)

@@ -809,8 +809,8 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
         Expr::LtEq { left, right, .. } => bin(e, left, right, instrs, tmp, BinKind::LtEq),
         Expr::Gt { left, right, .. } => bin(e, left, right, instrs, tmp, BinKind::Gt),
         Expr::GtEq { left, right, .. } => bin(e, left, right, instrs, tmp, BinKind::GtEq),
-        Expr::And { left, right, .. } => bin(e, left, right, instrs, tmp, BinKind::And),
-        Expr::Or { left, right, .. } => bin(e, left, right, instrs, tmp, BinKind::Or),
+        Expr::And { left, right, .. } => short_circuit(e, left, right, instrs, tmp, true),
+        Expr::Or { left, right, .. } => short_circuit(e, left, right, instrs, tmp, false),
         Expr::Not { inner, .. } => {
             let v = lower_expr_to_value(inner, instrs, tmp);
             let dst = tmp_name(tmp);
@@ -873,8 +873,6 @@ enum BinKind {
     LtEq,
     Gt,
     GtEq,
-    And,
-    Or,
 }
 
 fn bin(
@@ -944,18 +942,90 @@ fn bin(
             left: l,
             right: r,
         },
-        BinKind::And => MirOp::And {
-            into: dst.clone(),
-            left: l,
-            right: r,
-        },
-        BinKind::Or => MirOp::Or {
-            into: dst.clone(),
-            left: l,
-            right: r,
-        },
     };
     push(instrs, e.id(), op);
+    dst
+}
+
+/// `&&` (`is_and`) / `||` with short-circuit evaluation. Unlike [`bin`]
+/// (which lowers both sides up front), the right-hand side lowers inside
+/// the taken branch only: a `JumpIfFalse` on the left skips the RHS — and
+/// all of its effects — when the left side already decides the result.
+/// The merged value stays `Int` 0/1: the existing `MirOp::And`/`Or` runs
+/// on the evaluated path (so truthy coercion of non-bool values is
+/// unchanged) and a `Const` 0/1 lands on the skipped path. Same
+/// jump/patch shape as `Stmt::If` lowering, so the interpreter, the
+/// int-only JIT, and jump validation all treat it as ordinary control
+/// flow.
+fn short_circuit(
+    e: &Expr,
+    left: &Expr,
+    right: &Expr,
+    instrs: &mut Vec<MirInstr>,
+    tmp: &mut u32,
+    is_and: bool,
+) -> String {
+    let l = lower_expr_to_value(left, instrs, tmp);
+    let dst = tmp_name(tmp);
+    let jfalse = push(
+        instrs,
+        e.id(),
+        MirOp::JumpIfFalse {
+            cond: l.clone(),
+            target: usize::MAX,
+        },
+    );
+    if is_and {
+        // Left truthy: the result is the truthiness of the right side.
+        let r = lower_expr_to_value(right, instrs, tmp);
+        push(
+            instrs,
+            e.id(),
+            MirOp::And {
+                into: dst.clone(),
+                left: l,
+                right: r,
+            },
+        );
+        let jend = push(instrs, e.id(), MirOp::Jump { target: usize::MAX });
+        let false_at = instrs.len();
+        patch_target(instrs, jfalse, false_at);
+        push(
+            instrs,
+            e.id(),
+            MirOp::Const {
+                into: dst.clone(),
+                value: 0,
+            },
+        );
+        let end_at = instrs.len();
+        patch_target(instrs, jend, end_at);
+    } else {
+        // Left truthy: the result is decided (`1`) without the right side.
+        push(
+            instrs,
+            e.id(),
+            MirOp::Const {
+                into: dst.clone(),
+                value: 1,
+            },
+        );
+        let jend = push(instrs, e.id(), MirOp::Jump { target: usize::MAX });
+        let false_at = instrs.len();
+        patch_target(instrs, jfalse, false_at);
+        let r = lower_expr_to_value(right, instrs, tmp);
+        push(
+            instrs,
+            e.id(),
+            MirOp::Or {
+                into: dst.clone(),
+                left: l,
+                right: r,
+            },
+        );
+        let end_at = instrs.len();
+        patch_target(instrs, jend, end_at);
+    }
     dst
 }
 

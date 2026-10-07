@@ -737,6 +737,11 @@ fn run_file_mode(args: &[String]) {
             if dump {
                 println!("check: OK (0 diagnostics)");
             }
+            // Phase 1d: non-failing `W-TYPE-NARROW` warnings go to stderr
+            // (stdout stays the program's own output under `run`).
+            for w in klang::hir::narrow_type_warnings(&prog, run_path) {
+                eprintln!("warning: {}", w.to_json());
+            }
         }
         Err(diags) => {
             if loud_stdout {
@@ -944,9 +949,10 @@ fn print_registry_usage(cmd: &str) {
             eprintln!("  --token is the least safe option (shows up in shell history); prefer `klang login` or KLANG_REGISTRY_TOKEN");
         }
         "add" => {
-            eprintln!("usage: add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline]");
+            eprintln!("usage: add <name[@constraint]...> [--dev] [--caret] [--registry URL] [--offline]");
             eprintln!("  constraint: X.Y.Z, =X.Y.Z, ^X.Y.Z, ~X.Y.Z, >/>=/</<=X.Y.Z, * (default: latest)");
-            eprintln!("  --caret writes a ^MAJOR.MINOR.PATCH range instead of an exact pin");
+            eprintln!("  one or more names; all resolve together and install all-or-none");
+            eprintln!("  --caret writes ^MAJOR.MINOR.PATCH ranges instead of exact pins");
         }
         "install" => {
             eprintln!("usage: install [name[@constraint]] [--registry URL] [--offline]");
@@ -994,9 +1000,10 @@ fn resolve_cli_registry(flag: Option<&str>, project_root: Option<&std::path::Pat
 /// Semantics (PRD § CLI, reconciled with backcompat):
 /// - `install [spec]` — vendor without editing klang.toml; no args
 ///   reproduces from klang.lock/manifest.
-/// - `add spec [--dev] [--caret]` — pin + edit klang.toml + install
+/// - `add spec... [--dev] [--caret]` — pin + edit klang.toml + install
 ///   (keeps the legacy `add name@version` form working; now also
-///   accepts ranges; `--caret` writes `^X.Y.Z`).
+///   accepts ranges and several names at once, resolved together and
+///   installed all-or-none; `--caret` writes `^X.Y.Z`).
 /// - `remove name` / `update [name]` / `list [--all]` / `init [name]`
 /// - `fetch` (legacy alias, kept) and `publish` unchanged.
 /// - `login`/`logout` manage `~/.klang/credentials` (owner-only publishing).
@@ -1045,14 +1052,11 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
                 &["--registry"],
                 &["--dev", "--offline", "--caret"],
             );
-            let Some(spec) = args.positional.first() else {
-                eprintln!("usage: add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline]");
+            if args.positional.is_empty() {
+                eprintln!("usage: add <name[@constraint]...> [--dev] [--caret] [--registry URL] [--offline]");
                 eprintln!("  constraint: X.Y.Z, =X.Y.Z, ^X.Y.Z, ~X.Y.Z, >/>=/</<=X.Y.Z, * (default: latest)");
-                eprintln!("  --caret writes a ^MAJOR.MINOR.PATCH range instead of an exact pin");
-                std::process::exit(2);
-            };
-            if args.positional.len() > 1 {
-                eprintln!("usage: add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline]");
+                eprintln!("  one or more names; all resolve together and install all-or-none");
+                eprintln!("  --caret writes ^MAJOR.MINOR.PATCH ranges instead of exact pins");
                 std::process::exit(2);
             }
             let dev = args.bools.contains("--dev");
@@ -1063,7 +1067,26 @@ fn run_registry_mode(cmd: &str, rest: &[String]) {
             if !offline {
                 println!("registry: {}", klang::registry::registry_host(&base));
             }
-            match klang::package_manager::cli::cmd_add_full(&cwd, &base, spec, dev, caret, offline) {
+            let result = if args.positional.len() == 1 {
+                klang::package_manager::cli::cmd_add_full(
+                    &cwd,
+                    &base,
+                    &args.positional[0],
+                    dev,
+                    caret,
+                    offline,
+                )
+            } else {
+                klang::package_manager::cli::cmd_add_multi(
+                    &cwd,
+                    &base,
+                    &args.positional,
+                    dev,
+                    caret,
+                    offline,
+                )
+            };
+            match result {
                 Ok(line) => println!("{line}"),
                 Err(e) => {
                     eprintln!("add: FAIL\n{e}");

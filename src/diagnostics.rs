@@ -71,9 +71,45 @@ impl Diagnostic {
         }
     }
 
+    /// Non-failing warning (severity `warning`). Unlike [`Self::error`],
+    /// these never fail `check` on their own: `TypedHIR::check` only sees
+    /// errors, and callers surface warnings through a separate channel
+    /// (CLI stderr, LSP severity-2 diagnostics). First code: `W-TYPE-NARROW`.
+    pub fn warning(
+        code: &str,
+        message: &str,
+        file: &str,
+        start: usize,
+        end: usize,
+        cause: &str,
+        fix_labels: &[&str],
+        rule: &str,
+    ) -> Self {
+        Self {
+            code: code.to_string(),
+            severity: "warning".to_string(),
+            message: message.to_string(),
+            primary_span: Span {
+                file: file.to_string(),
+                start,
+                end,
+            },
+            cause: cause.to_string(),
+            expected: None,
+            found: None,
+            fixes: fix_labels
+                .iter()
+                .map(|l| Fix {
+                    label: l.to_string(),
+                })
+                .collect(),
+            rule: rule.to_string(),
+            related: Vec::new(),
+        }
+    }
+
     /// Attach the two sides of a mismatch (`want X, got Y`).
-    pub fn with_types(mut self, expected: &str, found: &str) -> Self {
-        self.expected = Some(expected.to_string());
+    pub fn with_types(mut self, expected: &str, found: &str) -> Self {        self.expected = Some(expected.to_string());
         self.found = Some(found.to_string());
         self
     }

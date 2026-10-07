@@ -10,13 +10,35 @@ and exit 0.
 Method per item: (1) read the responsible code, (2) run a minimal Klang
 program, (3) record program + output + file/line. Nothing was changed to
 obtain these results. SPEC.md needed no correction in this phase (the only
-mismatch found — `()` listed as a void spelling — is recorded under item 5
-as an audit note, not a behavior change).
+mismatch found — `()` listed as a void spelling in docs/reference.md — is
+recorded under item 5 as an audit note, not a behavior change).
 
 Status meanings: **still true** = the reviewed limitation reproduces as
 described; **partly** = the claim is only half right (usually: the checker
 knows more than the runtime, or vice versa); **fixed** = the limitation is
 gone.
+
+## Phase 1 update (2026-10-07; behavior changes, see Phase 1 report)
+
+This section amends the audit above — the per-item evidence stays valid as
+a record of what Phase 0 found.
+
+- Item 1 is now **fixed**: `&&`/`||` short-circuit on the interpreter and
+  the JIT (branch-based MIR lowering; `tests/shortcircuit_gates.rs`).
+  `docs/limitations.md` F11 and `docs/reference.md` §4 say so.
+- Item 8 is now **fixed**: `klang add` takes one or more
+  `<name[@constraint]...>` (resolved together, all-or-none).
+- Item 5 ceremony is improved (same `E-PARSE` code): a missing `->` names
+  the function and suggests `add -> i32`. SPEC.md §1, §2, §6 and
+  `docs/reference.md` §§2–4 now state: return type required always,
+  `main` may return any type (`Int` → exit code, else 0), `-> void` is
+  the only unit spelling.
+- Items 3/2: new non-failing `W-TYPE-NARROW` warning (severity `warning`)
+  on `i64`/`u32`/`u64` (enforced as `i32`) and `u8` (unchecked); none of
+  the 26 packages trigger it (`tests/type_narrow_gates.rs`).
+- This file's two evidence fences are `text`, not `klang`, so
+  `scripts/verify_docs.py` (which executes every `klang` block in
+  `docs/`) stays green.
 
 ## Summary table
 
@@ -26,7 +48,7 @@ gone.
 | 2 | Real `bool` vs Int-as-bool; comparisons; `if`; JSON `true`/`false`/`null` | partly | Static `bool` exists and is checked; runtime erases it to `Int` 0/1; JSON still uses `{"$json": …}` marker maps; there is no `null` literal | L |
 | 3 | Numeric types; overflow; `len()` / `ord()` / `file_size()` returns | partly | `i32` range enforced everywhere (`E-TYPE` for literals, `E-OVERFLOW` at runtime); `i64`/`u32`/`u64` are aliases, `u8` etc. are unchecked `Unknown`; `f64` works; `len`/`ord`/`file_size` return `Int` | L |
 | 4 | Import collisions; qualified / aliased imports | still true | Same-named items from different files are `E-DUPLICATE`; no `import … as m` / qualified file-import syntax (only whole-file merge, selective `import {…} from`, and `mod m::item` paths) | M |
-| 5 | Required return type; `main`; unit/void | partly | `-> type` is required on **every** `fn` including `main` and closures; `main` may return **any** type (not just `i32`); `-> void` works, `-> ()` is rejected by the parser despite SPEC.md listing it | S |
+| 5 | Required return type; `main`; unit/void | partly | `-> type` is required on **every** `fn` including `main` and closures; `main` may return **any** type (not just `i32`); `-> void` works, `-> ()` is rejected by the parser despite docs/reference.md listing it | S |
 | 6 | Cranelift JIT coverage | still true | Int-only backend; everything else (floats, strings, lists, closures, structs, enums, builtins, async ops, …) fails loudly, never silently | L (per value kind) |
 | 7 | `sort` on mixed types | still true | Still rejects mixed-type lists with `E-TYPE` and an actionable message (check passes; rejection is at runtime) | S (messages) / M (cross-type order) |
 | 8 | `klang add` with several names | still true | Exactly one `<name[@constraint]>` accepted; two names → usage + exit 2 | S |
@@ -42,7 +64,7 @@ Claim under test: earlier audit item F11 said `&&`/`||` evaluate eagerly.
 
 Evidence (program + output):
 
-```klang
+```text
 fn boom() -> i32 {
     print("BOOM")
     return 1
@@ -66,7 +88,7 @@ Control cases behave as expected: `true && boom()` prints `BOOM` → `1`,
 `false || boom()` prints `BOOM` → `0`. Strongest proof, an error on the
 right is still raised:
 
-```klang
+```text
 fn boom() -> i32 { return 1 / 0 }
 fn main() -> i32 {
     let x = false && boom()
@@ -241,8 +263,8 @@ half is false, and the unit story has a parser gap.**
   `Ty::Void`, `src/hir.rs:86`) and runs. `-> ()` is **rejected** by the
   parser (`expected return type` — `parse_ty_name` only accepts identifiers,
   `::` segments, and generics, `src/parser/mod.rs:765-816`) even though
-  `parse_ty` would map `"()"` to `Void` and SPEC.md §2 lists `` `void` |
-  `()` ``. Audit note, not a Phase 0 change.
+  `parse_ty` would map `"()"` to `Void` and docs/reference.md §2 lists
+  `` `void`, `()` ``. Audit note, not a Phase 0 change.
 - The current missing-return-type error (`expected '->'`, `E-PARSE`, pointing
   at the `{`) is terse — the Phase 1c improvement ("say so clearly and show
   `add -> i32`") applies here.
@@ -362,8 +384,9 @@ capability/sandboxing model, and a versioning plan — Phase 2 design item D5).
   range-identical aliases; `u8` parses but is unchecked), "return type
   required including `main` must be `i32`" (item 5 — required yes,
   must-be-`i32` no).
-- Stale doc line (not a behavior issue): SPEC.md §2 lists `()` as a void
-  spelling, but the parser rejects `-> ()` (`expected return type`).
+- Stale doc line (not a behavior issue): docs/reference.md §2 listed `()`
+  as a void spelling, but the parser rejects `-> ()`
+  (`expected return type`).
 
 ## Open questions / could not verify
 

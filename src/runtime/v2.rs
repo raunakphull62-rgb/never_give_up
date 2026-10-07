@@ -683,13 +683,21 @@ fn eval_expr(
         }
         V2Expr::And { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;
-            let r = eval_expr(right, frame, global, depth)?;
-            Ok(Value::Int(i64::from(truthy(&l) && truthy(&r))))
+            if truthy(&l) {
+                let r = eval_expr(right, frame, global, depth)?;
+                Ok(Value::Int(i64::from(truthy(&r))))
+            } else {
+                Ok(Value::Int(0))
+            }
         }
         V2Expr::Or { left, right, .. } => {
             let l = eval_expr(left, frame, global, depth)?;
-            let r = eval_expr(right, frame, global, depth)?;
-            Ok(Value::Int(i64::from(truthy(&l) || truthy(&r))))
+            if truthy(&l) {
+                Ok(Value::Int(1))
+            } else {
+                let r = eval_expr(right, frame, global, depth)?;
+                Ok(Value::Int(i64::from(truthy(&r))))
+            }
         }
         V2Expr::Index { .. } => Err(rt_err("indexing not supported in v2")),
         V2Expr::Field { base, field, .. } => {

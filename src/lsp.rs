@@ -174,20 +174,34 @@ pub fn check_document(path: Option<&str>, text: &str) -> Vec<Diagnostic> {
     let label = path.unwrap_or("untitled");
     let mut p = crate::parser::Parser::new_with_file(text, label);
     match p.parse_program() {
-        Ok(prog) => match crate::hir::TypedHIR::check_with_file(prog, label) {
-            Ok(_) => Vec::new(),
-            Err(diags) => diags,
-        },
+        Ok(prog) => {
+            // Phase 1d warnings surface as severity-2 diagnostics; they
+            // never fail the check itself.
+            let warns = crate::hir::narrow_type_warnings(&prog, label);
+            match crate::hir::TypedHIR::check_with_file(prog, label) {
+                Ok(_) => warns,
+                Err(mut diags) => {
+                    diags.extend(warns);
+                    diags
+                }
+            }
+        }
         Err(d) => vec![d],
     }
 }
 
 fn check_via_loader(path: &str, text: &str) -> Vec<Diagnostic> {
     match crate::imports::load_program_with_entry_source(path, text) {
-        Ok(loaded) => match crate::hir::TypedHIR::check_with_file(loaded.program, path) {
-            Ok(_) => Vec::new(),
-            Err(diags) => diags,
-        },
+        Ok(loaded) => {
+            let warns = crate::hir::narrow_type_warnings(&loaded.program, path);
+            match crate::hir::TypedHIR::check_with_file(loaded.program, path) {
+                Ok(_) => warns,
+                Err(mut diags) => {
+                    diags.extend(warns);
+                    diags
+                }
+            }
+        }
         Err(e) => {
             if e.code == "E-PARSE" {
                 // The message already IS the inner diagnostic JSON: parse

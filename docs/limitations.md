@@ -4,16 +4,14 @@ Honest list, pulled from the audit's triaged-not-fixed findings.
 Nothing here is buried: each item is either a deliberate scope cut
 with a workaround or recorded debt with a stated direction.
 
-## F11 — `&&` and `||` do not short-circuit
+## F11 — `&&` and `||` short-circuit (fixed in Phase 1)
 
-Both sides always evaluate. A bounds guard in `&&` position
-(`i < n && s[i] == "x"` with `i == n`) is well-typed but fails at run
-time with `E-RUNTIME` instead of skipping the right-hand side. The
-failure is loud, never a silent wrong answer. Workaround: nest the
-guard as an `if` inside the loop; `&&` over pure comparisons is
-unaffected. The principled fix (short-circuit lowering) would change
-observable semantics for side-effecting right-hand sides and is
-recorded as future work.
+The right-hand side runs only when the left side does not decide the
+result, on the interpreter and the int-only JIT alike. Previously both
+sides always evaluated, so a bounds guard in `&&` position
+(`i < n && s[i] == "x"` with `i == n`) failed at run time with
+`E-RUNTIME` instead of skipping the right-hand side; now the guard
+skips cleanly. Result values are unchanged (`Int` 0/1).
 
 ```klang
 // @run prints: 2 ; return: 0

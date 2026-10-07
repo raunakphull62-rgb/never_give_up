@@ -882,6 +882,27 @@ impl Parser {
         }
     }
 
+    /// `->` return-type arrow after a function signature. A missing return
+    /// type is the first ceremony every newcomer hits, so the error names
+    /// the function and shows the fix instead of the bare `expected '->'`.
+    /// Same `E-PARSE` code as before — only the message gains a fix.
+    fn expect_return_arrow(&mut self, subject: &str, example: &str) -> Result<Token, Diagnostic> {
+        let t = self.peek().clone();
+        if t.kind == TokenKind::Arrow {
+            return Ok(self.bump());
+        }
+        Err(Diagnostic::error(
+            "E-PARSE",
+            &format!("{subject} is missing its return type: expected `->` after the parameter list"),
+            &self.file,
+            t.start,
+            t.end,
+            "every function declares its return type",
+            &[&format!("add `-> i32` (or another type), e.g. {example}")],
+            "syntax/grammar",
+        ))
+    }
+
     fn expect_ident(&mut self, what: &str) -> Result<(String, usize, usize), Diagnostic> {
         let t = self.peek().clone();
         match &t.kind {
@@ -1190,7 +1211,10 @@ impl Parser {
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
-        self.expect(&TokenKind::Arrow, "`->`")?;
+        self.expect_return_arrow(
+            &format!("function `{name}`"),
+            &format!("`fn {name}(...) -> i32`"),
+        )?;
         let return_ty = self.parse_ty_name("return type")?;
         let mut effects = Vec::new();
         loop {
@@ -2335,7 +2359,7 @@ impl Parser {
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
-        self.expect(&TokenKind::Arrow, "`->`")?;
+        self.expect_return_arrow("closure", "`fn(x: i32) -> i32 { ... }`")?;
         let return_ty = self.parse_ty_name("return type")?;
         self.expect(&TokenKind::LBrace, "`{`")?;
         let blk_id = self.next_id();

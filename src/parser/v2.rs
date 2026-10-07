@@ -101,6 +101,26 @@ impl P {
         }
     }
 
+    /// `->` return-type arrow after a v2 function signature. Same improved
+    /// ceremony message as the v1 parser (names the function, shows the
+    /// fix); same `E-PARSE-V2` code as before.
+    fn expect_return_arrow(&mut self, name: &str) -> Result<Token, Diagnostic> {
+        let t = self.peek().clone();
+        if TokenKind::Arrow == t.kind {
+            return Ok(self.bump());
+        }
+        Err(Diagnostic::error(
+            "E-PARSE-V2",
+            &format!("function `{name}` is missing its return type: expected `->` after the parameter list"),
+            FILE,
+            t.start,
+            t.end,
+            "every function declares its return type",
+            &[&format!("add `-> i32` (or another type), e.g. `fn {name}(...) -> i32`")],
+            "syntax/v2",
+        ))
+    }
+
     fn expect_ident(&mut self, what: &str) -> Result<(String, usize, usize), Diagnostic> {
         let t = self.peek().clone();
         match &t.kind {
@@ -518,7 +538,7 @@ impl P {
             }
         }
         self.expect_kind(&TokenKind::RParen, "`)`")?;
-        self.expect_kind(&TokenKind::Arrow, "`->`")?;
+        self.expect_return_arrow(&name)?;
         let return_ty = self.parse_qualified_type("return type")?;
         self.expect_kind(&TokenKind::LBrace, "`{`")?;
         let fn_id = self.next_id();

@@ -60,6 +60,23 @@ pub fn cmd_add_full(
     registry::add_dependency_req(root, base, &name, &constraint, is_dev, caret, offline)
 }
 
+/// Multi-name `add`: every spec is `name[@constraint]`; resolution covers
+/// all specs together, the manifest is edited once, and the install is
+/// all-or-none (a failure leaves manifest, lock, and vendor dirs
+/// untouched). Single-name callers keep using [`cmd_add_full`], whose
+/// output (`added <name>@<pin>`) is unchanged.
+pub fn cmd_add_multi(
+    root: &Path,
+    base: &str,
+    specs: &[String],
+    is_dev: bool,
+    caret: bool,
+    offline: bool,
+) -> Result<String, RegistryError> {
+    let parsed: Vec<(String, String)> = specs.iter().map(|s| split_spec(s)).collect();
+    registry::add_dependencies_req(root, base, &parsed, is_dev, caret, offline)
+}
+
 /// `klang remove <name>`: drop from `klang.toml`, delete vendor dirs,
 /// prune orphaned lock pins.
 pub fn cmd_remove(root: &Path, name: &str) -> Result<String, RegistryError> {

@@ -342,8 +342,8 @@ impl LowerContext {
             V2Expr::LtEq { id: _, left, right } => self.bin_op(left, right, instrs, MirOp::LtEq { into: String::new(), left: String::new(), right: String::new() }, |into, l, r| MirOp::LtEq { into, left: l, right: r }),
             V2Expr::Gt { id: _, left, right } => self.bin_op(left, right, instrs, MirOp::Gt { into: String::new(), left: String::new(), right: String::new() }, |into, l, r| MirOp::Gt { into, left: l, right: r }),
             V2Expr::GtEq { id: _, left, right } => self.bin_op(left, right, instrs, MirOp::GtEq { into: String::new(), left: String::new(), right: String::new() }, |into, l, r| MirOp::GtEq { into, left: l, right: r }),
-            V2Expr::And { id: _, left, right } => self.bin_op(left, right, instrs, MirOp::And { into: String::new(), left: String::new(), right: String::new() }, |into, l, r| MirOp::And { into, left: l, right: r }),
-            V2Expr::Or { id: _, left, right } => self.bin_op(left, right, instrs, MirOp::Or { into: String::new(), left: String::new(), right: String::new() }, |into, l, r| MirOp::Or { into, left: l, right: r }),
+            V2Expr::And { id: _, left, right } => self.short_circuit(left, right, instrs, true),
+            V2Expr::Or { id: _, left, right } => self.short_circuit(left, right, instrs, false),
             V2Expr::Index { id: _, base, index } => {
                 let b = self.lower_expr(base, instrs);
                 let i = self.lower_expr(index, instrs);
@@ -378,6 +378,92 @@ impl LowerContext {
             op: make_op(dst.clone(), l, r),
         });
         dst
+    }
+
+    /// `&&` (`is_and`) / `||` with short-circuit evaluation: the RHS
+    /// lowers inside the taken branch only, so its effects never run when
+    /// the LHS decides the result. Values stay `Int` 0/1, matching the old
+    /// eager results on every evaluated path. Same shape as `lower_if`
+    /// above (placeholder target, patched after).
+    fn short_circuit(
+        &mut self,
+        left: &V2Expr,
+        right: &V2Expr,
+        instrs: &mut Vec<MirInstr>,
+        is_and: bool,
+    ) -> String {
+        let l = self.lower_expr(left, instrs);
+        let dst = self.next_tmp();
+        let jfalse = instrs.len();
+        instrs.push(MirInstr {
+            origin: NodeId::new(vec![]),
+            op: MirOp::JumpIfFalse {
+                cond: l.clone(),
+                target: usize::MAX,
+            },
+        });
+        if is_and {
+            let r = self.lower_expr(right, instrs);
+            instrs.push(MirInstr {
+                origin: NodeId::new(vec![]),
+                op: MirOp::And {
+                    into: dst.clone(),
+                    left: l,
+                    right: r,
+                },
+            });
+            let jend = instrs.len();
+            instrs.push(MirInstr {
+                origin: NodeId::new(vec![]),
+                op: MirOp::Jump { target: usize::MAX },
+            });
+            let false_at = instrs.len();
+            Self::patch_jump(instrs, jfalse, false_at);
+            instrs.push(MirInstr {
+                origin: NodeId::new(vec![]),
+                op: MirOp::Const {
+                    into: dst.clone(),
+                    value: 0,
+                },
+            });
+            let end_at = instrs.len();
+            Self::patch_jump(instrs, jend, end_at);
+        } else {
+            instrs.push(MirInstr {
+                origin: NodeId::new(vec![]),
+                op: MirOp::Const {
+                    into: dst.clone(),
+                    value: 1,
+                },
+            });
+            let jend = instrs.len();
+            instrs.push(MirInstr {
+                origin: NodeId::new(vec![]),
+                op: MirOp::Jump { target: usize::MAX },
+            });
+            let false_at = instrs.len();
+            Self::patch_jump(instrs, jfalse, false_at);
+            let r = self.lower_expr(right, instrs);
+            instrs.push(MirInstr {
+                origin: NodeId::new(vec![]),
+                op: MirOp::Or {
+                    into: dst.clone(),
+                    left: l,
+                    right: r,
+                },
+            });
+            let end_at = instrs.len();
+            Self::patch_jump(instrs, jend, end_at);
+        }
+        dst
+    }
+
+    /// Fill in a forward jump target recorded with `usize::MAX`.
+    fn patch_jump(instrs: &mut [MirInstr], idx: usize, target: usize) {
+        match &mut instrs[idx].op {
+            MirOp::JumpIfFalse { target: t, .. } | MirOp::Jump { target: t } => *t = target,
+            _ => {}
+        }
     }
     
     fn lower_tune(&mut self, tune: &V2TuneExpr, instrs: &mut Vec<MirInstr>) -> String {

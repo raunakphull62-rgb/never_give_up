@@ -709,3 +709,158 @@ fn t10_e2e_login_publish_add_install_run() {
         std::env::remove_var("HOME");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1b: multi-name `klang add`
+// ---------------------------------------------------------------------------
+
+/// Publish one tiny package to the ephemeral registry.
+fn publish_tiny(base: &str, tag: &str, name: &str, version: &str, body: &str) {
+    let pkg = tmp(&format!("mm-{tag}-{name}"));
+    std::fs::write(
+        pkg.join("klang.toml"),
+        format!("name = \"{name}\"\nversion = \"{version}\"\nentry = \"main\"\n"),
+    )
+    .unwrap();
+    std::fs::write(pkg.join("lib.klang"), body).unwrap();
+    let files = klang::registry::collect_package_files(&pkg).unwrap();
+    let a = klang::registry::pack_archive(&files).unwrap();
+    klang::registry::publish_pkg(base, LONG_TOKEN, name, version, &a).unwrap();
+}
+
+fn fresh_app(tag: &str) -> PathBuf {
+    let app = tmp(&format!("mm-app-{tag}"));
+    std::fs::write(
+        app.join("klang.toml"),
+        "name = \"app\"\nversion = \"0.1.0\"\nentry = \"main\"\n",
+    )
+    .unwrap();
+    app
+}
+
+#[test]
+fn t_multi_add_two_names_one_call() {
+    // End to end through the real CLI: `add mma mmb@1.0.0` installs both,
+    // pins both, and reports both in one line.
+    let data = tmp("mm-data");
+    let base = klang::registry::spawn_ephemeral(&data, LONG_TOKEN).unwrap();
+    publish_tiny(&base, "one", "mma", "1.0.0", "fn aval() -> i32 { return 40 }\n");
+    publish_tiny(&base, "one", "mmb", "1.0.0", "fn bval() -> i32 { return 2 }\n");
+
+    let app = fresh_app("one");
+    let mut cmd = std::process::Command::new(klang_bin());
+    cmd.args(["add", "mma", "mmb@1.0.0", "--registry", &base])
+        .current_dir(&app);
+    cmd.env_remove("KLANG_REGISTRY");
+    cmd.env_remove("KLANG_REGISTRY_TOKEN");
+    let out = cmd.output().expect("add runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "add: stdout={stdout} stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("added mma@1.0.0, mmb@1.0.0"), "{stdout}");
+    let toml = std::fs::read_to_string(app.join("klang.toml")).unwrap();
+    assert!(toml.contains("mma = \"registry:mma@1.0.0\""), "{toml}");
+    assert!(toml.contains("mmb = \"registry:mmb@1.0.0\""), "{toml}");
+    let lock = std::fs::read_to_string(app.join("klang.lock")).unwrap();
+    assert!(lock.contains("package mma 1.0.0"), "{lock}");
+    assert!(lock.contains("package mmb 1.0.0"), "{lock}");
+    assert!(app.join(".klang_pkgs/mma/1.0.0/lib.klang").is_file());
+    assert!(app.join(".klang_pkgs/mmb/1.0.0/lib.klang").is_file());
+
+    // The single-name form still works with its historical output.
+    let app2 = fresh_app("one-single");
+    let line = klang::package_manager::cli::cmd_add_full(&app2, &base, "mma", false, false, false)
+        .expect("single add runs");
+    assert_eq!(line, "added mma@1.0.0");
+    println!("multi-add one-call OK");
+}
+
+#[test]
+fn t_multi_add_all_or_none() {
+    // One good spec + one unresolvable spec: nothing is written anywhere.
+    let data = tmp("mm-non-data");
+    let base = klang::registry::spawn_ephemeral(&data, LONG_TOKEN).unwrap();
+    publish_tiny(&base, "none", "mmgood", "1.0.0", "fn g() -> i32 { return 1 }\n");
+
+    let app = fresh_app("none");
+    let before = std::fs::read_to_string(app.join("klang.toml")).unwrap();
+    let err = klang::registry::add_dependencies_req(
+        &app,
+        &base,
+        &[
+            ("mmgood".to_string(), "1.0.0".to_string()),
+            ("mmmissing".to_string(), "1.0.0".to_string()),
+        ],
+        false,
+        false,
+        false,
+    )
+    .expect_err("missing package fails the whole call");
+    assert!(
+        err.to_string().contains("mmmissing"),
+        "names the bad spec: {err}"
+    );
+    let after = std::fs::read_to_string(app.join("klang.toml")).unwrap();
+    assert_eq!(before, after, "manifest untouched");
+    assert!(!app.join("klang.lock").exists(), "no lock created");
+    assert!(!app.join(".klang_pkgs").exists(), "nothing vendored");
+    println!("multi-add all-or-none OK");
+}
+
+#[test]
+fn t_multi_add_rejects_dup_and_present() {
+    let data = tmp("mm-dup-data");
+    let base = klang::registry::spawn_ephemeral(&data, LONG_TOKEN).unwrap();
+    publish_tiny(&base, "dup", "mmd", "1.0.0", "fn d() -> i32 { return 1 }\n");
+    publish_tiny(&base, "dup", "mme", "1.0.0", "fn e() -> i32 { return 2 }\n");
+
+    // Same name twice in one call.
+    let app = fresh_app("dup");
+    let before = std::fs::read_to_string(app.join("klang.toml")).unwrap();
+    let err = klang::registry::add_dependencies_req(
+        &app,
+        &base,
+        &[
+            ("mmd".to_string(), "1.0.0".to_string()),
+            ("mmd".to_string(), "1.0.0".to_string()),
+        ],
+        false,
+        false,
+        false,
+    )
+    .expect_err("duplicate in one call fails");
+    assert!(err.to_string().contains("listed twice"), "{err}");
+    assert_eq!(std::fs::read_to_string(app.join("klang.toml")).unwrap(), before);
+
+    // One already-present dep poisons the whole call (the new one is not added).
+    klang::registry::add_dependency_req(&app, &base, "mmd", "1.0.0", false, false, false).unwrap();
+    let with_first = std::fs::read_to_string(app.join("klang.toml")).unwrap();
+    let err = klang::registry::add_dependencies_req(
+        &app,
+        &base,
+        &[
+            ("mmd".to_string(), "1.0.0".to_string()),
+            ("mme".to_string(), "1.0.0".to_string()),
+        ],
+        false,
+        false,
+        false,
+    )
+    .expect_err("present dep fails the whole call");
+    assert!(err.to_string().contains("already a dependency"), "{err}");
+    let after = std::fs::read_to_string(app.join("klang.toml")).unwrap();
+    assert_eq!(with_first, after, "manifest untouched");
+    assert!(!after.contains("mme = "), "{after}");
+    println!("multi-add dup/present OK");
+}
+
+#[test]
+fn t_add_usage_names_plural() {
+    // No specs: usage names the multi-name form and exits 2.
+    let (stdout, stderr, code) = run_cli_raw(&tmp("mm-usage"), &["add"], &[]);
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("add <name[@constraint]...>"),
+        "usage names several specs: {stderr}"
+    );
+    println!("add usage OK");
+}

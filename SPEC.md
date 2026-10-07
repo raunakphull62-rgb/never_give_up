@@ -33,7 +33,11 @@ fn main() -> i32 {
   but was not asked for stay invisible (`E-UNDEFINED` at check).
 - `fn name(params) -> type [effects] { ... }`. Effects: `throws`,
   `async`, `cancel`. Calling a `throws` function requires `throws`
-  on the caller (`E-EFFECT-MISMATCH`).
+  on the caller (`E-EFFECT-MISMATCH`). The `-> type` is required on
+  every function, including `main` (a missing `->` is `E-PARSE` naming
+  the function with an `add -> i32` fix). `main` itself may return any
+  type: an `Int` return becomes the process exit code, any other value
+  exits 0. `-> void` is the unit form (there is no `()` spelling).
 - Arguments are pass-by-value: mutating a struct, array, or map
   parameter inside the callee never affects the caller's binding.
   Return the updated value (or a status code) instead.
@@ -153,8 +157,12 @@ fn area(s: Shape) -> i32 {
 | `f64`, `float`, `f32` | Float |
 | `str`, `string` | Str |
 | `bool` | Bool |
+| `void` | Void (no value; `()` is not an accepted spelling) |
 
-`int` coerces to `float`. Everything else (map lookups, dynamic
+`int` coerces to `float`. `i64`, `u32`, and `u64` are aliases enforced
+as the `i32` range (each use warns `W-TYPE-NARROW`, severity `warning`,
+which never fails `check`; real widths are future work); other integer
+spellings such as `u8` are unchecked (`unknown`). Everything else (map lookups, dynamic
 index, unknown names) is `unknown`, a wildcard that never emits
 `E-TYPE` — this keeps dynamic code working while still catching
 `"hi" - 1`, `1 + true`, `return "hi"` in `-> i32`, `add("hi", 1)`,
@@ -164,7 +172,10 @@ index, unknown names) is `unknown`, a wildcard that never emits
 - `- * /`: numbers only. `%`: integers only.
 - `== !=`: same type, or Int/Float mix, or anything-unknown. Else `E-TYPE`.
 - `< <= > >=`: numbers, or Str/Str. Result is Bool.
-- `&& || !`: Bool/Int operands, Bool result. `if`/`while` need Bool/Int.
+- `&& || !`: Bool/Int operands, Bool result. Short-circuit: the right
+  side of `&&`/`||` runs only when the left side does not decide the
+  result (interpreter and JIT alike); values stay `Int` 0/1.
+  `if`/`while` need Bool/Int.
 - `for i in a..b`: `a`, `b` must be Int. `for x in it`: `it` must be
   array/map/str. Loop var of `..` is Int, of `in` is unknown.
 - Calls check arity (`E-ARITY`) and arg types. Returns check against
@@ -326,7 +337,8 @@ calc = "registry:calc@1.0.0"         # exact registry pin (X.Y.Z only)
   index + content-addressed archives; file-backed storage, single admin
   bearer token, no TLS in-process, no overwrite of published versions.
 - CLI: `klang publish` (packs `*.klang` + `klang.toml`, uploads),
-  `klang add name@version` (pins + fetches), `klang fetch`
+  `klang add <name[@constraint]...>` (pins + fetches; one or more names
+  resolve together and install all-or-none), `klang fetch`
   (`--registry URL` / `KLANG_REGISTRY` select the server; `--offline`
   forbids network). `run`/`check`/`build` fetch automatically when
   online.

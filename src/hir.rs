@@ -77,8 +77,7 @@ impl Ty {
 
 /// Parse a declared type annotation (`i32`, `f64`, `str`, `bool`, ...).
 /// Unknown names become `Unknown` (user struct names resolve via structs map).
-pub fn parse_ty(s: &str) -> Ty {
-    match s {
+pub fn parse_ty(s: &str) -> Ty {    match s {
         "i32" | "i64" | "u32" | "u64" | "int" => Ty::Int,
         "f32" | "f64" | "float" => Ty::Float,
         "str" | "string" => Ty::Str,
@@ -90,6 +89,250 @@ pub fn parse_ty(s: &str) -> Ty {
 
 /// Enum registry: enum name -> variant name -> payload field types.
 pub type EnumTable = HashMap<String, HashMap<String, Vec<Ty>>>;
+
+/// Phase 1d: annotations that spell a wider type than Klang enforces.
+///
+/// `i64`/`u32`/`u64` parse to `Ty::Int` (checked `i32` range); `u8` — like
+/// any other unknown name — stays `Unknown` (unchecked, dynamic). Both
+/// keep compiling EXACTLY as before: this pass only surfaces the fact as
+/// `W-TYPE-NARROW` (severity `warning`, never an error), so no existing
+/// program changes meaning and `check` stays green. Real enforcement is
+/// design item D3.
+///
+/// Mirrors resolution (`resolve_param_ty`/`resolve_generic_ty`): a name
+/// that is a type parameter or a known struct/enum (nominal) never warns,
+/// and qualified `m::T` paths are module lookups, not builtins.
+pub fn narrow_type_warnings(program: &Program, file: &str) -> Vec<Diagnostic> {
+    let structs: Vec<String> = program
+        .structs
+        .iter()
+        .map(|s| s.name.clone())
+        .chain(program.mods.iter().flat_map(|m| m.structs.iter().map(|s| s.name.clone())))
+        .collect();
+    let enums: Vec<String> = program
+        .enums
+        .iter()
+        .map(|e| e.name.clone())
+        .chain(program.mods.iter().flat_map(|m| m.enums.iter().map(|e| e.name.clone())))
+        .collect();
+    let mut out = Vec::new();
+    let mut fns: Vec<(&FunctionDecl, String)> = program
+        .functions
+        .iter()
+        .map(|f| (f, String::new()))
+        .collect();
+    for m in &program.mods {
+        for f in &m.functions {
+            fns.push((f, format!("{}::", m.name)));
+        }
+    }
+    for (f, prefix) in &fns {
+        let owner = format!("{prefix}{}", f.name);
+        for p in &f.params {
+            lint_annotation(
+                &p.ty,
+                &format!("parameter `{}` of function `{owner}`", p.name),
+                &f.type_params,
+                &enums,
+                &structs,
+                file,
+                f.name_span,
+                &mut out,
+            );
+        }
+        lint_annotation(
+            &f.return_ty,
+            &format!("return type of function `{owner}`"),
+            &f.type_params,
+            &enums,
+            &structs,
+            file,
+            f.name_span,
+            &mut out,
+        );
+        let mut lits = Vec::new();
+        crate::closures::collect_closures(&f.body, &mut lits);
+        for lit in &lits {
+            for p in &lit.params {
+                lint_annotation(
+                    &p.ty,
+                    &format!("parameter `{}` of a closure in function `{owner}`", p.name),
+                    &f.type_params,
+                    &enums,
+                    &structs,
+                    file,
+                    f.name_span,
+                    &mut out,
+                );
+            }
+            lint_annotation(
+                &lit.return_ty,
+                &format!("return type of a closure in function `{owner}`"),
+                &f.type_params,
+                &enums,
+                &structs,
+                file,
+                f.name_span,
+                &mut out,
+            );
+        }
+    }
+    for s in program.structs.iter().chain(
+        program
+            .mods
+            .iter()
+            .flat_map(|m| m.structs.iter()),
+    ) {
+        for fld in &s.fields {
+            lint_annotation(
+                &fld.ty,
+                &format!("field `{}` of struct `{}`", fld.name, s.name),
+                &s.type_params,
+                &enums,
+                &structs,
+                file,
+                (0, 0),
+                &mut out,
+            );
+        }
+    }
+    for e in program.enums.iter().chain(
+        program.mods.iter().flat_map(|m| m.enums.iter()),
+    ) {
+        for v in &e.variants {
+            for fld in &v.fields {
+                lint_annotation(
+                    &fld.ty,
+                    &format!(
+                        "field `{}` of variant `{}` in enum `{}`",
+                        fld.name, v.name, e.name
+                    ),
+                    &e.type_params,
+                    &enums,
+                    &structs,
+                    file,
+                    (0, 0),
+                    &mut out,
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Lint one raw annotation string: closure-type spellings split first,
+/// then the base name plus every generic argument is checked.
+fn lint_annotation(
+    raw: &str,
+    where_: &str,
+    type_params: &[String],
+    enums: &[String],
+    structs: &[String],
+    file: &str,
+    span: (usize, usize),
+    out: &mut Vec<Diagnostic>,
+) {
+    // `fn(A, B) -> R` spellings name real parameter/return positions.
+    if let Some((ps, r)) = crate::closures::split_closure_ty(raw) {
+        for p in &ps {
+            lint_annotation(p, where_, type_params, enums, structs, file, span, out);
+        }
+        lint_annotation(&r, where_, type_params, enums, structs, file, span, out);
+        return;
+    }
+    let base = base_ty_name(raw);
+    // Nominal bindings never narrow: type parameters, known structs/enums,
+    // and qualified module paths (a different namespace entirely).
+    let nominal = type_params.iter().any(|t| t == base)
+        || enums.iter().any(|n| n == base)
+        || structs.iter().any(|n| n == base)
+        || base.contains("::");
+    if !nominal {
+        if matches!(base, "i64" | "u32" | "u64") {
+            out.push(Diagnostic::warning(
+                "W-TYPE-NARROW",
+                &format!(
+                    "{where_} is annotated `{base}`, but Klang enforces the `i32` range (-2147483648..2147483647)"
+                ),
+                file,
+                span.0,
+                span.1,
+                "`i64`/`u32`/`u64` are aliases for the `i32`-checked int; real widths are a future design item",
+                &["use `i32` to spell what is enforced"],
+                "types/narrow",
+            ));
+        } else if base == "u8" {
+            out.push(Diagnostic::warning(
+                "W-TYPE-NARROW",
+                &format!(
+                    "{where_} is annotated `u8`, which is not a checked type (it stays dynamic)"
+                ),
+                file,
+                span.0,
+                span.1,
+                "unknown type names stay `Unknown` (dynamic); only known annotations are checked",
+                &["use `i32` for a checked integer"],
+                "types/narrow",
+            ));
+        }
+    }
+    for arg in split_generic_args(raw) {
+        lint_annotation(&arg, where_, type_params, enums, structs, file, span, out);
+    }
+}
+
+/// Top-level `<...>` arguments of one annotation (`Opt<i64>` -> [`i64`]);
+/// empty unless the annotation carries explicit generic arguments.
+fn split_generic_args(raw: &str) -> Vec<String> {
+    let bytes = raw.as_bytes();
+    let Some(start) = raw.find('<') else {
+        return Vec::new();
+    };
+    // Find the `<` matching `start` (annotations are parser-built, so a
+    // match exists; bail out silently otherwise — no warning is safer
+    // than a wrong one).
+    let mut depth = 0;
+    let mut end = None;
+    for (i, b) in bytes.iter().enumerate().skip(start) {
+        if *b == b'<' {
+            depth += 1;
+        } else if *b == b'>' {
+            depth -= 1;
+            if depth == 0 {
+                end = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    let inner = &raw[start + 1..end];
+    let mut args = Vec::new();
+    let mut cur_depth = 0;
+    let mut cur = String::new();
+    for c in inner.chars() {
+        match c {
+            '<' => {
+                cur_depth += 1;
+                cur.push(c);
+            }
+            '>' => {
+                cur_depth -= 1;
+                cur.push(c);
+            }
+            ',' if cur_depth == 0 => {
+                args.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        args.push(cur.trim().to_string());
+    }
+    args
+}
 
 /// Base nominal name of a possibly-generic annotation (`Opt<i32>` -> `Opt`,
 /// `m::Box<T>` -> `m::Box`). Explicit arguments are validated at parse

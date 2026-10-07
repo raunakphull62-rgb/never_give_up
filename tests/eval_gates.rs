@@ -86,25 +86,24 @@ fn eval_dogfood_survives_fmt_roundtrip() {
 }
 
 // ---------------------------------------------------------------------
-// F11 (triaged): `&&` / `||` evaluate both sides eagerly — no
-// short-circuit. A bounds guard in `&&` position therefore fails at
-// runtime instead of skipping the RHS. This pins the LOUD failure mode
-// (E-RUNTIME, never a silent wrong answer) and the nested-`if`
-// workaround the dogfood itself uses.
+// F11 (fixed in Phase 1): `&&` / `||` short-circuit — a bounds guard in
+// `&&` position now skips the RHS instead of failing at runtime. This
+// pins the new direct-guard shape (return 0, no diagnostics) alongside
+// the nested-`if` workaround the dogfood itself uses (both stay valid).
 // ---------------------------------------------------------------------
 
 #[test]
-fn eager_and_guard_fails_loudly_never_silently() {
+fn short_circuit_guard_skips_out_of_bounds() {
     // `i < n && s[i] == ...` with `i == n` is well-typed (checker sees
-    // Bool && Bool) but evaluates `s[n]` anyway: E-RUNTIME, exit via Err.
+    // Bool && Bool) and now skips `s[n]` entirely: runs to 0, no error.
     let src = "fn main() -> i32 { let s = \"ab\" let i = 2 if i < 2 && s[i] == \"x\" { return 1 } return 0 }";
     let mut p = Parser::new(src);
     let prog = p.parse_program().expect("parses");
     assert!(klang::hir::TypedHIR::check(prog.clone()).is_ok(), "checker blesses the guard shape");
     let mir = klang::mir::lower(&prog);
-    let err = klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new())
-        .expect_err("eager RHS must fail loudly");
-    assert_eq!(err.code, "E-RUNTIME", "{}", err.to_json());
+    let (v, _) = klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new())
+        .expect("short-circuited RHS never indexes");
+    assert_eq!(v, 0);
 }
 
 #[test]
