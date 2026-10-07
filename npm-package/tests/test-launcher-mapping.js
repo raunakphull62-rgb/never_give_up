@@ -22,7 +22,7 @@ const CASES = [
   ['android', 'arm64', 'klang-cli-android-arm64'], // Termux
   ['darwin', 'x64', 'klang-cli-darwin-x64'],
   ['darwin', 'arm64', 'klang-cli-darwin-arm64'],
-  ['win32', 'x64', 'klang-cli-win32-x64'],
+  ['win32', 'x64', 'klang-cli-windows-x64'],
   // Unsupported combos must resolve to null (launcher prints a clear error).
   ['freebsd', 'x64', null],
   ['openbsd', 'arm64', null],
@@ -81,7 +81,7 @@ const EXPECTED_OS_CPU = {
   'klang-cli-android-arm64': [['android'], ['arm64']],
   'klang-cli-darwin-x64': [['darwin'], ['x64']],
   'klang-cli-darwin-arm64': [['darwin'], ['arm64']],
-  'klang-cli-win32-x64': [['win32'], ['x64']],
+  'klang-cli-windows-x64': [['win32'], ['x64']],
 };
 for (const pkg of mappedPkgs) {
   const pkgJson = require(path.join(NPM_DIR, pkg, 'package.json'));

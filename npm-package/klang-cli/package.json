@@ -15,7 +15,7 @@
     "klang-cli-android-arm64": "0.6.0",
     "klang-cli-darwin-x64": "0.6.0",
     "klang-cli-darwin-arm64": "0.6.0",
-    "klang-cli-win32-x64": "0.6.0"
+    "klang-cli-windows-x64": "0.6.0"
   },
   "engines": {
     "node": ">=16"

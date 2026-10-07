@@ -23,7 +23,7 @@ const PLATFORM_MAP = {
   'android-arm64': { pkg: 'klang-cli-android-arm64', bin: 'klang' },
   'darwin-x64': { pkg: 'klang-cli-darwin-x64', bin: 'klang' },
   'darwin-arm64': { pkg: 'klang-cli-darwin-arm64', bin: 'klang' },
-  'win32-x64': { pkg: 'klang-cli-win32-x64', bin: 'klang.exe' },
+  'win32-x64': { pkg: 'klang-cli-windows-x64', bin: 'klang.exe' },
 };
 
 function lookup(platform, arch) {

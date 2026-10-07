@@ -213,7 +213,7 @@ jobs:
           install_unix "klang-linux-aarch64-musl-termux.tar.gz" "klang-cli-android-arm64"
           install_unix "klang-macos-aarch64-apple-silicon.tar.gz" "klang-cli-darwin-arm64"
           install_unix "klang-macos-x86_64-intel.tar.gz" "klang-cli-darwin-x64"
-          install_win "klang-windows-x86_64.zip" "klang-cli-win32-x64"
+          install_win "klang-windows-x86_64.zip" "klang-cli-windows-x64"
 
           # Pin every package version (and the wrapper's optionalDependencies)
           # to the git tag (vX.Y.Z -> X.Y.Z).
@@ -226,7 +226,7 @@ jobs:
             };
             const pkgs = ["klang-cli", "klang-cli-linux-x64", "klang-cli-linux-arm64",
               "klang-cli-android-arm64", "klang-cli-darwin-x64",
-              "klang-cli-darwin-arm64", "klang-cli-win32-x64"];
+              "klang-cli-darwin-arm64", "klang-cli-windows-x64"];
             for (const p of pkgs) {
               const f = `npm-package/${p}/package.json`;
               const j = JSON.parse(fs.readFileSync(f, "utf8"));
@@ -249,41 +249,56 @@ jobs:
             if [ "$dir" = "klang-cli" ]; then
               if [ ! -f "npm-package/$dir/bin/klang.js" ]; then
                 echo "publish-npm: WARNING: no JavaScript launcher staged for $name – skipping."
+                SUMMARY+=("$name@$VERSION: skipped (no launcher staged)")
                 return 0
               fi
             elif [ ! -f "npm-package/$dir/bin/klang" ] && [ ! -f "npm-package/$dir/bin/klang.exe" ]; then
               echo "publish-npm: WARNING: no platform binary staged for $name – skipping."
+              SUMMARY+=("$name@$VERSION: skipped (no binary staged)")
               return 0
             fi
             local published
             published=$(npm view "${name}@${VERSION}" version 2>/dev/null || true)
             if [ "$published" = "$VERSION" ]; then
               echo "publish-npm: $name@$VERSION already published – skipping."
+              SUMMARY+=("$name@$VERSION: skipped (already published)")
               return 0
             fi
             echo "publish-npm: publishing $name@$VERSION"
             if npm publish "./npm-package/$dir" --provenance --access public; then
+              SUMMARY+=("$name@$VERSION: published")
               return 0
             fi
             echo "publish-npm: WARNING: publish with --provenance failed for $name, retrying without provenance."
             if npm publish "./npm-package/$dir" --access public; then
+              SUMMARY+=("$name@$VERSION: published (without provenance)")
               return 0
             fi
-            echo "publish-npm: ERROR: could not publish $name@$VERSION; continuing with remaining packages."
-            publish_failures+=("$name@$VERSION")
+            echo "publish-npm: ERROR: failed to publish $name@$VERSION"
+            SUMMARY+=("$name@$VERSION: FAILED")
+            FAILED=1
             return 0
           }
 
           # Platform packages first, wrapper last (idempotent per package).
+          # Each result is recorded in SUMMARY; a failure records FAILED but
+          # does not abort the remaining packages, so the final summary shows
+          # every package as published, skipped, or failed.
+          FAILED=0
+          SUMMARY=()
           publish_one "klang-cli-linux-x64"
           publish_one "klang-cli-linux-arm64"
           publish_one "klang-cli-android-arm64"
           publish_one "klang-cli-darwin-x64"
           publish_one "klang-cli-darwin-arm64"
-          publish_one "klang-cli-win32-x64"
+          publish_one "klang-cli-windows-x64"
           publish_one "klang-cli"
-          if [ "${#publish_failures[@]}" -gt 0 ]; then
-            echo "publish-npm: failed packages: ${publish_failures[*]}"
+          echo "publish-npm: summary (version $VERSION):"
+          for line in "${SUMMARY[@]}"; do
+            echo "publish-npm: - $line"
+          done
+          if [ "$FAILED" -ne 0 ]; then
+            echo "publish-npm: FAILED: one or more packages failed to publish."
             exit 1
           fi
           echo "publish-npm: done."

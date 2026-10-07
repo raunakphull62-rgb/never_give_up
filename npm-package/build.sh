@@ -8,7 +8,7 @@
 # Usage:
 #   ./npm-package/build.sh                 # build all five targets
 #   ./npm-package/build.sh linux-x64       # build one (npm platform name)
-#   ./npm-package/build.sh linux-x64 win32-x64
+#   ./npm-package/build.sh linux-x64 windows-x64
 #
 # Output: each binary lands in npm-package/klang-cli-<platform>/bin/
 #   (bin/klang on unix, bin/klang.exe on Windows).
@@ -51,12 +51,12 @@ declare -A TARGETS=(
   ["android-arm64"]="aarch64-unknown-linux-musl;klang-cli-android-arm64;klang;same static binary as linux-arm64 (Termux reports android/arm64)"
   ["darwin-x64"]="x86_64-apple-darwin;klang-cli-darwin-x64;klang;need osxcross for darwin linking from Linux"
   ["darwin-arm64"]="aarch64-apple-darwin;klang-cli-darwin-arm64;klang;need osxcross for darwin linking from Linux"
-  ["win32-x64"]="x86_64-pc-windows-gnu;klang-cli-win32-x64;klang.exe;need mingw-w64 (sudo apt install mingw-w64)"
+  ["windows-x64"]="x86_64-pc-windows-gnu;klang-cli-windows-x64;klang.exe;need mingw-w64 (sudo apt install mingw-w64)"
 )
 
 WANT=("$@")
 if [ "${#WANT[@]}" -eq 0 ]; then
-  WANT=(linux-x64 linux-arm64 android-arm64 darwin-x64 darwin-arm64 win32-x64)
+  WANT=(linux-x64 linux-arm64 android-arm64 darwin-x64 darwin-arm64 windows-x64)
 fi
 
 build_one() {

@@ -1,7 +1,7 @@
 {
-  "name": "klang-cli-win32-x64",
+  "name": "klang-cli-windows-x64",
   "version": "0.6.0",
-  "description": "Prebuilt klang binary for win32-x64",
+  "description": "Prebuilt klang binary for windows-x64",
   "license": "MIT",
   "os": ["win32"],
   "cpu": ["x64"],

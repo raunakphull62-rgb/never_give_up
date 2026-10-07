@@ -25,7 +25,7 @@ see the README Quick start and `docs/install.md`.
   makes no network calls, so `npm install --ignore-scripts` works. Its
   `optionalDependencies` pin all six platform packages to its own version.
 - `klang-cli-linux-x64`, `klang-cli-linux-arm64`, `klang-cli-android-arm64`,
-  `klang-cli-darwin-x64`, `klang-cli-darwin-arm64`, `klang-cli-win32-x64` —
+  `klang-cli-darwin-x64`, `klang-cli-darwin-arm64`, `klang-cli-windows-x64` —
   one prebuilt binary each, with `os`/`cpu` fields so npm installs only the
   matching one. Termux (Node reports `android`/`arm64`) resolves to
   `klang-cli-android-arm64`, which ships the same static musl binary as
