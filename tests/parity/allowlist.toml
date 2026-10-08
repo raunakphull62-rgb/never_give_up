@@ -1,0 +1,350 @@
+# D6 backend-parity allowlist (differential-testing harness).
+#
+# The v1 interpreter (`klang run`) is the reference backend. The harness
+# (`tests/backend_parity_gates.rs`) runs every in-scope program on all three
+# executors — `run` (v1), `run --backend-jit` (JIT), `run-v2` (v2 tree-walker)
+# — and compares exit outcome, stdout, and the normalized stderr code.
+#
+# DEFAULT RULE (no entry here): all three backends must agree exactly
+# (same exit code, same stdout, same diagnostic code). Any disagreement
+# fails the gate.
+#
+# AN ENTRY HERE records a KNOWN, ACCEPTED divergence: the listed backend is
+# allowed to differ from v1, but ONLY in exactly the way stated (exit code,
+# exact stdout, required stderr substring). The harness fails when:
+#   (a) actual behavior does not match the entry (divergence changed shape), OR
+#   (b) actual behavior now EQUALS the v1 reference (divergence disappeared —
+#       remove the entry instead of letting the list lie).
+# No backend behavior is changed by this file; it only pins what is.
+#
+# Schema (minimal subset, parsed by the harness — keep it simple):
+#   [[entry]]
+#   programs = ["<repo-relative path>", ...]   # one or more programs
+#   backend  = "jit" | "v2"                    # which backend diverges
+#   outcome  = "crash" | "exit"                # crash = killed by signal
+#   exit     = <n>                             # required when outcome = "exit"
+#   stdout   = "<exact bytes>"                 # required; \n \\ \" escapes
+#   stderr_contains = "<substring>"             # "" = not checked
+#   stdin    = "<input bytes>"                 # optional, default ""
+#   reason   = "<why this divergence is accepted>"
+#
+# Scope (also enforced in code):
+#   - tests/parity/*.klang  : auto-discovered targeted corpus.
+#   - examples/*.klang      : runnable examples, except lib.klang (a library
+#     file with no main entry point) and time_http_integration.klang (needs
+#     outbound internet; covered by scripts/live-tests.sh instead).
+#   - stdlib-packages/*/*_test.klang except http_live_test.klang (needs
+#     outbound internet): must print "<pkg>: OK" and exit 0 on v1.
+#
+# Severity ranking of the Divergent classes below (worst first):
+#   S1 crash           — the process dies by signal (no diagnostic at all).
+#   S2 silent wrong    — exit 0 with a computed value where v1 errors.
+#   S3 loud reject     — exit 1 with JIT-FAIL / E-PARSE-V2 / E-UNDEFINED.
+#      (rejection IS parity for out-of-subset code; listed so the gate
+#       notices if a backend ever goes quiet or starts agreeing.)
+
+# --- S1: JIT crashes (raw arithmetic traps, no diagnostic) ----------------
+
+[[entry]]
+programs = ["tests/parity/div_zero.klang"]
+backend = "jit"
+outcome = "crash"
+stdout = ""
+stderr_contains = ""
+reason = "S1: JIT lowers Div to raw sdiv, which traps (SIGILL) on zero instead of reporting E-RUNTIME like v1/v2. Fix = D6 fallible JIT (out of scope for the harness phase)."
+
+[[entry]]
+programs = ["tests/parity/mod_zero.klang"]
+backend = "jit"
+outcome = "crash"
+stdout = ""
+stderr_contains = ""
+reason = "S1: JIT lowers Mod to raw srem, which traps (SIGFPE) on zero instead of reporting E-RUNTIME like v1/v2. Same fix as div_zero."
+
+# --- S2: JIT silent wrong answers (i64-wide math where v1 errors) ---------
+
+[[entry]]
+programs = ["tests/parity/ovf_add.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 0
+stdout = "2147483648\n"
+stderr_contains = ""
+reason = "S2: JIT adds i64-wide with no overflow check, printing 2147483648 and exiting 0 where v1/v2 fail E-OVERFLOW. Silent wrong answer, not a crash."
+
+[[entry]]
+programs = ["tests/parity/ovf_sub.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 0
+stdout = "-2147483649\n"
+stderr_contains = ""
+reason = "S2: same i64-wide class as ovf_add (MIN - 1 computed exactly, where v1/v2 fail E-OVERFLOW)."
+
+[[entry]]
+programs = ["tests/parity/ovf_mul.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 0
+stdout = "3000000000\n"
+stderr_contains = ""
+reason = "S2: same i64-wide class as ovf_add (1000000 * 3000 exceeds i32; v1/v2 fail E-OVERFLOW)."
+
+[[entry]]
+programs = ["tests/parity/ovf_neg.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 0
+stdout = ""
+stderr_contains = ""
+reason = "S2: negating i32::MIN wraps i64-wide (exit code is the low byte, 0) where v1/v2 fail E-OVERFLOW in `sub`. No output makes this the quietest wrong answer in the corpus."
+
+[[entry]]
+programs = ["tests/parity/ovf_mindiv.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 0
+stdout = ""
+stderr_contains = ""
+reason = "S2: MIN / -1 overflows i32 (v1/v2 fail E-OVERFLOW in `div`); the JIT computes i64-wide and exits 0 silently."
+
+[[entry]]
+programs = ["tests/parity/recursion_deep.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 208
+stdout = ""
+stderr_contains = ""
+reason = "S2: the JIT has no call-depth guard, so countdown(2000) returns 2000 (exit 208 = 2000 mod 256) where v1/v2 fail loud E-RUNTIME at 1024 frames. Very deep JIT recursion aborts natively instead of reporting."
+
+# --- S3: JIT loud rejects (parity by rejection for non-int code) ----------
+
+[[entry]]
+programs = ["tests/parity/float_basic.klang", "tests/parity/float_negzero.klang", "tests/parity/float_sqrt_neg.klang", "tests/parity/float_div_zero.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: the JIT is int-only and names the unsupported float op loudly instead of miscompiling it. Rejection is the agreed contract for out-of-subset code."
+
+[[entry]]
+programs = ["tests/parity/string_bytes.klang", "tests/parity/string_index.klang", "tests/parity/string_chars.klang", "tests/parity/void_unit.klang", "tests/parity/str_main.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: same int-only contract for string constants (void_unit/str_main only need strings for their print output)."
+
+[[entry]]
+programs = ["tests/parity/closure_captures.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: the JIT has no closure environments and rejects ClosureNew loudly; v1 runs by-value capture (see the v2 entry for the other half)."
+
+[[entry]]
+programs = ["tests/parity/try_catch_fallback.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: the JIT has no exception slices and rejects Try loudly; v1 catches and continues."
+
+[[entry]]
+programs = ["tests/parity/stdin_line.klang", "tests/parity/builtin_exit.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: the JIT links no builtins at all, so read_line/exit (and every other builtin) are loud rejections, never silent stubs."
+
+# --- S3: v2 loud rejects (grammar / builtin gaps vs v1) --------------------
+
+[[entry]]
+programs = ["tests/parity/loops.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: the v2 grammar has no while/for statements, so loop programs do not parse. v1 + JIT agree on the semantics."
+
+[[entry]]
+programs = ["tests/parity/closure_captures.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: v2 has no closure literals at all (SPEC documents this); a program using closures runs on v1 and is rejected at the v2 boundary."
+
+[[entry]]
+programs = ["tests/parity/try_catch_fallback.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: v2 has no try/catch in its grammar; a program using it runs on v1 and is rejected at the v2 boundary."
+
+[[entry]]
+programs = ["tests/parity/float_basic.klang", "tests/parity/float_negzero.klang", "tests/parity/float_sqrt_neg.klang", "tests/parity/float_div_zero.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: v2 supports float VALUES at runtime but has no float literals, so float programs cannot be spelled in v2 source. Any future float-literal support must reproduce v1's loud-error edges (div-by-zero, sqrt(-1)), never quiet NaN/inf."
+
+[[entry]]
+programs = ["tests/parity/string_index.klang", "tests/parity/string_chars.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: v2 expressions have no index (s[i]) or method-call (s.chars()) forms, so these programs do not parse. Byte-vs-char semantics (len = bytes, s[i]/chars = chars) are pinned on v1 by string_bytes/string_index/string_chars."
+
+[[entry]]
+programs = ["tests/parity/string_bytes.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-UNDEFINED"
+reason = "S3: v2 has no `len` builtin (undefined function at run time), so even the parseable byte-length probe fails loudly rather than agreeing."
+
+[[entry]]
+programs = ["tests/parity/stdin_line.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-UNDEFINED"
+reason = "S3: v2 has no stdin builtins; read_line is E-UNDEFINED there while v1 reads EOF as empty string."
+
+[[entry]]
+programs = ["tests/parity/builtin_exit.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-UNDEFINED"
+reason = "S3: v2 has no `exit` builtin (undefined function at run time) while v1 exits with the low 8 bits."
+
+# --- S3: runnable examples (accepted loud rejects) -------------------------
+
+[[entry]]
+programs = ["examples/app.klang", "examples/simple.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: app uses file imports and simple uses throws/async + task_group, none of which exist in the v2 grammar. Both examples agree exactly on v1 and JIT (exit 42)."
+
+[[entry]]
+programs = ["examples/full.klang", "examples/eval.klang", "examples/format.klang", "examples/osio_integration.klang", "examples/try_catch.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: string/float-heavy examples outside the int-only JIT subset; loud rejection is the contract."
+
+[[entry]]
+programs = ["examples/full.klang", "examples/eval.klang", "examples/format.klang", "examples/osio_integration.klang", "examples/try_catch.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: these examples use imports, string indexing, method calls, try/catch, or effects — none parseable in the v2 grammar."
+
+[[entry]]
+programs = ["examples/stdlib_demo.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: file-IO example outside the int-only JIT subset."
+
+[[entry]]
+programs = ["examples/stdlib_demo.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-UNDEFINED"
+reason = "S3: stdlib_demo parses in v2 but calls file builtins (write_file/read_file) that do not exist there."
+
+[[entry]]
+programs = ["examples/calculator.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+stdin = "12\n5\n"
+reason = "S3: stdin calculator; the JIT rejects the read_line builtin loudly. stdin below reproduces the documented `17` run on v1."
+
+[[entry]]
+programs = ["examples/calculator.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-UNDEFINED"
+stdin = "12\n5\n"
+reason = "S3: calculator parses in v2 but calls parse_int/read_line, which do not exist there (E-UNDEFINED) while v1 prints 17."
+
+# --- S3: stdlib self-tests (26 packages; interpreter-only code) ------------
+# Every package self-test must print "<pkg>: OK" and exit 0 on v1 (checked
+# by the harness, not just by eye). All 26 use strings/lists/maps/IO, so
+# the int-only JIT rejects each one loudly, and the v2 grammar (no imports)
+# cannot parse any of them. One entry per (package, backend) keeps the list
+# honest per package: if any single package ever starts passing on JIT/v2,
+# its entry mismatches and the gate fails.
+
+[[entry]]
+programs = ["stdlib-packages/base64/base64_test.klang", "stdlib-packages/cli/cli_test.klang", "stdlib-packages/collections/collections_test.klang", "stdlib-packages/compress/compress_test.klang", "stdlib-packages/crypto/crypto_test.klang", "stdlib-packages/csv/csv_test.klang", "stdlib-packages/fs/fs_test.klang", "stdlib-packages/hex/hex_test.klang", "stdlib-packages/http/http_test.klang", "stdlib-packages/io/io_test.klang", "stdlib-packages/itertools/itertools_test.klang", "stdlib-packages/json/json_test.klang", "stdlib-packages/logging/logging_test.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: package self-tests are interpreter-only code (strings, lists, maps, IO); JIT rejection is the contract. Verified 2026-10-08: all exit 1 with JIT-FAIL."
+
+[[entry]]
+programs = ["stdlib-packages/math/math_test.klang", "stdlib-packages/net/net_test.klang", "stdlib-packages/os/os_test.klang", "stdlib-packages/path/path_test.klang", "stdlib-packages/random/random_test.klang", "stdlib-packages/regex/regex_test.klang", "stdlib-packages/sql/sql_test.klang", "stdlib-packages/string/string_test.klang", "stdlib-packages/sync/sync_test.klang", "stdlib-packages/testing/testing_test.klang", "stdlib-packages/text/text_test.klang", "stdlib-packages/time/time_test.klang", "stdlib-packages/url/url_test.klang"]
+backend = "jit"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "JIT-FAIL"
+reason = "S3: same interpreter-only contract as above (second half of the package list, split only for line length)."
+
+[[entry]]
+programs = ["stdlib-packages/base64/base64_test.klang", "stdlib-packages/cli/cli_test.klang", "stdlib-packages/collections/collections_test.klang", "stdlib-packages/compress/compress_test.klang", "stdlib-packages/crypto/crypto_test.klang", "stdlib-packages/csv/csv_test.klang", "stdlib-packages/fs/fs_test.klang", "stdlib-packages/hex/hex_test.klang", "stdlib-packages/http/http_test.klang", "stdlib-packages/io/io_test.klang", "stdlib-packages/itertools/itertools_test.klang", "stdlib-packages/json/json_test.klang", "stdlib-packages/logging/logging_test.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: every package self-test starts with file imports, which the v2 grammar has no syntax for. Verified 2026-10-08: all exit 1 with E-PARSE-V2."
+
+[[entry]]
+programs = ["stdlib-packages/math/math_test.klang", "stdlib-packages/net/net_test.klang", "stdlib-packages/os/os_test.klang", "stdlib-packages/path/path_test.klang", "stdlib-packages/random/random_test.klang", "stdlib-packages/regex/regex_test.klang", "stdlib-packages/sql/sql_test.klang", "stdlib-packages/string/string_test.klang", "stdlib-packages/sync/sync_test.klang", "stdlib-packages/testing/testing_test.klang", "stdlib-packages/text/text_test.klang", "stdlib-packages/time/time_test.klang", "stdlib-packages/url/url_test.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: same no-imports-in-v2 contract as above (second half of the package list)."

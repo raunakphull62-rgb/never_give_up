@@ -1,0 +1,6 @@
+// Parity corpus: integer print + return (shared subset).
+
+fn main() -> i32 {
+    print(40 + 2)
+    return 0
+}

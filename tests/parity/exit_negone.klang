@@ -1,0 +1,7 @@
+// Parity corpus: exit codes wrap at 8 bits (Linux), identically on
+// every backend. -1 -> 255. See docs/limitations.md.
+// NOTE: spelled `0 - 1` (no negative literal) so v2 parses it too.
+
+fn main() -> i32 {
+    return 0 - 1
+}

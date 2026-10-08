@@ -1,0 +1,19 @@
+// Parity corpus: while/for loops.
+// v1 + JIT agree. v2 has no loop statements in its grammar, so v2
+// loud-rejects this file (allowlisted E-PARSE-V2).
+
+fn main() -> i32 {
+    let t = 0
+    let i = 1
+    while i <= 10 {
+        t = t + i
+        i = i + 1
+    }
+    print(t)
+    let u = 0
+    for j in 0..10 {
+        u = u + j
+    }
+    print(u)
+    return 0
+}

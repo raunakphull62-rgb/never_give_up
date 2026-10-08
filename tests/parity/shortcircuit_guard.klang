@@ -1,0 +1,11 @@
+// Parity corpus: short-circuit guards skip division/modulo by zero.
+// All three backends agree (RHS never evaluates). Pins Phase 1
+// short-circuit semantics cross-backend, including v2.
+
+fn main() -> i32 {
+    let x = false && (1 / 0 == 0)
+    print(x)
+    let y = true || (1 % 0 == 0)
+    print(y)
+    return 0
+}

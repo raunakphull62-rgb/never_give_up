@@ -1,0 +1,17 @@
+// Parity corpus: calls and let bindings (shared subset).
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+fn double(n: i32) -> i32 {
+    return n * 2
+}
+
+fn main() -> i32 {
+    let x = 20
+    let y = x + 22
+    print(add(x, y - 20))
+    print(double(double(10)) + 2)
+    return 0
+}

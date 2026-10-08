@@ -1,0 +1,8 @@
+// Parity corpus: read_line at EOF yields "" (no stdin is fed).
+// v1 prints the empty line and exits 0. JIT rejects the builtin
+// loudly; v2 has no stdin builtins (E-UNDEFINED) — both allowlisted.
+
+fn main() -> i32 {
+    print(read_line())
+    return 0
+}

@@ -1,0 +1,8 @@
+// Parity corpus: basic float arithmetic runs on the interpreter.
+// The JIT is int-only (loud JIT-FAIL) and v2 has no float literals
+// (E-PARSE-V2) — both allowlisted loud rejections.
+
+fn main() -> i32 {
+    print(1.5 + 2.25)
+    return 0
+}

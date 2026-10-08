@@ -1,0 +1,14 @@
+// Parity corpus: try/catch recovers from a runtime error and continues.
+// v1 prints 0 and exits 0. JIT rejects Try loudly; v2 has no
+// try/catch in its grammar (E-PARSE-V2) — both allowlisted.
+
+fn main() -> i32 {
+    let n = 0
+    try {
+        n = parse_int("abc")
+    } catch e {
+        n = 0
+    }
+    print(n)
+    return 0
+}

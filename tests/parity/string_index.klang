@@ -1,0 +1,10 @@
+// Parity corpus: string indexing is CHARACTER based (s[1] of
+// "héllo" is "é"), deliberately asymmetric with byte-based len().
+// v1 runs. JIT rejects loudly; v2 has no index expressions
+// (E-PARSE-V2) — both allowlisted.
+
+fn main() -> i32 {
+    let s = "héllo"
+    print(s[1])
+    return 0
+}

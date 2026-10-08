@@ -1,0 +1,6 @@
+// Parity corpus: exit codes wrap at 8 bits (Linux), identically on
+// every backend. 256 -> 0. See docs/limitations.md.
+
+fn main() -> i32 {
+    return 256
+}

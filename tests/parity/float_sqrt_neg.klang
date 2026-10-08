@@ -1,0 +1,6 @@
+// Parity corpus: sqrt of a negative is a loud E-RUNTIME on the
+// interpreter, never NaN. JIT/v2 reject loudly (int-only / no floats).
+
+fn main() -> f64 {
+    return sqrt(0.0 - 1.0)
+}

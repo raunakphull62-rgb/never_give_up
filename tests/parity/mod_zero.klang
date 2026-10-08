@@ -1,0 +1,7 @@
+// Parity corpus: modulo by zero.
+// v1 + v2 fail loud E-RUNTIME. The JIT emits a raw srem trap and the
+// process dies by signal instead of reporting (allowlisted JIT crash).
+
+fn main() -> i32 {
+    return 1 % 0
+}

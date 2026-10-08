@@ -1,0 +1,8 @@
+// Parity corpus: len() on strings is BYTE length (2 for "é").
+// v1 runs. JIT rejects loudly (int-only); v2 has no `len` builtin
+// (E-UNDEFINED) — both allowlisted.
+
+fn main() -> i32 {
+    print(len("é"))
+    return 0
+}

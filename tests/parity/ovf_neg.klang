@@ -1,0 +1,12 @@
+// Parity corpus: negation overflow (0 - MIN).
+// v1 + v2 fail loud E-OVERFLOW. The JIT computes i64-wide (2147483648,
+// exit code low byte 0) with no error — a silent wrong answer
+// (allowlisted).
+
+fn mymin() -> i32 {
+    return 0 - 2147483647 - 1
+}
+
+fn main() -> i32 {
+    return 0 - mymin()
+}

@@ -1,0 +1,7 @@
+// Parity corpus: negative zero renders as 0.0 (no signed-zero
+// distinction in output). Same loud-rejection shape as float_basic.
+
+fn main() -> i32 {
+    print(0.0 - 0.0)
+    return 0
+}

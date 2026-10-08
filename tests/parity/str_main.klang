@@ -1,0 +1,8 @@
+// Parity corpus: non-Int main return exits 0 with output preserved.
+// v1 + v2 agree. The int-only JIT loud-rejects the string constant
+// (allowlisted JIT-FAIL).
+
+fn main() -> str {
+    print("hi")
+    return "done"
+}

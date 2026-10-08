@@ -1,0 +1,13 @@
+// Parity corpus: closures capture by value and dispatch dynamically.
+// v1 returns 42. JIT rejects closure creation loudly; v2 has no
+// closure literals at all (E-PARSE-V2) — both allowlisted.
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+    return f(x)
+}
+
+fn main() -> i32 {
+    let n = 20
+    let addn = fn(x: i32) -> i32 { return x + n }
+    return apply(addn, 22)
+}

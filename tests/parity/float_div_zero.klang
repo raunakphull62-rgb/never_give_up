@@ -1,0 +1,8 @@
+// Parity corpus: float division by zero is a loud E-RUNTIME
+// ("division by zero") on the interpreter, never infinity.
+// JIT/v2 reject loudly (int-only / no floats).
+
+fn main() -> i32 {
+    print(1.0 / 0.0)
+    return 0
+}

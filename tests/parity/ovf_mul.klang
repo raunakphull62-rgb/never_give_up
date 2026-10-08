@@ -1,0 +1,8 @@
+// Parity corpus: i32 mul overflow (1000000 * 3000 = 3000000000).
+// v1 + v2 fail loud E-OVERFLOW. The JIT computes i64-wide and prints
+// 3000000000 with exit 0 — a silent wrong answer (allowlisted).
+
+fn main() -> i32 {
+    print(1000000 * 3000)
+    return 0
+}

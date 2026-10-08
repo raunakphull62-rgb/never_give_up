@@ -1,0 +1,7 @@
+// Parity corpus: whole-program exit() exits with the low 8 bits.
+// v1 exits 5 with no output. JIT rejects the builtin loudly; v2 has
+// no `exit` builtin (E-UNDEFINED) — both allowlisted.
+
+fn main() -> i32 {
+    exit(5)
+}

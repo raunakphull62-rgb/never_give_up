@@ -1,0 +1,7 @@
+// Parity corpus: explicit `-> void` unit main.
+// v1 + v2 print "hi" and exit 0. The int-only JIT loud-rejects the
+// string constant (allowlisted JIT-FAIL).
+
+fn main() -> void {
+    print("hi")
+}

@@ -1,0 +1,13 @@
+// Parity corpus: shallow recursion runs identically everywhere.
+// countdown(1000) -> exit 232 (1000 mod 256), no output.
+
+fn countdown(n: i32) -> i32 {
+    if n <= 0 {
+        return 0
+    }
+    return countdown(n - 1) + 1
+}
+
+fn main() -> i32 {
+    return countdown(1000)
+}

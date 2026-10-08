@@ -1,0 +1,13 @@
+// Parity corpus: MIN / -1 overflow.
+// Spelled via a variable (no negative literal) so v2 parses it too:
+// v1 + v2 fail loud E-OVERFLOW in `div`. The JIT computes i64-wide
+// with exit 0 and no error — a silent wrong answer (allowlisted).
+
+fn mymin() -> i32 {
+    return 0 - 2147483647 - 1
+}
+
+fn main() -> i32 {
+    let neg = 0 - 1
+    return mymin() / neg
+}

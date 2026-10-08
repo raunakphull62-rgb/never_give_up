@@ -1,0 +1,8 @@
+// Parity corpus: chars() yields single-character strings.
+// v1 runs. JIT rejects loudly; v2 has no method-call expressions
+// (E-PARSE-V2) — both allowlisted.
+
+fn main() -> i32 {
+    print("héllo".chars())
+    return 0
+}
