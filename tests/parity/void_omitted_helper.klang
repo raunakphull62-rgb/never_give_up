@@ -1,0 +1,12 @@
+// Parity corpus (D4): omitted `->` on helpers desugars to `-> void`.
+// v1 + v2 print both lines and exit 0. The int-only JIT loud-rejects
+// the string constants (allowlisted JIT-FAIL).
+
+fn shout(m: str) {
+    print(m)
+}
+
+fn main() {
+    shout("a")
+    shout("b")
+}

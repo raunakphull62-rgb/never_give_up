@@ -1036,6 +1036,33 @@ fn check_block(
                     // `type_mismatch` — only the span is real. Other
                     // expression-level type errors remain 0,0 (stated
                     // limitation: expressions carry `NodeId`, not spans).
+                    //
+                    // D4: a value returned from a `void` function (declared
+                    // `-> void` or with the arrow omitted) names the actual
+                    // fix — declare the returned type — instead of the
+                    // generic conversion hints, which make no sense when
+                    // the callee promises no value at all.
+                    let fixes: Vec<String> = match (&want, &got) {
+                        (Ty::Void, Ty::Int | Ty::Float | Ty::Str | Ty::Bool) => vec![
+                            format!(
+                                "this function returns a value; add `-> {}`",
+                                got.name()
+                            ),
+                            "or drop the `return` value and fall off the end".to_string(),
+                        ],
+                        (Ty::Void, Ty::Struct(_) | Ty::Enum(_) | Ty::Closure { .. }) => vec![
+                            format!(
+                                "this function returns a value; add `-> {}`",
+                                got.name()
+                            ),
+                            "or drop the `return` value and fall off the end".to_string(),
+                        ],
+                        _ => vec![
+                            "convert the value first".to_string(),
+                            "check the operand types".to_string(),
+                        ],
+                    };
+                    let fix_refs: Vec<&str> = fixes.iter().map(String::as_str).collect();
                     diags.push(Diagnostic::error(
                         "E-TYPE",
                         &format!("`{}` return: want {}, got {}", caller.name, want.name(), got.name()),
@@ -1043,7 +1070,7 @@ fn check_block(
                         r.span.0,
                         r.span.1,
                         "operand types do not match the operator",
-                        &["convert the value first", "check the operand types"],
+                        &fix_refs,
                         "types/mismatch",
                     ));
                 }

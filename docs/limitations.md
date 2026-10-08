@@ -86,11 +86,16 @@ Very deep JIT recursion will abort on native overflow, not report
 
 `klang run` (and `run-v2`) print only program output; the entry return
 value becomes the process exit code and is never printed. A `main`
-with no integer return exits 0. Compile/runtime failures print the
+with no integer return exits 0. A void `main` — omitted `->` or explicit
+`-> void` (D4) — exits 0 for an empty body; otherwise its
+fall-off-the-end value maps exactly like any other return (an `Int`
+fall-off becomes the exit code, anything else exits 0), so
+`fn main() { 40 + 2 }` exits 42. Compile/runtime failures print the
 structured JSON diagnostic on stderr and exit 1. Exit codes are OS
 8-bit values and wrap without clamping: `return 256` exits 0,
 `return -1` exits 255. Pinned by `exit_code_wraps_at_256_and_negatives`
-(`tests/quiet_gates.rs`).
+(`tests/quiet_gates.rs`) and `void_main_exit_code_is_documented_falloff_mapping`
+(`tests/return_ergonomics_gates.rs`).
 
 ## Design-scope cuts (not bugs)
 

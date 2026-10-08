@@ -101,24 +101,17 @@ impl P {
         }
     }
 
-    /// `->` return-type arrow after a v2 function signature. Same improved
-    /// ceremony message as the v1 parser (names the function, shows the
-    /// fix); same `E-PARSE-V2` code as before.
-    fn expect_return_arrow(&mut self, name: &str) -> Result<Token, Diagnostic> {
-        let t = self.peek().clone();
-        if TokenKind::Arrow == t.kind {
-            return Ok(self.bump());
+    /// Optional `-> type` after a v2 function signature (D4, same desugar
+    /// as the v1 parser). An omitted arrow means `-> void` (Consonant
+    /// `void`, the plain spelling); every downstream stage sees exactly
+    /// today's explicit `-> void` programs. `-> ()` stays rejected:
+    /// `parse_qualified_type` only accepts identifiers.
+    fn parse_return_ty_opt(&mut self) -> Result<QualifiedType, Diagnostic> {
+        if TokenKind::Arrow == self.peek().kind {
+            self.bump();
+            return self.parse_qualified_type("return type");
         }
-        Err(Diagnostic::error(
-            "E-PARSE-V2",
-            &format!("function `{name}` is missing its return type: expected `->` after the parameter list"),
-            FILE,
-            t.start,
-            t.end,
-            "every function declares its return type",
-            &[&format!("add `-> i32` (or another type), e.g. `fn {name}(...) -> i32`")],
-            "syntax/v2",
-        ))
+        Ok(QualifiedType::new(ResonanceQualifier::Consonant, "void"))
     }
 
     fn expect_ident(&mut self, what: &str) -> Result<(String, usize, usize), Diagnostic> {
@@ -538,8 +531,7 @@ impl P {
             }
         }
         self.expect_kind(&TokenKind::RParen, "`)`")?;
-        self.expect_return_arrow(&name)?;
-        let return_ty = self.parse_qualified_type("return type")?;
+        let return_ty = self.parse_return_ty_opt()?;
         self.expect_kind(&TokenKind::LBrace, "`{`")?;
         let fn_id = self.next_id();
         self.enter(&fn_id);

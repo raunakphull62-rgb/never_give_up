@@ -882,25 +882,19 @@ impl Parser {
         }
     }
 
-    /// `->` return-type arrow after a function signature. A missing return
-    /// type is the first ceremony every newcomer hits, so the error names
-    /// the function and shows the fix instead of the bare `expected '->'`.
-    /// Same `E-PARSE` code as before — only the message gains a fix.
-    fn expect_return_arrow(&mut self, subject: &str, example: &str) -> Result<Token, Diagnostic> {
-        let t = self.peek().clone();
-        if t.kind == TokenKind::Arrow {
-            return Ok(self.bump());
+    /// Optional `-> type` after a function signature (D4). An omitted arrow
+    /// desugars to `-> void` at parse time, so every downstream stage (HIR
+    /// sigs, MIR, fmt) sees exactly today's `-> void` programs. A
+    /// `return <expr>` inside such a body then fails as a local `E-TYPE`
+    /// against `void` with a fix hint, instead of an `E-PARSE` at the `{`.
+    /// `-> ()` stays rejected: `parse_ty_name` only accepts identifiers
+    /// (plus `::` segments and generics), so only `void` spells unit.
+    fn parse_return_ty_opt(&mut self) -> Result<String, Diagnostic> {
+        if self.peek().kind == TokenKind::Arrow {
+            self.bump();
+            return self.parse_ty_name("return type");
         }
-        Err(Diagnostic::error(
-            "E-PARSE",
-            &format!("{subject} is missing its return type: expected `->` after the parameter list"),
-            &self.file,
-            t.start,
-            t.end,
-            "every function declares its return type",
-            &[&format!("add `-> i32` (or another type), e.g. {example}")],
-            "syntax/grammar",
-        ))
+        Ok("void".to_string())
     }
 
     fn expect_ident(&mut self, what: &str) -> Result<(String, usize, usize), Diagnostic> {
@@ -1211,11 +1205,7 @@ impl Parser {
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
-        self.expect_return_arrow(
-            &format!("function `{name}`"),
-            &format!("`fn {name}(...) -> i32`"),
-        )?;
-        let return_ty = self.parse_ty_name("return type")?;
+        let return_ty = self.parse_return_ty_opt()?;
         let mut effects = Vec::new();
         loop {
             match self.peek().kind {
@@ -2348,10 +2338,10 @@ impl Parser {
         }
     }
 
-    /// `fn(params) -> type { body }` anonymous function value. Same
-    /// signature shape as a named `fn` (typed params, `->` return type) but
-    /// no name and no effects: closures are synchronous values, so
-    /// `spawn`/`await` inside the body is rejected at check time.
+    /// `fn(params) { body }` anonymous function value. Same optional-`->`
+    /// shape as a named `fn` (omitted means `-> void`); no name and no
+    /// effects: closures are synchronous values, so `spawn`/`await` inside
+    /// the body is rejected at check time.
     fn parse_closure(&mut self) -> Result<Expr, Diagnostic> {
         self.expect(&TokenKind::Fn, "`fn`")?;
         let id = self.next_id();
@@ -2359,8 +2349,7 @@ impl Parser {
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
-        self.expect_return_arrow("closure", "`fn(x: i32) -> i32 { ... }`")?;
-        let return_ty = self.parse_ty_name("return type")?;
+        let return_ty = self.parse_return_ty_opt()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
         let blk_id = self.next_id();
         self.enter_scope(&blk_id);

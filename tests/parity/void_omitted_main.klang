@@ -1,0 +1,7 @@
+// Parity corpus (D4): omitted `->` on main desugars to `-> void`.
+// v1 + v2 print "hi" and exit 0 — byte-identical to void_unit.klang.
+// The int-only JIT loud-rejects the string constant (allowlisted).
+
+fn main() {
+    print("hi")
+}

@@ -1,0 +1,10 @@
+// Parity corpus (D4): closure literal with omitted `->` is `-> void`.
+// v1 prints both lines and exits 0. The JIT rejects ClosureNew loudly;
+// v2 has no closure literals at all (E-PARSE-V2) — both allowlisted.
+
+fn main() -> i32 {
+    let f = fn(x: i32) { print(x) }
+    f(40)
+    f(1)
+    return 0
+}

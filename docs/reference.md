@@ -61,13 +61,19 @@ fn main() -> i32 {
 }
 ```
 
-- Signature: `fn name(p: ty, ...) -> ret [throws] [async] [cancel]`.
+- Signature: `fn name(p: ty, ...) [-> ret] [throws] [async] [cancel]`.
   Arity is exact (`E-ARITY`); argument and return types are checked
   (`E-TYPE`); duplicate parameter names are `E-DUPLICATE`. The return
-  type is required on every function, including `main` (a missing `->`
-  is `E-PARSE` naming the function with an `add -> i32` fix); `main`
-  itself may return any type — an `Int` return becomes the process exit
-  code, any other value exits 0.
+  type may be omitted on any function, including `main` and closure
+  literals: omission desugars to `-> void` at parse time (`fmt` prints
+  the explicit form). A function without a declared return type that
+  returns a value is `E-TYPE` on the `return` line, naming the returned
+  type with an `add -> T` fix — omission never silently discards a
+  value. `main` itself may return any type or omit it — an `Int`
+  return becomes the process exit code, any other value exits 0; a
+  void `main` (omitted arrow or `-> void`) exits 0 for an empty body,
+  otherwise its fall-off-the-end value maps the same way (an `Int`
+  fall-off becomes the exit code, anything else exits 0).
 - `let x = expr` binds (re-`let` shadows with the new type);
   `x = expr` rebinds and checks against the bound type; assigning an
   unbound name is `E-UNDEFINED`.
@@ -567,7 +573,7 @@ the `ownership` API — only `Managed` ships).
 
 ## 11. What is not in the language
 
-Closures (`fn(params) -> type { ... }` values, by-value capture),
+Closures (`fn(params) [-> type] { ... }` values, by-value capture),
 match guards, nested match patterns (qualified `Enum::Variant(sub...)`
 per binding position), and tuple enum variants ARE in the language
 (SPEC §2b/§2c). Registry packages (`klang publish`/`add`/`fetch`,

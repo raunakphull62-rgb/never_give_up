@@ -69,39 +69,39 @@ fn match_block_arm_is_clean_parse_error() {
 }
 
 #[test]
-fn missing_return_type_names_function_and_fix() {
-    // Phase 1c: the dropped `-> type` ceremony reports what is missing and
-    // shows the fix, instead of a bare `expected '->'`.
-    for (src, subject) in [
-        ("fn foo(a: i32) { print(a) }", "function `foo`"),
-        ("fn main() { print(1) }", "function `main`"),
+fn omitted_return_type_desugars_to_void() {
+    // D4: omitting `->` means `-> void`, desugared at parse time — the old
+    // Phase 1c E-PARSE ceremony no longer fires for legitimate void
+    // functions. The AST carries the desugared "void" spelling.
+    for src in [
+        "fn foo(a: i32) { print(a) }",
+        "fn main() { print(1) }",
+        "fn main() { }",
     ] {
         let mut p = Parser::new(src);
-        let d = p.parse_program().expect_err("missing return type fails");
-        assert_eq!(d.code, "E-PARSE", "{}", d.to_json());
-        assert!(
-            d.message.contains(&format!("{subject} is missing its return type")),
-            "names the function: {}",
-            d.to_json()
+        let prog = p.parse_program().expect("omitted arrow parses");
+        assert_eq!(prog.functions.len(), 1, "one fn in {src}");
+        assert_eq!(
+            prog.functions[0].return_ty, "void",
+            "desugared to void: {src}"
         );
-        assert!(
-            d.fixes.iter().any(|f| f.label.contains("add `-> i32`")),
-            "shows the fix: {}",
-            d.to_json()
-        );
-        println!("return-type ceremony OK: {subject}");
+        println!("void-desugar OK: {src}");
     }
-    // Closures get the same treatment (anonymous, so no name).
+    // Closures get the same treatment (anonymous, so asserted on the expr).
     let mut p = Parser::new("fn main() -> i32 { let f = fn(x: i32) { return x } return f(1) }");
-    let d = p.parse_program().expect_err("closure without return type fails");
-    assert_eq!(d.code, "E-PARSE", "{}", d.to_json());
-    assert!(d.message.contains("closure is missing its return type"), "{}", d.to_json());
-    assert!(
-        d.fixes.iter().any(|f| f.label.contains("add `-> i32`")),
-        "{}",
-        d.to_json()
-    );
-    // The fixed forms still parse.
+    let prog = p.parse_program().expect("closure without arrow parses");
+    assert_eq!(prog.functions[0].return_ty, "i32");
+    // `-> ()` is still rejected: `void` is the only unit spelling.
+    for src in [
+        "fn foo(a: i32) -> () { print(a) }",
+        "fn main() -> () { print(1) }",
+    ] {
+        let mut p = Parser::new(src);
+        let d = p.parse_program().expect_err("`-> ()` still fails");
+        assert_eq!(d.code, "E-PARSE", "{}", d.to_json());
+        println!("unit-parens reject OK: {src}");
+    }
+    // The explicit forms still parse unchanged.
     for src in [
         "fn foo(a: i32) -> void { print(a) }",
         "fn main() -> i32 { return 0 }",
@@ -109,24 +109,27 @@ fn missing_return_type_names_function_and_fix() {
     ] {
         assert!(Parser::new(src).parse_program().is_ok(), "parses: {src}");
     }
-    println!("return-type fix OK");
+    println!("explicit forms OK");
 }
 
 #[test]
-fn v2_missing_return_type_names_function_and_fix() {
-    // Same ceremony in the v2 grammar (same message, `E-PARSE-V2` code).
-    let d = klang::parser::v2::parse_v2_program("fn foo(a: i32) { return a }")
-        .expect_err("v2 missing return type fails");
+fn v2_omitted_return_type_desugars_to_void() {
+    // Same D4 desugar in the v2 grammar: `fn foo(a: i32) { ... }` parses
+    // with a Consonant `void` return type instead of failing E-PARSE-V2.
+    let prog = klang::parser::v2::parse_v2_program("fn foo(a: i32) { return a }")
+        .expect("v2 omitted arrow parses");
+    assert_eq!(prog.functions.len(), 1);
+    assert_eq!(prog.functions[0].return_ty.display(), "void");
+    assert_eq!(
+        prog.functions[0].return_ty,
+        klang::ast::resonance::QualifiedType::new(
+            klang::ast::resonance::ResonanceQualifier::Consonant,
+            "void"
+        )
+    );
+    // `-> ()` stays rejected in v2 as well.
+    let d = klang::parser::v2::parse_v2_program("fn foo(a: i32) -> () { return a }")
+        .expect_err("v2 `-> ()` still fails");
     assert_eq!(d.code, "E-PARSE-V2", "{}", d.to_json());
-    assert!(
-        d.message.contains("function `foo` is missing its return type"),
-        "{}",
-        d.to_json()
-    );
-    assert!(
-        d.fixes.iter().any(|f| f.label.contains("add `-> i32`")),
-        "{}",
-        d.to_json()
-    );
-    println!("v2 return-type ceremony OK");
+    println!("v2 void-desugar OK");
 }

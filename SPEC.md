@@ -31,13 +31,20 @@ fn main() -> i32 {
   mode). `mod` blocks are never split (naming one is `E-IMPORT`
   pointing at the whole-file form); items the target merely defines
   but was not asked for stay invisible (`E-UNDEFINED` at check).
-- `fn name(params) -> type [effects] { ... }`. Effects: `throws`,
+- `fn name(params) [-> type] [effects] { ... }`. Effects: `throws`,
   `async`, `cancel`. Calling a `throws` function requires `throws`
-  on the caller (`E-EFFECT-MISMATCH`). The `-> type` is required on
-  every function, including `main` (a missing `->` is `E-PARSE` naming
-  the function with an `add -> i32` fix). `main` itself may return any
-  type: an `Int` return becomes the process exit code, any other value
-  exits 0. `-> void` is the unit form (there is no `()` spelling).
+  on the caller (`E-EFFECT-MISMATCH`). The `-> type` may be omitted on
+  any function, including `main`: omission desugars to `-> void` at
+  parse time (`fmt` prints the explicit form). A function without a
+  declared return type that returns a value is `E-TYPE` on the `return`
+  line, naming the returned type with an `add -> T` fix — the omission
+  never silently discards a value. `main` itself may return any
+  type or omit the type: an `Int` return becomes the process exit code,
+  any other value exits 0; a void `main` (omitted arrow or `-> void`)
+  exits 0 for an empty body, otherwise its fall-off-the-end value maps
+  the same way (an `Int` fall-off becomes the exit code, anything else
+  exits 0). `-> void` is the unit form (there is no `()` spelling:
+  `-> ()` is `E-PARSE`).
 - Arguments are pass-by-value: mutating a struct, array, or map
   parameter inside the callee never affects the caller's binding.
   Return the updated value (or a status code) instead.
@@ -56,8 +63,9 @@ fn main() -> i32 {
 }
 ```
 
-- A closure literal `fn(params) -> type { body }` is a first-class
-  value capturing its enclosing scope **by value**: captures are
+- A closure literal `fn(params) [-> type] { body }` is a first-class
+  value capturing its enclosing scope **by value** (an omitted `->`
+  means `-> void`, exactly as for named functions): captures are
   snapshotted when the literal runs, so later mutations of the outer
   variables — including the outer function having returned — never
   affect the closure (copy semantics, never aliasing; Managed mode

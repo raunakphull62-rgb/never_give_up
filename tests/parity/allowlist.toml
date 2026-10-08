@@ -129,16 +129,16 @@ stderr_contains = "JIT-FAIL"
 reason = "S3: the JIT is int-only and names the unsupported float op loudly instead of miscompiling it. Rejection is the agreed contract for out-of-subset code."
 
 [[entry]]
-programs = ["tests/parity/string_bytes.klang", "tests/parity/string_index.klang", "tests/parity/string_chars.klang", "tests/parity/void_unit.klang", "tests/parity/str_main.klang"]
+programs = ["tests/parity/string_bytes.klang", "tests/parity/string_index.klang", "tests/parity/string_chars.klang", "tests/parity/void_unit.klang", "tests/parity/str_main.klang", "tests/parity/void_omitted_main.klang", "tests/parity/void_omitted_helper.klang"]
 backend = "jit"
 outcome = "exit"
 exit = 1
 stdout = ""
 stderr_contains = "JIT-FAIL"
-reason = "S3: same int-only contract for string constants (void_unit/str_main only need strings for their print output)."
+reason = "S3: same int-only contract for string constants (void_unit/str_main/void_omitted_* only need strings for their print output)."
 
 [[entry]]
-programs = ["tests/parity/closure_captures.klang"]
+programs = ["tests/parity/closure_captures.klang", "tests/parity/closure_omitted.klang"]
 backend = "jit"
 outcome = "exit"
 exit = 1
@@ -176,7 +176,7 @@ stderr_contains = "E-PARSE-V2"
 reason = "S3: the v2 grammar has no while/for statements, so loop programs do not parse. v1 + JIT agree on the semantics."
 
 [[entry]]
-programs = ["tests/parity/closure_captures.klang"]
+programs = ["tests/parity/closure_captures.klang", "tests/parity/closure_omitted.klang"]
 backend = "v2"
 outcome = "exit"
 exit = 1
