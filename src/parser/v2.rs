@@ -104,14 +104,18 @@ impl P {
     /// Optional `-> type` after a v2 function signature (D4, same desugar
     /// as the v1 parser). An omitted arrow means `-> void` (Consonant
     /// `void`, the plain spelling); every downstream stage sees exactly
-    /// today's explicit `-> void` programs. `-> ()` stays rejected:
+    /// today's explicit `-> void` programs — except the `omitted` flag,
+    /// which the `run-v2` exit-code mapping uses. `-> ()` stays rejected:
     /// `parse_qualified_type` only accepts identifiers.
-    fn parse_return_ty_opt(&mut self) -> Result<QualifiedType, Diagnostic> {
+    fn parse_return_ty_opt(&mut self) -> Result<(QualifiedType, bool), Diagnostic> {
         if TokenKind::Arrow == self.peek().kind {
             self.bump();
-            return self.parse_qualified_type("return type");
+            return Ok((self.parse_qualified_type("return type")?, false));
         }
-        Ok(QualifiedType::new(ResonanceQualifier::Consonant, "void"))
+        Ok((
+            QualifiedType::new(ResonanceQualifier::Consonant, "void"),
+            true,
+        ))
     }
 
     fn expect_ident(&mut self, what: &str) -> Result<(String, usize, usize), Diagnostic> {
@@ -531,7 +535,7 @@ impl P {
             }
         }
         self.expect_kind(&TokenKind::RParen, "`)`")?;
-        let return_ty = self.parse_return_ty_opt()?;
+        let (return_ty, return_ty_omitted) = self.parse_return_ty_opt()?;
         self.expect_kind(&TokenKind::LBrace, "`{`")?;
         let fn_id = self.next_id();
         self.enter(&fn_id);
@@ -562,6 +566,7 @@ impl P {
             is_pub,
             params,
             return_ty,
+            return_ty_omitted,
             body: V2Block { id: blk_id, stmts },
         })
     }

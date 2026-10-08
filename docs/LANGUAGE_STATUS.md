@@ -39,9 +39,10 @@ a record of what Phase 0 found.
 - Item 5 ceremony is now sugar (Phase 3a, D4): omitting `->` desugars to
   `-> void` at parse time in both the v1 and v2 parsers; a
   value-returning function without a declared type is `E-TYPE` on the
-  `return` line with an `add -> T` fix; `-> ()` stays rejected. A void
-  `main` exits 0 for an empty body, else its fall-off value maps like
-  any return (`tests/return_ergonomics_gates.rs`).
+  `return` line with an `add -> T` fix; `-> ()` stays rejected. Phase 3b
+  decision: a `main` with no declared return type always exits 0
+  (fall-off value discarded); a declared type maps as before
+  (`tests/return_ergonomics_gates.rs`).
 - This file's two evidence fences are `text`, not `klang`, so
   `scripts/verify_docs.py` (which executes every `klang` block in
   `docs/`) stays green.

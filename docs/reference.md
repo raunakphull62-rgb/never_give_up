@@ -69,11 +69,11 @@ fn main() -> i32 {
   the explicit form). A function without a declared return type that
   returns a value is `E-TYPE` on the `return` line, naming the returned
   type with an `add -> T` fix — omission never silently discards a
-  value. `main` itself may return any type or omit it — an `Int`
-  return becomes the process exit code, any other value exits 0; a
-  void `main` (omitted arrow or `-> void`) exits 0 for an empty body,
-  otherwise its fall-off-the-end value maps the same way (an `Int`
-  fall-off becomes the exit code, anything else exits 0).
+  value. `main` itself may return any type or omit it — with a declared
+  return type, an `Int` return becomes the process exit code and any
+  other value exits 0; a `main` with no declared return type (omitted
+  arrow) always exits 0, discarding its last expression value for exit
+  purposes (`fn main() { print(7) }` prints `7` and exits 0).
 - `let x = expr` binds (re-`let` shadows with the new type);
   `x = expr` rebinds and checks against the bound type; assigning an
   unbound name is `E-UNDEFINED`.
@@ -108,6 +108,11 @@ fn main() -> i32 {
 | `+` | Int+Int=Int; any float mix=Float; Str+anything=Str (concat) |
 | `- * /` | numbers only (int/float, `int` coerces) |
 | `%` | integers only |
+
+Float division by zero (`1.0 / 0.0`, `0.0 / 0.0`) is a loud
+`E-RUNTIME` ("division by zero") by design — never infinity or NaN —
+consistent with `sqrt` of a negative number, `log` of a non-positive
+number, and an overflowing `pow` (all loud `E-RUNTIME`).
 | `== !=` | same type, int/float mix, or anything-`unknown` |
 | `< <= > >=` | numbers, or Str/Str; result Bool |
 | `&& \|\| !` | Bool/Int operands, Bool result — short-circuit: the right side runs only when the left side does not decide the result |

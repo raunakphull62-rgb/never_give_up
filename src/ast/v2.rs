@@ -42,6 +42,10 @@ pub struct V2FunctionDecl {
     pub is_pub: bool,
     pub params: Vec<V2Param>,
     pub return_ty: QualifiedType,
+    /// True when the `-> type` arrow was omitted (D4 desugar to `void`).
+    /// The `run-v2` exit-code mapping uses this: an entry with no
+    /// declared return type always exits 0.
+    pub return_ty_omitted: bool,
     pub body: V2Block,
 }
 

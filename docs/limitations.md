@@ -86,15 +86,15 @@ Very deep JIT recursion will abort on native overflow, not report
 
 `klang run` (and `run-v2`) print only program output; the entry return
 value becomes the process exit code and is never printed. A `main`
-with no integer return exits 0. A void `main` — omitted `->` or explicit
-`-> void` (D4) — exits 0 for an empty body; otherwise its
-fall-off-the-end value maps exactly like any other return (an `Int`
-fall-off becomes the exit code, anything else exits 0), so
-`fn main() { 40 + 2 }` exits 42. Compile/runtime failures print the
+with no integer return exits 0. A `main` with no declared return type
+(omitted `->`, Phase 3b decision) always exits 0: its last expression
+value is discarded for exit purposes, so `fn main() { print(7) }`
+prints `7` and exits 0. A declared return type (`-> T`, including an
+explicit `-> void`) keeps the value mapping. Compile/runtime failures print the
 structured JSON diagnostic on stderr and exit 1. Exit codes are OS
 8-bit values and wrap without clamping: `return 256` exits 0,
 `return -1` exits 255. Pinned by `exit_code_wraps_at_256_and_negatives`
-(`tests/quiet_gates.rs`) and `void_main_exit_code_is_documented_falloff_mapping`
+(`tests/quiet_gates.rs`) and `void_main_exit_code_is_always_zero_when_omitted`
 (`tests/return_ergonomics_gates.rs`).
 
 ## Design-scope cuts (not bugs)
@@ -104,8 +104,19 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   syntax for modes, and `klang check` never emits this code.
 - **Contracts**: only the `non-empty` precondition is executable, via
   the library API (`E-CONTRACT`); nothing in surface syntax triggers it.
-- **JIT**: integer-only behind `--backend-jit`; the interpreter is the
-  reference backend. `build` always stops at the MIR listing.
+- **JIT**: integer-only behind `--backend-jit` (never the default; see
+  below); the interpreter is the reference backend. `build` always stops
+  at the MIR listing.
+- **v2 tree-walker (`run-v2`)**: an experimental subset vehicle for the
+  separate v2 language track (schemas, `echo fn`/`listen`, `flow` with
+  `dep=`, `tune`/`verify` — see `docs/roadmap.md`), explicitly selected
+  and with its own syntax. It is NOT the reference backend (the v1
+  interpreter is). It cannot run imports, loops (`while`/`for`),
+  closures, float literals (float values exist at runtime but programs
+  cannot spell them), `try`/`catch`, or the standard library (no `len`,
+  no stdin/file/process builtins, and the 26 package self-tests do not
+  parse). Whatever it rejects, it rejects loudly (`E-PARSE-V2` /
+  `E-UNDEFINED`), never silently.
 - **Packages**: manifest + FNV lockfile for local files is
   change-detection, not cryptography; registry pins add SHA-256
   (`package <name> <version> <sha256>` in `klang.lock`, verified on

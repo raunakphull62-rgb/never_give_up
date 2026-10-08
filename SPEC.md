@@ -39,11 +39,12 @@ fn main() -> i32 {
   declared return type that returns a value is `E-TYPE` on the `return`
   line, naming the returned type with an `add -> T` fix — the omission
   never silently discards a value. `main` itself may return any
-  type or omit the type: an `Int` return becomes the process exit code,
-  any other value exits 0; a void `main` (omitted arrow or `-> void`)
-  exits 0 for an empty body, otherwise its fall-off-the-end value maps
-  the same way (an `Int` fall-off becomes the exit code, anything else
-  exits 0). `-> void` is the unit form (there is no `()` spelling:
+  type or omit the type: with a declared return type, an `Int` return
+  becomes the process exit code and any other value exits 0; a `main`
+  with no declared return type (omitted arrow) always exits 0 — its
+  last expression value is discarded for exit purposes (so
+  `fn main() { print(7) }` prints `7` and exits 0). `-> void` is the
+  unit form (there is no `()` spelling:
   `-> ()` is `E-PARSE`).
 - Arguments are pass-by-value: mutating a struct, array, or map
   parameter inside the callee never affects the caller's binding.
@@ -178,6 +179,10 @@ index, unknown names) is `unknown`, a wildcard that never emits
 
 - `+`: Int+Int=Int, Float-involved=Float, Str+anything=Str (concat).
 - `- * /`: numbers only. `%`: integers only.
+- Float division by zero (`1.0 / 0.0`, `0.0 / 0.0`) is a loud
+  `E-RUNTIME` ("division by zero") by design — never infinity or NaN —
+  consistent with `sqrt` of a negative number, `log` of a non-positive
+  number, and an overflowing `pow` (all loud `E-RUNTIME`).
 - `== !=`: same type, or Int/Float mix, or anything-unknown. Else `E-TYPE`.
 - `< <= > >=`: numbers, or Str/Str. Result is Bool.
 - `&& || !`: Bool/Int operands, Bool result. Short-circuit: the right

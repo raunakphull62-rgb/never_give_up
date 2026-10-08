@@ -420,6 +420,10 @@ pub struct FunctionDecl {
     pub type_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_ty: String,
+    /// True when the `-> type` arrow was omitted (D4 desugar to `void`).
+    /// The CLI exit-code mapping uses this: an entry with no declared
+    /// return type always exits 0, discarding its fall-off value.
+    pub return_ty_omitted: bool,
     pub effects: Vec<Effect>,
     pub body: Block,
 }

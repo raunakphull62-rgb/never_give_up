@@ -1,0 +1,7 @@
+// Parity corpus (Phase 3b): a main with no declared return type always
+// exits 0 — its last expression value is discarded for exit purposes.
+// All three backends print `7` and exit 0 (agreement, no allowlist).
+
+fn main() {
+    print(7)
+}

@@ -884,17 +884,19 @@ impl Parser {
 
     /// Optional `-> type` after a function signature (D4). An omitted arrow
     /// desugars to `-> void` at parse time, so every downstream stage (HIR
-    /// sigs, MIR, fmt) sees exactly today's `-> void` programs. A
+    /// sigs, MIR, fmt) sees exactly today's `-> void` programs — except the
+    /// `omitted` flag, which the CLI exit-code mapping uses: an entry with
+    /// no declared return type always exits 0 (Phase 3b decision). A
     /// `return <expr>` inside such a body then fails as a local `E-TYPE`
     /// against `void` with a fix hint, instead of an `E-PARSE` at the `{`.
     /// `-> ()` stays rejected: `parse_ty_name` only accepts identifiers
     /// (plus `::` segments and generics), so only `void` spells unit.
-    fn parse_return_ty_opt(&mut self) -> Result<String, Diagnostic> {
+    fn parse_return_ty_opt(&mut self) -> Result<(String, bool), Diagnostic> {
         if self.peek().kind == TokenKind::Arrow {
             self.bump();
-            return self.parse_ty_name("return type");
+            return Ok((self.parse_ty_name("return type")?, false));
         }
-        Ok("void".to_string())
+        Ok(("void".to_string(), true))
     }
 
     fn expect_ident(&mut self, what: &str) -> Result<(String, usize, usize), Diagnostic> {
@@ -1205,7 +1207,7 @@ impl Parser {
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
-        let return_ty = self.parse_return_ty_opt()?;
+        let (return_ty, return_ty_omitted) = self.parse_return_ty_opt()?;
         let mut effects = Vec::new();
         loop {
             match self.peek().kind {
@@ -1258,6 +1260,7 @@ impl Parser {
             type_params,
             params,
             return_ty,
+            return_ty_omitted,
             effects,
             body: Block { id: blk_id, stmts },
         })
@@ -2349,7 +2352,7 @@ impl Parser {
         self.expect(&TokenKind::LParen, "`(`")?;
         let params = self.parse_params()?;
         self.expect(&TokenKind::RParen, "`)`")?;
-        let return_ty = self.parse_return_ty_opt()?;
+        let (return_ty, _omitted) = self.parse_return_ty_opt()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
         let blk_id = self.next_id();
         self.enter_scope(&blk_id);

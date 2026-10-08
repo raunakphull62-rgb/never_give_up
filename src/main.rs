@@ -772,6 +772,14 @@ fn run_file_mode(args: &[String]) {
         return;
     }
     if use_jit {
+        // Phase 3b: the JIT is experimental and never the default (only
+        // this explicit flag selects it). Say so on stderr every time so
+        // a wrapped exit code or a JIT-FAIL is never mistaken for the
+        // reference interpreter's verdict.
+        eprintln!(
+            "warning: --backend-jit is experimental: it does not check division by zero, overflow, or recursion depth yet"
+        );
+        let omitted = entry_omitted_return(&prog, &run_entry);
         match klang::jit::run_jit(&mir, &run_entry, &[]) {
             Ok((v, out)) => {
                 for line in &out {
@@ -785,8 +793,9 @@ fn run_file_mode(args: &[String]) {
                     println!("run {run_entry}() = {v} [jit]");
                 }
                 // Exit code is the low 8 bits (OS wrapping): 256 -> 0,
-                // -1 -> 255. No clamping.
-                std::process::exit(v as i32);
+                // -1 -> 255. No clamping. An entry with no declared
+                // return type always exits 0 (Phase 3b).
+                std::process::exit(if omitted { 0 } else { v as i32 });
             }
             Err(e) => {
                 eprintln!("run: JIT-FAIL");
@@ -827,7 +836,9 @@ fn run_file_mode(args: &[String]) {
             if verbose {
                 println!("run {run_entry}() = {}", v.render());
             }
-            std::process::exit(exit_code_for_value(&v));
+            // An entry with no declared return type always exits 0 (its
+            // fall-off value is discarded); a declared type maps as before.
+            std::process::exit(exit_code_for_entry(&v, entry_omitted_return(&prog, &run_entry)));
         }
         (Err(d), out) => {
             // HEAVY-TEST-1: flush whatever the program printed before it
@@ -1704,6 +1715,37 @@ fn exit_code_for_value(v: &klang::runtime::Value) -> i32 {
     }
 }
 
+/// Phase 3b decision: an entry with NO declared return type (omitted `->`,
+/// desugared to `void`) always exits 0 — its fall-off value is discarded
+/// for exit purposes. A declared return type (`-> T`, including an
+/// explicit `-> void`) keeps today's mapping via [`exit_code_for_value`].
+fn exit_code_for_entry(v: &klang::runtime::Value, omitted: bool) -> i32 {
+    if omitted {
+        0
+    } else {
+        exit_code_for_value(v)
+    }
+}
+
+/// True when the named entry declared no return type (omitted `->`).
+/// Mirrors MIR entry lookup: top-level functions by plain name, `mod`
+/// members by qualified `m::f` name.
+fn entry_omitted_return(prog: &klang::ast::Program, entry: &str) -> bool {
+    if let Some(f) = prog.functions.iter().find(|f| f.name == entry) {
+        return f.return_ty_omitted;
+    }
+    for m in &prog.mods {
+        if let Some(f) = m
+            .functions
+            .iter()
+            .find(|f| format!("{}::{}", m.name, f.name) == entry)
+        {
+            return f.return_ty_omitted;
+        }
+    }
+    false
+}
+
 /// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
 /// shared [`klang::mcp::v2_check_source`] front end and print the same
 /// `Diagnostic::to_json()` objects the MCP tool embeds.
@@ -1785,6 +1827,12 @@ fn run_v2_mode(path: &str, entry: String, verbose: bool) {
     // Real execution (pillars 2-5, no stubs).
     let prog2 = prog.clone();
     let entry2 = entry.clone();
+    let omitted = prog
+        .functions
+        .iter()
+        .find(|f| f.name == entry)
+        .map(|f| f.return_ty_omitted)
+        .unwrap_or(false);
     match klang::with_deep_stack(move || klang::runtime::v2::run_v2_program_partial(&prog2, &entry2)) {
         (Ok(v), out) => {
             for line in &out {
@@ -1797,8 +1845,9 @@ fn run_v2_mode(path: &str, entry: String, verbose: bool) {
             if verbose {
                 println!("run {entry}() = {v}");
             }
-            // Low 8 bits wrap (256 -> 0); no clamping.
-            std::process::exit(v);
+            // Low 8 bits wrap (256 -> 0); no clamping. An entry with no
+            // declared return type always exits 0 (Phase 3b).
+            std::process::exit(if omitted { 0 } else { v });
         }
         (Err(d), out) => {
             // HEAVY-TEST-1 (v2 mirror): program lines to stdout

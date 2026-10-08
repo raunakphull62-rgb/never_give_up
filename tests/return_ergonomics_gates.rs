@@ -239,17 +239,29 @@ fn main_in_all_forms_cli() {
 }
 
 #[test]
-fn void_main_exit_code_is_documented_falloff_mapping() {
-    // Empty void main exits 0.
+fn void_main_exit_code_is_always_zero_when_omitted() {
+    // Phase 3b decision: a main with NO declared return type always exits
+    // 0 — its last expression value is discarded for exit purposes.
+    // Empty body exits 0.
     let prog = cli_prog("empty", "fn main() { }");
     let (_, _, code) = run_cli(&["run", &prog], b"");
     assert_eq!(code, 0);
-    // A trailing expression value falls off the end and maps like any
-    // return (Int -> low 8 bits): documented in SPEC §1, not clamped.
+    // A trailing Int value falls off the end but is discarded: exit 0,
+    // not 42.
     let prog = cli_prog("falloff", "fn main() { 40 + 2 }");
     let (_, _, code) = run_cli(&["run", &prog], b"");
-    assert_eq!(code, 42);
-    println!("void-main exit mapping OK");
+    assert_eq!(code, 0);
+    // The required case: printing 7 still prints, but exits 0.
+    let prog = cli_prog("print7", "fn main() { print(7) }");
+    let (out, _, code) = run_cli(&["run", &prog], b"");
+    assert_eq!(out, "7\n", "output preserved");
+    assert_eq!(code, 0, "omitted arrow always exits 0");
+    // Declared `-> void` is NOT omission: it keeps today's value mapping.
+    let prog = cli_prog("explicit-void", "fn main() -> void { print(7) }");
+    let (out, _, code) = run_cli(&["run", &prog], b"");
+    assert_eq!(out, "7\n");
+    assert_eq!(code, 7, "explicit `-> void` maps its fall-off value");
+    println!("void-main exit-0 OK");
 }
 
 // ---------------------------------------------------------------------------

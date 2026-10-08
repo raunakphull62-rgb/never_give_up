@@ -2987,6 +2987,7 @@ fn check_expr(
                 type_params: caller.type_params.clone(),
                 params: params.clone(),
                 return_ty: return_ty.clone(),
+                return_ty_omitted: false,
                 effects: Vec::new(),
                 body: body.clone(),
             };
