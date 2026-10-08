@@ -86,6 +86,12 @@ pub struct Program {
     /// the named top-level items (function/struct/enum) from the target
     /// file, unlike `imports` which merges whole files.
     pub selective_imports: Vec<SelectiveImport>,
+    /// File aliases: `import "file.klang" as m` (D1). Loaded, never merged
+    /// flat; calls spell `m.name(...)`.
+    pub aliased_imports: Vec<AliasedImport>,
+    /// Per-file alias scopes for diagnostics (loader-filled; empty when
+    /// the program was parsed without loading imports).
+    pub alias_scopes: Vec<AliasScope>,
     pub functions: Vec<FunctionDecl>,
 }
 
@@ -94,6 +100,34 @@ pub struct Program {
 pub struct SelectiveImport {
     pub names: Vec<String>,
     pub path: String,
+}
+
+/// One `import "path" as alias` entry (D1 file aliases). The target file
+/// is loaded like a whole import (relative + vendor fallback, own imports
+/// resolved against its own directory), but nothing merges flat: its
+/// top-level functions become callable as `alias.name(...)`, resolved at
+/// load time to plain internal names. Aliases are file-local.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasedImport {
+    pub path: String,
+    pub alias: String,
+}
+
+/// One file alias visible for diagnostics: `alias` names the target file
+/// (`target_raw` as written, `target_canon` canonicalized).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDecl {
+    pub alias: String,
+    pub target_raw: String,
+    pub target_canon: String,
+}
+
+/// All aliases of one file (by loader file index), for the checker's
+/// unknown-alias hint. Empty in single-file (unloaded) programs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasScope {
+    pub file_idx: u32,
+    pub aliases: Vec<AliasDecl>,
 }
 
 /// A named `mod name { ... }` module: its own namespace of items.

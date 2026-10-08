@@ -43,6 +43,11 @@ a record of what Phase 0 found.
   decision: a `main` with no declared return type always exits 0
   (fall-off value discarded); a declared type maps as before
   (`tests/return_ergonomics_gates.rs`).
+- Item 4 is now **fixed for calls** (Phase 3b, D1): `import "p" as m`
+  with `m.f(...)` call sites, resolved at load time to plain calls
+  (`tests/import_alias_gates.rs`, `examples/aliases.klang`). Unqualified
+  imports and prefixed stdlib names work exactly as before; struct/enum
+  construction through an alias is still rejected loudly.
 - This file's two evidence fences are `text`, not `klang`, so
   `scripts/verify_docs.py` (which executes every `klang` block in
   `docs/`) stays green.

@@ -100,6 +100,16 @@ enum Work {
         importer: String,
         raw: String,
     },
+    /// `import "p" as m`: parse + expand the target like a whole import
+    /// (nested imports resolve against its own directory, vendor fallback
+    /// included), but merge NOTHING flat here — Phase B renames its
+    /// functions and rewrites the importer's `m.f` call sites instead.
+    Alias {
+        path: String,
+        alias: String,
+        importer: String,
+        raw: String,
+    },
 }
 
 /// Registry vendor context for one load: the project root (dir holding
@@ -167,6 +177,8 @@ fn load_from(
         structs: vec![],
         imports: vec![],
         selective_imports: vec![],
+        aliased_imports: vec![],
+        alias_scopes: vec![],
         functions: vec![],
     };
     // Canonical path -> prefixed parse (cached so each file parses once,
@@ -184,6 +196,17 @@ fn load_from(
     // AND later whole merges of the same file idempotent (diamond-safe).
     let mut merged_items: HashSet<(String, String, String)> = HashSet::new();
     let mut fn_names: HashSet<String> = HashSet::new();
+    // Origin canonical path per merged function (parallel to
+    // `merged.functions`): Phase B rewrites alias call sites in exactly
+    // the functions of each importing file.
+    let mut fn_origins: Vec<String> = Vec::new();
+    // Origin canonical path per merged mod block (parallel to
+    // `merged.mods`): same file-locality rule for `mod` members.
+    let mut mod_origins: Vec<String> = Vec::new();
+    // (importer canon, alias, target canon, raw): one entry per
+    // `import "p" as m`, deduplicated. Resolved in Phase B, after the
+    // flat walk, so targets are parsed no matter the edge order.
+    let mut alias_edges: Vec<(String, String, String, String)> = Vec::new();
 
     let mut queue: VecDeque<Work> = VecDeque::from([Work::Whole {
         path: entry.to_string(),
@@ -254,12 +277,17 @@ fn load_from(
                 if expanded.insert(canon.clone()) {
                     enqueue_imports(&prog, &real_path, &mut queue)?;
                 }
+                let mods_before = merged.mods.len();
                 merged.mods.extend(prog.mods);
+                for _ in mods_before..merged.mods.len() {
+                    mod_origins.push(canon.clone());
+                }
                 merged.enums.extend(prog.enums);
                 merged.structs.extend(prog.structs);
                 for f in prog.functions {
                     insert_fn(
                         &mut merged.functions,
+                        &mut fn_origins,
                         &mut fn_names,
                         &mut merged_items,
                         &canon,
@@ -289,14 +317,52 @@ fn load_from(
                         &canon,
                         name,
                         &mut merged,
+                        &mut fn_origins,
                         &mut fn_names,
                         &mut merged_items,
                         &importer,
                     )?;
                 }
             }
+            Work::Alias {
+                path,
+                alias,
+                importer,
+                raw,
+            } => {
+                // Parse + expand exactly like a whole import (nested
+                // imports resolve against the target's own directory,
+                // vendor fallback included), but merge nothing flat:
+                // Phase B renames and rewrites instead.
+                let real_path =
+                    ensure_parsed(&path, &raw, &vendor, &mut parsed, &mut path_of_idx, &mut files)?;
+                let target = canonical(&real_path);
+                let importer_canon = canonical(&importer);
+                if expanded.insert(target.clone()) {
+                    enqueue_imports(&parsed.get(&target).expect("just parsed").clone(), &real_path, &mut queue)?;
+                }
+                let edge = (
+                    importer_canon,
+                    alias.clone(),
+                    target.clone(),
+                    raw.clone(),
+                );
+                if !alias_edges.contains(&edge) {
+                    alias_edges.push(edge);
+                }
+            }
         }
     }
+    resolve_aliases(
+        &parsed,
+        &path_of_idx,
+        &mut merged,
+        &mut fn_origins,
+        &mut mod_origins,
+        &mut fn_names,
+        &mut merged_items,
+        &alias_edges,
+    )?;
     Ok(LoadedProgram {
         program: merged,
         files,
@@ -427,6 +493,23 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
             raw: sel.path.clone(),
         });
     }
+    for aliased in &prog.aliased_imports {
+        if crate::repair::is_unsafe_import_path(&aliased.path) {
+            return Err(ImportError::new(
+                "E-IMPORT",
+                format!(
+                    "unsafe import `{}` from `{from_path}`",
+                    diagnostics::sanitize_for_terminal(&aliased.path)
+                ),
+            ));
+        }
+        queue.push_back(Work::Alias {
+            path: dir.join(&aliased.path).to_string_lossy().to_string(),
+            alias: aliased.alias.clone(),
+            importer: from_path.to_string(),
+            raw: aliased.path.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -435,6 +518,7 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
 /// is a loud duplicate, never a silent overwrite.
 fn insert_fn(
     merged: &mut Vec<crate::ast::FunctionDecl>,
+    origins: &mut Vec<String>,
     fn_names: &mut HashSet<String>,
     merged_items: &mut HashSet<(String, String, String)>,
     canon: &str,
@@ -451,6 +535,7 @@ fn insert_fn(
         ));
     }
     merged_items.insert((canon.to_string(), "fn".to_string(), f.name.clone()));
+    origins.push(canon.to_string());
     merged.push(f);
     Ok(())
 }
@@ -462,6 +547,7 @@ fn import_named(
     canon: &str,
     name: &str,
     merged: &mut Program,
+    fn_origins: &mut Vec<String>,
     fn_names: &mut HashSet<String>,
     merged_items: &mut HashSet<(String, String, String)>,
     importer: &str,
@@ -472,6 +558,7 @@ fn import_named(
             hits += 1;
             insert_fn(
                 &mut merged.functions,
+                fn_origins,
                 fn_names,
                 merged_items,
                 canon,
@@ -529,4 +616,685 @@ fn available_names(target: &Program) -> String {    let mut names: Vec<String> =
     }
     names.sort();
     names.join(", ")
+}
+
+// ---------------------------------------------------------------------------
+// D1 file aliases, Phase B: rename + rewrite (runs after the flat walk).
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64-bit (same hash family as the lockfile hasher).
+fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Canonical internal name for one aliased function: `{orig}@{hex}`.
+/// `@` is unspellable in user identifiers, so this can never collide with
+/// a user-written name. The hash keys on canonical file identity — never
+/// the alias spelling — so two aliases for one file share a single copy
+/// (diamond-safe: file identity, not alias identity).
+fn internal_name(canon: &str, orig: &str) -> String {
+    format!("{orig}@{:016x}", fnv1a64(canon))
+}
+
+/// One resolved alias edge from the importer's point of view.
+struct AliasFile {
+    alias: String,
+    target: String,
+    raw: String,
+    own_fns: Vec<String>,
+}
+
+/// Resolve every `import "p" as m` edge:
+/// 1. reject alias/alias and alias/`let`-binding collisions loudly;
+/// 2. merge the target's own functions under canonical internal names
+///    (plus its structs/enums/mods flat, exactly as a whole import would);
+/// 3. rewrite the importer's `m.f(...)` call sites to plain `Call`s.
+///
+/// Everything downstream (HIR sigs, MIR `Call`, runtime, JIT) then sees
+/// ordinary functions — no checker, MIR, or runtime changes.
+#[allow(clippy::too_many_arguments)]
+fn resolve_aliases(
+    parsed: &HashMap<String, Program>,
+    path_of_idx: &[String],
+    merged: &mut Program,
+    fn_origins: &mut Vec<String>,
+    mod_origins: &mut Vec<String>,
+    fn_names: &mut HashSet<String>,
+    merged_items: &mut HashSet<(String, String, String)>,
+    alias_edges: &[(String, String, String, String)],
+) -> Result<(), ImportError> {
+    use crate::ast::{AliasDecl, AliasScope};
+    let mut units_done: HashSet<String> = HashSet::new();
+    let mut scopes: HashMap<u32, Vec<AliasDecl>> = HashMap::new();
+    for (importer, alias, target, raw) in alias_edges {
+        // Same alias bound to two different files in one importer.
+        for (importer2, alias2, target2, _) in alias_edges {
+            if importer == importer2 && alias == alias2 && target != target2 {
+                return Err(ImportError::new(
+                    "E-DUPLICATE",
+                    format!(
+                        "duplicate alias `{alias}` (already imports one file; cannot also import another)"
+                    ),
+                ));
+            }
+        }
+        let target_prog = parsed.get(target).expect("alias target parsed").clone();
+        let own_fns: Vec<String> = target_prog.functions.iter().map(|f| f.name.clone()).collect();
+        let af = AliasFile {
+            alias: alias.clone(),
+            target: target.clone(),
+            raw: raw.clone(),
+            own_fns,
+        };
+        // Alias names share the binding scope with `let` names (D1 §4):
+        // any `let`/parameter/loop variable with the alias name in the
+        // importing file is a loud duplicate, never a silent pick-one.
+        check_alias_collisions(merged, fn_origins, mod_origins, importer, alias)?;
+        // Merge the target unit once per canonical file (two aliases for
+        // one file share the copy): renamed functions plus flat
+        // structs/enums/mods, exactly as a whole import would merge them.
+        if units_done.insert(target.clone()) {
+            for s in &target_prog.structs {
+                merged.structs.push(s.clone());
+            }
+            for e in &target_prog.enums {
+                merged.enums.push(e.clone());
+            }
+            for _ in &target_prog.mods {
+                mod_origins.push(target.clone());
+            }
+            merged.mods.extend(target_prog.mods.clone());
+            for f in &target_prog.functions {
+                let mut renamed = f.clone();
+                renamed.name = internal_name(target, &f.name);
+                rewrite_self_calls(&mut renamed, &af);
+                insert_renamed(merged, fn_origins, fn_names, merged_items, target, renamed)?;
+            }
+        }
+        // Rewrite this importer's `alias.name(...)` call sites (in every
+        // function or mod member originating from the importer file, flat
+        // or renamed — both spell the alias the same way).
+        rewrite_importer_calls(merged, fn_origins, mod_origins, importer, &af)?;
+        // Record the scope for the checker's unknown-alias hint.
+        if let Some(idx) = path_of_idx.iter().position(|p| p == importer) {
+            scopes.entry(idx as u32).or_default().push(AliasDecl {
+                alias: alias.clone(),
+                target_raw: raw.clone(),
+                target_canon: target.clone(),
+            });
+        }
+        // Keep the merged program's import memory complete.
+        let entry = crate::ast::AliasedImport {
+            path: raw.clone(),
+            alias: alias.clone(),
+        };
+        if !merged.aliased_imports.contains(&entry) {
+            merged.aliased_imports.push(entry);
+        }
+    }
+    let mut scopes: Vec<AliasScope> = scopes
+        .into_iter()
+        .map(|(file_idx, aliases)| AliasScope { file_idx, aliases })
+        .collect();
+    scopes.sort_by_key(|s| s.file_idx);
+    merged.alias_scopes = scopes;
+    Ok(())
+}
+
+/// Merge one renamed alias-target function. Renamed names carry `@`,
+/// which user identifiers cannot spell, so they never collide with flat
+/// names; the same (file, name) arriving twice (two aliases, one file)
+/// hits the idempotency guard exactly like a diamond whole-import.
+fn insert_renamed(
+    merged: &mut Program,
+    fn_origins: &mut Vec<String>,
+    fn_names: &mut HashSet<String>,
+    merged_items: &mut HashSet<(String, String, String)>,
+    canon: &str,
+    f: crate::ast::FunctionDecl,
+) -> Result<(), ImportError> {
+    if !fn_names.insert(f.name.clone()) {
+        if merged_items.contains(&(canon.to_string(), "fn".to_string(), f.name.clone())) {
+            return Ok(());
+        }
+        // Unreachable in practice (`@` names are unspellable), but loud
+        // rather than silently overwriting if the hash ever collides.
+        return Err(ImportError::new(
+            "E-DUPLICATE",
+            format!("duplicate function `{}`", f.name),
+        ));
+    }
+    merged_items.insert((canon.to_string(), "fn".to_string(), f.name.clone()));
+    fn_origins.push(canon.to_string());
+    merged.functions.push(f);
+    Ok(())
+}
+
+/// Reject an alias that shares its name with a `let` binding, parameter,
+/// or loop variable anywhere in the importing file (D1 §4: aliases live
+/// in the same binding scope as `let` names).
+fn check_alias_collisions(
+    merged: &Program,
+    fn_origins: &[String],
+    mod_origins: &[String],
+    importer: &str,
+    alias: &str,
+) -> Result<(), ImportError> {
+    for (f, origin) in merged.functions.iter().zip(fn_origins.iter()) {
+        if origin != importer {
+            continue;
+        }
+        for p in &f.params {
+            if p.name == alias {
+                return Err(ImportError::new(
+                    "E-DUPLICATE",
+                    format!(
+                        "alias `{alias}` collides with parameter `{alias}` of function `{}` (aliases share the binding scope with `let` names; rename one)",
+                        f.name
+                    ),
+                ));
+            }
+        }
+        if let Some(binding) = find_let_binding(&f.body, alias) {
+            return Err(ImportError::new(
+                "E-DUPLICATE",
+                format!(
+                    "alias `{alias}` collides with {binding} in function `{}` (aliases share the binding scope with `let` names; rename one)",
+                    f.name
+                ),
+            ));
+        }
+    }
+    for (m, origin) in merged.mods.iter().zip(mod_origins.iter()) {
+        if origin != importer {
+            continue;
+        }
+        for f in &m.functions {
+            for p in &f.params {
+                if p.name == alias {
+                    return Err(ImportError::new(
+                        "E-DUPLICATE",
+                        format!(
+                            "alias `{alias}` collides with parameter `{alias}` of function `{}::{}` (aliases share the binding scope with `let` names; rename one)",
+                            m.name, f.name
+                        ),
+                    ));
+                }
+            }
+            if let Some(binding) = find_let_binding(&f.body, alias) {
+                return Err(ImportError::new(
+                    "E-DUPLICATE",
+                    format!(
+                        "alias `{alias}` collides with {binding} in function `{}::{}` (aliases share the binding scope with `let` names; rename one)",
+                        m.name, f.name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// First `let`/loop binding with `name` in the block, described for errors.
+fn find_let_binding(block: &crate::ast::Block, name: &str) -> Option<String> {
+    use crate::ast::Stmt;
+    for s in &block.stmts {
+        match s {
+            Stmt::Let(l) if l.name == name => {
+                return Some(format!("`let {name}`"));
+            }
+            Stmt::ForRange(fr) => {
+                if fr.var == name {
+                    return Some(format!("loop variable `{name}`"));
+                }
+                if let Some(b) = find_let_binding(&fr.body, name) {
+                    return Some(b);
+                }
+            }
+            Stmt::ForIn(fi) => {
+                if fi.var == name {
+                    return Some(format!("loop variable `{name}`"));
+                }
+                if let Some(b) = find_let_binding(&fi.body, name) {
+                    return Some(b);
+                }
+            }
+            Stmt::TaskGroup(g) => {
+                if let Some(b) = find_let_binding(&g.body, name) {
+                    return Some(b);
+                }
+            }
+            Stmt::If(i) => {
+                if let Some(b) = find_let_binding(&i.then_block, name) {
+                    return Some(b);
+                }
+                if let Some(e) = &i.else_block {
+                    if let Some(b) = find_let_binding(e, name) {
+                        return Some(b);
+                    }
+                }
+            }
+            Stmt::While(w) => {
+                if let Some(b) = find_let_binding(&w.body, name) {
+                    return Some(b);
+                }
+            }
+            Stmt::TryCatch(t) => {
+                if let Some(b) = find_let_binding(&t.body, name)
+                    .or_else(|| find_let_binding(&t.handler, name))
+                {
+                    return Some(b);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// In a renamed alias-target copy, unqualified calls to the target's own
+/// functions resolve in the home file (D1 §2): rewrite them to the
+/// internal names. Anything else (builtins, flat names, unknowns) is left
+/// for the checker exactly as a whole import would leave it, so an aliased
+/// call executes exactly the same function value as the flat call would.
+fn rewrite_self_calls(f: &mut crate::ast::FunctionDecl, af: &AliasFile) {
+    rewrite_block_self(&mut f.body, af);
+    // `return_ty`/param types are nominal strings; structs merge flat.
+}
+
+/// Rewrite one importer's `alias.name(...)` call sites to plain `Call`s
+/// against the canonical internal names. Only functions originating from
+/// the importer file are visited (flat or renamed — both spell the alias
+/// the same way). `alias.unknown` is `E-UNDEFINED` naming what the target
+/// file actually defines.
+fn rewrite_importer_calls(
+    merged: &mut Program,
+    fn_origins: &[String],
+    mod_origins: &[String],
+    importer: &str,
+    af: &AliasFile,
+) -> Result<(), ImportError> {
+    let mut fns: Vec<&mut crate::ast::FunctionDecl> = merged
+        .functions
+        .iter_mut()
+        .zip(fn_origins.iter())
+        .filter(|(_, origin)| *origin == importer)
+        .map(|(f, _)| f)
+        .collect();
+    for f in fns.iter_mut() {
+        rewrite_block_alias(&mut f.body, af)?;
+    }
+    let mut mods: Vec<&mut crate::ast::ModDecl> = merged
+        .mods
+        .iter_mut()
+        .zip(mod_origins.iter())
+        .filter(|(_, origin)| *origin == importer)
+        .map(|(m, _)| m)
+        .collect();
+    for m in mods.iter_mut() {
+        for f in m.functions.iter_mut() {
+            rewrite_block_alias(&mut f.body, af)?;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_block_self(block: &mut crate::ast::Block, af: &AliasFile) {
+    for s in &mut block.stmts {
+        rewrite_stmt_self(s, af);
+    }
+}
+
+fn rewrite_stmt_self(s: &mut crate::ast::Stmt, af: &AliasFile) {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::Let(l) => rewrite_expr_self(&mut l.value, af),
+        Stmt::Assign(a) => {
+            match &mut a.target {
+                crate::ast::AssignTarget::Var { .. } => {}
+                crate::ast::AssignTarget::Index { base, index } => {
+                    rewrite_expr_self(base, af);
+                    rewrite_expr_self(index, af);
+                }
+                crate::ast::AssignTarget::Field { base, .. } => {
+                    rewrite_expr_self(base, af)
+                }
+            }
+            rewrite_expr_self(&mut a.value, af);
+        }
+        Stmt::Return(r) => rewrite_expr_self(&mut r.value, af),
+        Stmt::TaskGroup(g) => rewrite_block_self(&mut g.body, af),
+        Stmt::If(i) => {
+            rewrite_expr_self(&mut i.cond, af);
+            rewrite_block_self(&mut i.then_block, af);
+            if let Some(e) = &mut i.else_block {
+                rewrite_block_self(e, af);
+            }
+        }
+        Stmt::Print(p) => rewrite_expr_self(&mut p.value, af),
+        Stmt::While(w) => {
+            rewrite_expr_self(&mut w.cond, af);
+            rewrite_block_self(&mut w.body, af);
+        }
+        Stmt::ForRange(fr) => {
+            rewrite_expr_self(&mut fr.start, af);
+            rewrite_expr_self(&mut fr.end, af);
+            rewrite_block_self(&mut fr.body, af);
+        }
+        Stmt::ForIn(fi) => {
+            rewrite_expr_self(&mut fi.iter, af);
+            rewrite_block_self(&mut fi.body, af);
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::TryCatch(t) => {
+            rewrite_block_self(&mut t.body, af);
+            rewrite_block_self(&mut t.handler, af);
+        }
+        Stmt::Expr(e) => rewrite_expr_self(e, af),
+    }
+}
+
+fn rewrite_expr_self(e: &mut crate::ast::Expr, af: &AliasFile) {
+    use crate::ast::Expr;
+    match e {
+        Expr::Call { func, args, .. } => {
+            if af.own_fns.iter().any(|f| f == func) {
+                *func = internal_name(&af.target, func);
+            }
+            for a in args.iter_mut() {
+                rewrite_expr_self(a, af);
+            }
+        }
+        _ => rewrite_expr_children_self(e, af),
+    }
+}
+
+fn rewrite_expr_children_self(e: &mut crate::ast::Expr, af: &AliasFile) {
+    use crate::ast::Expr;
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Var { .. }
+        | Expr::Await { .. } => {}
+        Expr::ArrayLit { elems, .. } => {
+            for el in elems {
+                rewrite_expr_self(el, af);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (_, v) in entries {
+                rewrite_expr_self(v, af);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields.iter_mut() {
+                rewrite_expr_self(v, af);
+            }
+        }
+        Expr::EnumCtor { args, .. } => {
+            for a in args.iter_mut() {
+                rewrite_expr_self(a, af);
+            }
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            rewrite_expr_self(scrutinee, af);
+            for arm in arms.iter_mut() {
+                for s in arm.stmts.iter_mut() {
+                    rewrite_stmt_self(s, af);
+                }
+                if let Some(g) = arm.guard.as_mut() {
+                    rewrite_expr_self(g, af);
+                }
+                rewrite_expr_self(&mut arm.body, af);
+            }
+        }
+        Expr::Closure { params: _, body, .. } => {
+            rewrite_block_self(body, af);
+        }
+        Expr::Index { base, index, .. } => {
+            rewrite_expr_self(base, af);
+            rewrite_expr_self(index, af);
+        }
+        Expr::Field { base, .. } => rewrite_expr_self(base, af),
+        Expr::MethodCall { base, args, .. } => {
+            rewrite_expr_self(base, af);
+            for a in args.iter_mut() {
+                rewrite_expr_self(a, af);
+            }
+        }
+        Expr::Spawn { call, .. } => rewrite_expr_self(call, af),
+        Expr::Call { args, .. } => {
+            for a in args.iter_mut() {
+                rewrite_expr_self(a, af);
+            }
+        }
+        Expr::Add { left, right, .. }
+        | Expr::Sub { left, right, .. }
+        | Expr::Mul { left, right, .. }
+        | Expr::Div { left, right, .. }
+        | Expr::Mod { left, right, .. }
+        | Expr::Eq { left, right, .. }
+        | Expr::NotEq { left, right, .. }
+        | Expr::Lt { left, right, .. }
+        | Expr::LtEq { left, right, .. }
+        | Expr::Gt { left, right, .. }
+        | Expr::GtEq { left, right, .. }
+        | Expr::And { left, right, .. }
+        | Expr::Or { left, right, .. } => {
+            rewrite_expr_self(left, af);
+            rewrite_expr_self(right, af);
+        }
+        Expr::Not { inner, .. } | Expr::Neg { inner, .. } => {
+            rewrite_expr_self(inner, af);
+        }
+    }
+}
+
+fn rewrite_block_alias(
+    block: &mut crate::ast::Block,
+    af: &AliasFile,
+) -> Result<(), ImportError> {
+    for s in &mut block.stmts {
+        rewrite_stmt_alias(s, af)?;
+    }
+    Ok(())
+}
+
+fn rewrite_stmt_alias(
+    s: &mut crate::ast::Stmt,
+    af: &AliasFile,
+) -> Result<(), ImportError> {
+    use crate::ast::Stmt;
+    match s {
+        Stmt::Let(l) => rewrite_expr_alias(&mut l.value, af),
+        Stmt::Assign(a) => {
+            match &mut a.target {
+                crate::ast::AssignTarget::Var { .. } => {}
+                crate::ast::AssignTarget::Index { base, index } => {
+                    rewrite_expr_alias(base, af)?;
+                    rewrite_expr_alias(index, af)?;
+                }
+                crate::ast::AssignTarget::Field { base, .. } => {
+                    rewrite_expr_alias(base, af)?
+                }
+            }
+            rewrite_expr_alias(&mut a.value, af)
+        }
+        Stmt::Return(r) => rewrite_expr_alias(&mut r.value, af),
+        Stmt::TaskGroup(g) => rewrite_block_alias(&mut g.body, af),
+        Stmt::If(i) => {
+            rewrite_expr_alias(&mut i.cond, af)?;
+            rewrite_block_alias(&mut i.then_block, af)?;
+            if let Some(e) = &mut i.else_block {
+                rewrite_block_alias(e, af)?;
+            }
+            Ok(())
+        }
+        Stmt::Print(p) => rewrite_expr_alias(&mut p.value, af),
+        Stmt::While(w) => {
+            rewrite_expr_alias(&mut w.cond, af)?;
+            rewrite_block_alias(&mut w.body, af)
+        }
+        Stmt::ForRange(fr) => {
+            rewrite_expr_alias(&mut fr.start, af)?;
+            rewrite_expr_alias(&mut fr.end, af)?;
+            rewrite_block_alias(&mut fr.body, af)
+        }
+        Stmt::ForIn(fi) => {
+            rewrite_expr_alias(&mut fi.iter, af)?;
+            rewrite_block_alias(&mut fi.body, af)
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => Ok(()),
+        Stmt::TryCatch(t) => {
+            rewrite_block_alias(&mut t.body, af)?;
+            rewrite_block_alias(&mut t.handler, af)
+        }
+        Stmt::Expr(e) => rewrite_expr_alias(e, af),
+    }
+}
+
+fn rewrite_expr_alias(
+    e: &mut crate::ast::Expr,
+    af: &AliasFile,
+) -> Result<(), ImportError> {
+    use crate::ast::Expr;
+    // `alias.name(args)` with an alias receiver becomes a plain `Call`
+    // against the canonical internal name (same NodeId, so spans and
+    // structural identity carry over). Anything else keeps its shape.
+    if let Expr::MethodCall { id, base, method, args } = e {
+        if let Expr::Var { name, .. } = base.as_ref() {
+            if *name == af.alias {
+                if !af.own_fns.iter().any(|f| f == method) {
+                    let mut avail = af.own_fns.clone();
+                    avail.sort();
+                    return Err(ImportError::new(
+                        "E-UNDEFINED",
+                        format!(
+                            "`{}.{}` is not defined in `{}` (available: {})",
+                            af.alias,
+                            method,
+                            af.raw,
+                            if avail.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                avail.join(", ")
+                            }
+                        ),
+                    ));
+                }
+                let internal = internal_name(&af.target, method);
+                let id = id.clone();
+                let mut new_args = std::mem::take(args);
+                for a in new_args.iter_mut() {
+                    rewrite_expr_alias(a, af)?;
+                }
+                *e = Expr::Call {
+                    id,
+                    func: internal,
+                    type_args: Vec::new(),
+                    args: new_args,
+                };
+                return Ok(());
+            }
+        }
+    }
+    rewrite_expr_children_alias(e, af)
+}
+
+fn rewrite_expr_children_alias(
+    e: &mut crate::ast::Expr,
+    af: &AliasFile,
+) -> Result<(), ImportError> {
+    use crate::ast::Expr;
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Str { .. }
+        | Expr::Bool { .. }
+        | Expr::Var { .. }
+        | Expr::Await { .. } => Ok(()),
+        Expr::ArrayLit { elems, .. } => {
+            for el in elems {
+                rewrite_expr_alias(el, af)?;
+            }
+            Ok(())
+        }
+        Expr::MapLit { entries, .. } => {
+            for (_, v) in entries {
+                rewrite_expr_alias(v, af)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields.iter_mut() {
+                rewrite_expr_alias(v, af)?;
+            }
+            Ok(())
+        }
+        Expr::EnumCtor { args, .. } => {
+            for a in args.iter_mut() {
+                rewrite_expr_alias(a, af)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            rewrite_expr_alias(scrutinee, af)?;
+            for arm in arms.iter_mut() {
+                for s in arm.stmts.iter_mut() {
+                    rewrite_stmt_alias(s, af)?;
+                }
+                if let Some(g) = arm.guard.as_mut() {
+                    rewrite_expr_alias(g, af)?;
+                }
+                rewrite_expr_alias(&mut arm.body, af)?;
+            }
+            Ok(())
+        }
+        Expr::Closure { body, .. } => rewrite_block_alias(body, af),
+        Expr::Index { base, index, .. } => {
+            rewrite_expr_alias(base, af)?;
+            rewrite_expr_alias(index, af)
+        }
+        Expr::Field { base, .. } => rewrite_expr_alias(base, af),
+        Expr::MethodCall { base, args, .. } => {
+            rewrite_expr_alias(base, af)?;
+            for a in args.iter_mut() {
+                rewrite_expr_alias(a, af)?;
+            }
+            Ok(())
+        }
+        Expr::Spawn { call, .. } => rewrite_expr_alias(call, af),
+        Expr::Call { args, .. } => {
+            for a in args.iter_mut() {
+                rewrite_expr_alias(a, af)?;
+            }
+            Ok(())
+        }
+        Expr::Add { left, right, .. }
+        | Expr::Sub { left, right, .. }
+        | Expr::Mul { left, right, .. }
+        | Expr::Div { left, right, .. }
+        | Expr::Mod { left, right, .. }
+        | Expr::Eq { left, right, .. }
+        | Expr::NotEq { left, right, .. }
+        | Expr::Lt { left, right, .. }
+        | Expr::LtEq { left, right, .. }
+        | Expr::Gt { left, right, .. }
+        | Expr::GtEq { left, right, .. }
+        | Expr::And { left, right, .. }
+        | Expr::Or { left, right, .. } => {
+            rewrite_expr_alias(left, af)?;
+            rewrite_expr_alias(right, af)
+        }
+        Expr::Not { inner, .. } | Expr::Neg { inner, .. } => {
+            rewrite_expr_alias(inner, af)
+        }
+    }
 }

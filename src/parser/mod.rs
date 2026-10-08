@@ -921,6 +921,7 @@ impl Parser {
         let mut structs = Vec::new();
         let mut imports = Vec::new();
         let mut selective_imports = Vec::new();
+        let mut aliased_imports = Vec::new();
         let mut functions = Vec::new();
         loop {
             match &self.peek().kind {
@@ -939,11 +940,43 @@ impl Parser {
                         TokenKind::StrLit(path) => {
                             let path = path.clone();
                             self.bump();
+                            // Contextual `as`: `import "p" as m`. `as` is
+                            // not a keyword (it lexes as `Ident`), so a
+                            // function literally named `as` still parses —
+                            // the alias position only exists here.
+                            if let TokenKind::Ident(w) = self.peek().kind.clone() {
+                                if w == "as" {
+                                    self.bump();
+                                    let (alias, _, _) =
+                                        self.expect_ident("alias name")?;
+                                    self.consume_semi_opt();
+                                    aliased_imports.push(crate::ast::AliasedImport {
+                                        path,
+                                        alias,
+                                    });
+                                    let _ = t.start;
+                                    continue;
+                                }
+                            }
                             self.consume_semi_opt();
                             imports.push(path);
                         }
                         TokenKind::LBrace => {
                             selective_imports.push(self.parse_selective_import()?);
+                            // Selective imports cannot take an alias: an
+                            // alias exposes a whole file's API (`import "p"
+                            // as m`), and renaming a subset would leave the
+                            // subset's helpers unresolvable.
+                            if let TokenKind::Ident(w) = self.peek().kind.clone() {
+                                if w == "as" {
+                                    let p = self.peek().clone();
+                                    return Err(self.err(
+                                        p.start,
+                                        p.end,
+                                        "selective imports cannot take an alias: use `import \"path\" as name` for the whole file",
+                                    ));
+                                }
+                            }
                         }
                         _ => {
                             let p = self.peek().clone();
@@ -972,6 +1005,8 @@ impl Parser {
             structs,
             imports,
             selective_imports,
+            aliased_imports,
+            alias_scopes: Vec::new(),
             functions,
         })
     }

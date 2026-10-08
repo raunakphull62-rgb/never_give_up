@@ -439,11 +439,18 @@ fn check_program(
 // Scope
 // ---------------------------------------------------------------------------
 
-/// Runnable examples. Deliberately NOT auto-discovered: lib.klang is a
-/// library file with no main entry point, and time_http_integration.klang
-/// needs outbound internet (covered by scripts/live-tests.sh instead).
+    /// Runnable examples. Deliberately NOT auto-discovered: lib.klang is a
+/// library file with no main entry point, alias_math.klang and
+/// alias_other.klang are shared alias helpers with no main, and
+/// time_http_integration.klang needs outbound internet (covered by
+/// scripts/live-tests.sh instead).
 fn example_programs() -> Vec<String> {
-    for skip in ["examples/lib.klang", "examples/time_http_integration.klang"] {
+    for skip in [
+        "examples/lib.klang",
+        "examples/alias_math.klang",
+        "examples/alias_other.klang",
+        "examples/time_http_integration.klang",
+    ] {
         assert!(
             repo_root().join(skip).is_file(),
             "{skip} still exists as a documented skip"
@@ -459,6 +466,7 @@ fn example_programs() -> Vec<String> {
         "examples/osio_integration.klang",
         "examples/try_catch.klang",
         "examples/calculator.klang",
+        "examples/aliases.klang",
     ]
     .iter()
     .map(|s| s.to_string())

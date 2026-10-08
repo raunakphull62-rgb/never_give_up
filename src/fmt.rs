@@ -31,6 +31,12 @@ pub fn fmt_program(p: &Program) -> String {
     for imp in &p.imports {
         out.push_str(&format!("import \"{imp}\"\n"));
     }
+    for aliased in &p.aliased_imports {
+        out.push_str(&format!(
+            "import \"{}\" as {}\n",
+            aliased.path, aliased.alias
+        ));
+    }
     for sel in &p.selective_imports {
         out.push_str(&format!(
             "import {{ {} }} from \"{}\"\n",
@@ -38,7 +44,10 @@ pub fn fmt_program(p: &Program) -> String {
             sel.path
         ));
     }
-    if !p.imports.is_empty() || !p.selective_imports.is_empty() {
+    if !p.imports.is_empty()
+        || !p.selective_imports.is_empty()
+        || !p.aliased_imports.is_empty()
+    {
         out.push('\n');
     }
     for s in &p.structs {

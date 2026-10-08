@@ -1,0 +1,6 @@
+// Shared helper for examples/aliases.klang: sum-based max with the same
+// name as alias_math's — only aliases keep the two callable side by side.
+
+fn max(a: i32, b: i32) -> i32 {
+    return a + b
+}

@@ -1,0 +1,13 @@
+// Shared helper for examples/aliases.klang: comparison-based max plus a
+// helper that calls it (alias calls resolve in the home file).
+
+fn max(a: i32, b: i32) -> i32 {
+    if a < b {
+        return b
+    }
+    return a
+}
+
+fn helper() -> i32 {
+    return max(20, 21)
+}

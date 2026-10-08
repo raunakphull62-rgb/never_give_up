@@ -1,0 +1,6 @@
+// Shared helper for ../alias_int.klang: addition under the shared name
+// `compute` (alias_b defines the same name differently).
+
+fn compute(a: i32, b: i32) -> i32 {
+    return a + b
+}

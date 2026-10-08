@@ -1,0 +1,16 @@
+// examples/aliases.klang — file aliases (D1).
+//
+// Two files define `max` with different meanings; importing both plainly
+// would be E-DUPLICATE, but aliases keep both callable side by side.
+//
+// Run: klang run examples/aliases.klang   # prints 2, 3, 21; returns 0
+
+import "alias_math.klang" as m
+import "alias_other.klang" as o
+
+fn main() -> i32 {
+    print(m.max(1, 2))
+    print(o.max(1, 2))
+    print(m.helper())
+    return 0
+}

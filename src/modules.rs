@@ -229,6 +229,8 @@ pub fn resolve_with_file(program: &Program, file: &str) -> (Program, Vec<Diagnos
         structs: Vec::new(),
         imports: program.imports.clone(),
         selective_imports: program.selective_imports.clone(),
+        aliased_imports: program.aliased_imports.clone(),
+        alias_scopes: program.alias_scopes.clone(),
         functions: Vec::with_capacity(program.functions.len()),
     };
     // Top-level items: validate qualified references, rewrite nothing.

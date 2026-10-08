@@ -25,12 +25,19 @@ fn main() -> i32 {
   items (function/struct/enum) from the file: a missing file is
   `E-IO-NOT-FOUND`, a missing name is `E-IMPORT` (naming what is
   available), an unsafe path (`..`/absolute/`~`) is `E-IMPORT`, and a
-  same-named item from a different file is `E-DUPLICATE`. Re-importing
-  an already-merged item is idempotent (diamond-safe); circular
-  imports terminate and resolve (each file merges at most once per
-  mode). `mod` blocks are never split (naming one is `E-IMPORT`
-  pointing at the whole-file form); items the target merely defines
-  but was not asked for stay invisible (`E-UNDEFINED` at check).
+   same-named item from a different file is `E-DUPLICATE`. Re-importing
+   an already-merged item is idempotent (diamond-safe); circular
+   imports terminate and resolve (each file merges at most once per
+   mode). `mod` blocks are never split (naming one is `E-IMPORT`
+   pointing at the whole-file form); items the target merely defines
+   but was not asked for stay invisible (`E-UNDEFINED` at check).
+   `import "x.klang" as m` loads the file without merging anything
+   flat: its top-level functions become callable as `m.name(...)`
+   (resolved at load time to plain calls — arity, types, and effects
+   check exactly as for flat calls), so two same-named files stay
+   usable side by side. Aliases are file-local; `as` is contextual;
+   an unknown item is `E-UNDEFINED`, a re-aliased or shadowed alias
+   name is `E-DUPLICATE`, and selective imports cannot take an alias.
 - `fn name(params) [-> type] [effects] { ... }`. Effects: `throws`,
   `async`, `cancel`. Calling a `throws` function requires `throws`
   on the caller (`E-EFFECT-MISMATCH`). The `-> type` may be omitted on
@@ -357,7 +364,9 @@ calc = "registry:calc@1.0.0"         # exact registry pin (X.Y.Z only)
   online.
 - Resolution: `import "pkg/file.klang"` falls back to the pinned
   vendor dir (`.klang_pkgs/<pkg>/<version>/`) when no local file
-  matches — local files always win, no new import syntax.
+  matches — local files always win. `import "pkg/file.klang" as m`
+  takes the same fallback for the aliased file, whose own relative
+  imports resolve inside the vendor dir.
 - Integrity: SHA-256 over the archive, recorded at publish,
   re-verified on every download, pinned in `klang.lock`
   (`package <name> <version> <sha256>`). Drift on either side fails

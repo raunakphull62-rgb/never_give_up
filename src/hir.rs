@@ -487,6 +487,30 @@ impl TypedHIR {
         // enforced. Module-free programs come back identical.
         let (flat, mut diags) = crate::modules::resolve_with_file(&program, file);
         let program = flat;
+        // D1 alias scopes for the unknown-alias hint: loader-filled when
+        // imports were loaded, else derived from this file's own
+        // `import ... as ...` lines (unresolved targets, raw paths).
+        // Empty in alias-free programs (the common case, unchanged).
+        let alias_scopes: Vec<crate::ast::AliasScope> = if program.alias_scopes.is_empty() {
+            if program.aliased_imports.is_empty() {
+                Vec::new()
+            } else {
+                vec![crate::ast::AliasScope {
+                    file_idx: u32::MAX,
+                    aliases: program
+                        .aliased_imports
+                        .iter()
+                        .map(|a| crate::ast::AliasDecl {
+                            alias: a.alias.clone(),
+                            target_raw: a.path.clone(),
+                            target_canon: String::new(),
+                        })
+                        .collect(),
+                }]
+            }
+        } else {
+            program.alias_scopes.clone()
+        };
         // Flattened struct names up front (F10): enum payloads, call
         // signatures, and field types all resolve known structs nominally
         // instead of erasing them to `Unknown`. Names only — the field-type
@@ -705,7 +729,16 @@ impl TypedHIR {
             }
         }
         for f in &program.functions {
-            check_function(file, f, &sigs, &structs, &struct_fields, &enums, &mut diags);
+            check_function(
+                file,
+                f,
+                &sigs,
+                &structs,
+                &struct_fields,
+                &enums,
+                &mut diags,
+                &alias_scopes,
+            );
         }
         if diags.is_empty() {
             Ok(Self { program })
@@ -760,6 +793,7 @@ fn check_function(
     struct_fields: &HashMap<String, HashMap<String, Ty>>,
     enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
+    alias_scopes: &[crate::ast::AliasScope],
 ) {
     let mut defined: HashMap<String, Ty> = HashMap::new();
     for p in &f.params {
@@ -775,6 +809,7 @@ fn check_function(
         );
     }
     let mut cx = Ctx::default();
+    cx.alias_scopes = alias_scopes.to_vec();
     check_block(
         file,
         &f.body,
@@ -813,6 +848,10 @@ struct PendingSpawn {
 
 #[derive(Debug, Clone, Default)]
 struct Ctx {
+    /// Per-file import aliases for the unknown-alias hint (D1). Empty in
+    /// alias-free programs, so method-call checking is byte-identical
+    /// unless the file actually uses `import ... as ...`.
+    alias_scopes: Vec<crate::ast::AliasScope>,
     loop_depth: usize,
     /// `loop_depth` at each enclosing `try` entry, innermost last.
     /// `break`/`continue` inside a `try` must target a loop that also
@@ -1748,6 +1787,28 @@ fn undefined(file: &str, name: &str) -> Diagnostic {
     )
 }
 
+/// The file-alias scope enclosing `caller`, if the program uses D1 file
+/// aliases and the caller's file can be identified: the exact file index
+/// for loader-merged programs (NodeId prefix), or the single scope of a
+/// single-file program. `None` keeps method-call checking byte-identical.
+fn alias_scope_for<'a>(
+    scopes: &'a [crate::ast::AliasScope],
+    caller: &FunctionDecl,
+) -> Option<&'a crate::ast::AliasScope> {
+    if scopes.is_empty() {
+        return None;
+    }
+    if let Some(&idx) = caller.id.path.first() {
+        if let Some(s) = scopes.iter().find(|s| s.file_idx == idx) {
+            return Some(s);
+        }
+    }
+    if scopes.len() == 1 {
+        return Some(&scopes[0]);
+    }
+    None
+}
+
 fn arity_mismatch(file: &str, caller: &str, callee: &str, want: usize, got: usize) -> Diagnostic {
     Diagnostic::error(
         "E-ARITY",
@@ -2487,6 +2548,71 @@ fn check_expr(
         Expr::MethodCall {
             base, method, args, ..
         } => {
+            // D1: `n.f(...)` where `n` is bound to nothing and the file
+            // imports aliases names the available aliases, so a misspelled
+            // or missing alias is a clear error with a suggestion. (A
+            // DECLARED alias never reaches the checker — the loader
+            // rewrites `m.f` to a plain call.)
+            if let Expr::Var { name: recv, .. } = base.as_ref() {
+                if !defined.contains_key(recv) {
+                    // Borrow ends before the mutable args walk below.
+                    let suggestion: Option<String> =
+                        alias_scope_for(&cx.alias_scopes, caller)
+                            .filter(|s| !s.aliases.is_empty())
+                            .map(|s| {
+                                format!(
+                                    "available file aliases: {}",
+                                    s.aliases
+                                        .iter()
+                                        .map(|a| format!(
+                                            "`{}` (from \"{}\")",
+                                            a.alias, a.target_raw
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            });
+                    if let Some(sugg) = suggestion {
+                        let mut arg_tys = Vec::with_capacity(args.len());
+                        for a in args {
+                            arg_tys.push(check_expr(
+                                file,
+                                a,
+                                caller,
+                                sigs,
+                                structs,
+                                struct_fields,
+                                enums,
+                                diags,
+                                _depth,
+                                awaited,
+                                defined,
+                                group_stack,
+                                cx,
+                            ));
+                        }
+                        let fixes =
+                            vec![
+                                "bind the receiver with `let` first".to_string(),
+                                "check the spelling".to_string(),
+                                sugg,
+                            ];
+                        let fix_refs: Vec<&str> =
+                            fixes.iter().map(String::as_str).collect();
+                        diags.push(Diagnostic::error(
+                            "E-UNDEFINED",
+                            &format!("undefined variable `{recv}`"),
+                            file,
+                            0,
+                            0,
+                            "name is not a parameter or a prior `let` binding",
+                            &fix_refs,
+                            "names/scope",
+                        ));
+                        return check_method_call(file, &Ty::Unknown, method, &arg_tys, diags);
+                    }
+                }
+            }
             let b = check_expr(
                 file,
                 base,
@@ -2993,6 +3119,7 @@ fn check_expr(
             };
             let mut fresh_groups: Vec<Vec<PendingSpawn>> = Vec::new();
             let mut fresh_cx = Ctx::default();
+            fresh_cx.alias_scopes = cx.alias_scopes.clone();
             check_block(
                 file,
                 body,

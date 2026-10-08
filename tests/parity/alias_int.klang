@@ -1,0 +1,13 @@
+// Parity corpus (D1): two files define `compute` differently; plain
+// imports would collide (E-DUPLICATE), but aliases keep both callable.
+// Int-only, so v1 and the JIT agree exactly; v2 has no import syntax
+// (allowlisted E-PARSE-V2).
+
+import "lib/alias_a.klang" as a
+import "lib/alias_b.klang" as b
+
+fn main() -> i32 {
+    print(a.compute(20, 2))
+    print(b.compute(20, 2))
+    return 0
+}

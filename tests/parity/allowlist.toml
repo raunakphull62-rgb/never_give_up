@@ -166,6 +166,19 @@ reason = "S3: the JIT links no builtins at all, so read_line/exit (and every oth
 
 # --- S3: v2 loud rejects (grammar / builtin gaps vs v1) --------------------
 
+# D1 file aliases use `import` syntax, which the v2 grammar has no form
+# for: aliased programs are rejected at the v2 boundary even when their
+# calls are int-only (v1 and the JIT agree on those exactly).
+
+[[entry]]
+programs = ["tests/parity/alias_int.klang"]
+backend = "v2"
+outcome = "exit"
+exit = 1
+stdout = ""
+stderr_contains = "E-PARSE-V2"
+reason = "S3: v2 has no import syntax, aliased or otherwise; the same program agrees exactly on v1 and the JIT."
+
 [[entry]]
 programs = ["tests/parity/loops.klang"]
 backend = "v2"
@@ -259,7 +272,7 @@ stderr_contains = "JIT-FAIL"
 reason = "S3: string/float-heavy examples outside the int-only JIT subset; loud rejection is the contract."
 
 [[entry]]
-programs = ["examples/full.klang", "examples/eval.klang", "examples/format.klang", "examples/osio_integration.klang", "examples/try_catch.klang"]
+programs = ["examples/full.klang", "examples/eval.klang", "examples/format.klang", "examples/osio_integration.klang", "examples/try_catch.klang", "examples/aliases.klang"]
 backend = "v2"
 outcome = "exit"
 exit = 1

@@ -226,6 +226,8 @@ fn real_import_merges_files() {
         structs: [lp.structs, ap.structs].concat(),
         imports: vec![],
         selective_imports: vec![],
+        aliased_imports: [lp.aliased_imports, ap.aliased_imports].concat(),
+        alias_scopes: [lp.alias_scopes, ap.alias_scopes].concat(),
         functions: [lp.functions, ap.functions].concat(),
     };
     assert!(klang::hir::TypedHIR::check(merged.clone()).is_ok());

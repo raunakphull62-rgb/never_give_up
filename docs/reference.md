@@ -325,6 +325,21 @@ fn main() -> i32 {
   across the merge are an error). Only plain relative paths are
   accepted — absolute paths, `..` escapes, `~`, and NUL bytes are
   rejected without touching the filesystem.
+- File aliases: `import "math/lib.klang" as m` loads the file without
+  merging anything flat; its top-level functions become callable as
+  `m.max(1, 2)`, resolved at load time to plain calls (arity, types,
+  and effects check exactly as for flat calls). Two files defining the
+  same name stay usable side by side (`m.max` vs `o.max`); the same
+  file under two aliases shares one copy. An unknown item is
+  `E-UNDEFINED` naming what the file defines; re-aliasing one name to
+  two files, or binding the alias name with `let`/parameters, is
+  `E-DUPLICATE`; an unknown alias is `E-UNDEFINED` listing the file's
+  aliases. Aliases are file-local (they never leak into the imported
+  file or back out), `as` is contextual (a function literally named
+  `as` still parses), and selective imports cannot take an alias
+  (`E-PARSE`). Method calls on variables (`s.len()`) and struct field
+  access (`p.m`) are untouched — only a bare `m.` receiver spelling
+  the alias resolves as one.
 
 ## 9. Effects and structured concurrency
 
