@@ -31,7 +31,16 @@ fn hello_prog(dir: &std::path::Path) -> String {
 }
 
 fn cli_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("klang-quiet-gates");
+    // Unique dir per call: tests in this file run in parallel, so the old
+    // shared dir + shared `hello.klang` filename raced (one test truncated
+    // the file while another ran it -> exit 1). The pid isolates parallel
+    // test binaries; the counter isolates threads within one binary.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+        "klang-quiet-gates-{}-{n}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
