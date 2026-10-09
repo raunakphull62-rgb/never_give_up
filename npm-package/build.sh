@@ -15,7 +15,12 @@
 #
 # Notes:
 # - Linux uses *-unknown-linux-musl so the binary is statically linked
-#   (required for Alpine / Termux).
+#   (required for Alpine / ordinary ARM64 Linux).
+# - Android uses aarch64-linux-android (bionic libc) built with the Android
+#   NDK (API 24+): the old musl static binary could not resolve DNS on
+#   Android (no /etc/resolv.conf), so Termux needs this real bionic build.
+#   Set ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) to an NDK r27 install; the
+#   linker is $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang.
 # - macOS/Windows cross builds from Linux need the right linker:
 #     * darwin targets need osxcross (APPLE targets cannot link otherwise);
 #     * the Windows target uses -gnu (mingw-w64) so it links without MSVC.
@@ -48,7 +53,7 @@ CRATE_NAME="klang"
 declare -A TARGETS=(
   ["linux-x64"]="x86_64-unknown-linux-musl;klang-cli-linux-x64;klang;need musl-tools (sudo apt install musl-tools)"
   ["linux-arm64"]="aarch64-unknown-linux-musl;klang-cli-linux-arm64;klang;need musl-tools + aarch64 musl cross gcc"
-  ["android-arm64"]="aarch64-unknown-linux-musl;klang-cli-android-arm64;klang;same static binary as linux-arm64 (Termux reports android/arm64)"
+  ["android-arm64"]="aarch64-linux-android;klang-cli-android-arm64;klang;need Android NDK r27c, API 24+ (ANDROID_NDK_HOME set; linker aarch64-linux-android24-clang)"
   ["darwin-x64"]="x86_64-apple-darwin;klang-cli-darwin-x64;klang;need osxcross for darwin linking from Linux"
   ["darwin-arm64"]="aarch64-apple-darwin;klang-cli-darwin-arm64;klang;need osxcross for darwin linking from Linux"
   ["windows-x64"]="x86_64-pc-windows-gnu;klang-cli-windows-x64;klang.exe;need mingw-w64 (sudo apt install mingw-w64)"
@@ -70,6 +75,23 @@ build_one() {
 
   echo "==> [$platform] rustup target add $triple"
   rustup target add "$triple"
+
+  # Android (bionic) needs the NDK LLVM clang wrapper as linker/CC and
+  # llvm-ar as archiver (API 24+). Mirrors the release workflow's
+  # "Build (Android NDK, bionic)" step.
+  if [ "$triple" = "aarch64-linux-android" ]; then
+    local ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+    if [ -z "$ndk" ]; then
+      echo "error: ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) must point at an Android NDK (r27c, API 24+)." >&2
+      echo "hint: $hint" >&2
+      exit 1
+    fi
+    local api="${ANDROID_API:-24}"
+    export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${api}-clang"
+    export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+    export AR_aarch64_linux_android="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+    echo "    (NDK=$ndk API=$api LINKER=$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER)"
+  fi
 
   echo "==> [$platform] cargo build --release --target $triple"
   echo "    (CARGO_TARGET_DIR=$CARGO_TARGET_DIR)"

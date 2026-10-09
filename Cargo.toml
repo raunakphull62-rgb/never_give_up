@@ -10,7 +10,14 @@ cranelift-module = "0.119"
 cranelift-frontend = "0.119"
 salsa = "0.28"
 regex = "1"
-ureq = "3.4.2"
+# Sync HTTP client. The feature list is explicit (not just defaults) so the
+# TLS root store stays a bundled Mozilla bundle via webpki-roots on every
+# target. Android/Termux has no system CA path a bionic binary can rely on,
+# so rustls MUST keep using RootCerts::WebPki (the ureq default); do NOT
+# switch to platform-verifier or native-tls. The three agent() constructors
+# (src/stdlib/http.rs, src/registry.rs, src/registry_storage.rs) intentionally
+# use the default Config (rustls + WebPki bundled roots, no OS store).
+ureq = { version = "3.4.2", default-features = false, features = ["rustls", "gzip", "rustls-webpki-roots"] }
 # Registry package integrity (SHA-256 of package archives). Pure Rust,
 # no system dependencies — same offline-install story as the rest.
 sha2 = "0.10"

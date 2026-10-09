@@ -2,9 +2,11 @@ name: Release Binaries
 
 # Builds Klang for:
 #   - Linux x86_64 (standard Linux desktops/servers/PCs)
-#   - Linux aarch64-musl (ARM Linux PCs/Raspberry Pi, AND doubles as the
-#     Termux/Android build — a static musl binary runs fine under Termux's
-#     proot environment, same trick ripgrep/fd/starship use; no NDK needed)
+#   - Linux aarch64 (musl static; ordinary ARM64 Linux PCs/Raspberry Pi)
+#   - Android aarch64 (bionic libc via the Android NDK, API 24+; Termux).
+#     The old static musl binary could not resolve DNS on Android (no
+#     /etc/resolv.conf), so Termux needs this real bionic build; the musl
+#     build stays as a SEPARATE asset for ordinary ARM64 Linux.
 #   - Windows x86_64
 #   - macOS aarch64 (Apple Silicon M1-M4)
 #   - macOS x86_64 (Intel Mac, cross-compiled on the Apple Silicon runner —
@@ -40,26 +42,39 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             use_cross: false
+            use_ndk: false
 
-          - name: linux-aarch64-musl-termux
+          - name: linux-arm64
             os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             use_cross: true
+            use_ndk: false
+
+          - name: android-arm64
+            os: ubuntu-latest
+            target: aarch64-linux-android
+            use_cross: false
+            use_ndk: true
+            android_api: 24
+            ndk_version: r27c
 
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             use_cross: false
+            use_ndk: false
 
           - name: macos-aarch64-apple-silicon
             os: macos-latest
             target: aarch64-apple-darwin
             use_cross: false
+            use_ndk: false
 
           - name: macos-x86_64-intel
             os: macos-latest
             target: x86_64-apple-darwin
             use_cross: false
+            use_ndk: false
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -74,13 +89,55 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      # Android NDK (pinned version). Prefers the NDK preinstalled on the
+      # ubuntu runner via ANDROID_NDK_HOME; falls back to nttld/setup-ndk
+      # pinned to matrix.ndk_version. Either path exports the same
+      # ANDROID_NDK_HOME for the build step below.
+      - name: Setup Android NDK
+        id: setup-ndk
+        if: matrix.use_ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ matrix.ndk_version }}
+          add-to-path: false
+
       - name: Build (native)
-        if: ${{ !matrix.use_cross }}
+        if: ${{ !matrix.use_cross && !matrix.use_ndk }}
         run: cargo build --release --target ${{ matrix.target }} --bin klang
 
       - name: Build (cross, uses Docker under the hood)
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }} --bin klang
+
+      # Real Android (bionic) build. API level comes from matrix.android_api
+      # (24+). The NDK LLVM clang wrapper is the linker AND the C compiler;
+      # llvm-ar is the archiver. ANDROID_NDK_HOME is preinstalled on ubuntu
+      # runners; setup-ndk above guarantees it even if the preinstall goes
+      # away (its outputs.ndk-path wins when set).
+      - name: Build (Android NDK, bionic)
+        if: matrix.use_ndk
+        run: |
+          set -euo pipefail
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+          if [ -z "${NDK:-}" ]; then
+            NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          fi
+          if [ -z "${NDK:-}" ]; then
+            echo "Android NDK not found (set ANDROID_NDK_HOME)" >&2
+            exit 1
+          fi
+          API="${{ matrix.android_api }}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          LINKER="$TOOLCHAIN/aarch64-linux-android${API}-clang"
+          if [ ! -x "$LINKER" ]; then
+            echo "NDK linker missing: $LINKER" >&2
+            exit 1
+          fi
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LINKER"
+          export CC_aarch64_linux_android="$LINKER"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          echo "NDK=$NDK API=$API LINKER=$LINKER"
+          cargo build --release --target ${{ matrix.target }} --bin klang
 
       # Package the binary. Windows produces klang.exe; everything else
       # produces a plain `klang` executable.
@@ -119,10 +176,22 @@ jobs:
         with:
           path: artifacts
 
+      # SHA256SUMS covers every release archive (linux-x86_64, linux-arm64,
+      # android-arm64, macos x2, windows). install.sh verifies against it
+      # when sha256sum is available.
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum */klang-*.tar.gz */klang-*.zip > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*/*
+          files: |
+            artifacts/*/*
+            artifacts/SHA256SUMS
           generate_release_notes: true
 
   # Publishes the prebuilt npm packages (esbuild/biome pattern: no install
@@ -207,10 +276,11 @@ jobs:
           }
 
           install_unix "klang-linux-x86_64.tar.gz" "klang-cli-linux-x64"
-          install_unix "klang-linux-aarch64-musl-termux.tar.gz" "klang-cli-linux-arm64"
-          # Termux/Android gets the same static musl binary; Node on Termux
-          # reports process.platform === "android".
-          install_unix "klang-linux-aarch64-musl-termux.tar.gz" "klang-cli-android-arm64"
+          # Ordinary ARM64 Linux gets the musl static build; Termux/Android
+          # gets the real bionic build (Node on Termux reports
+          # process.platform === "android", mapped by bin/klang.js).
+          install_unix "klang-linux-arm64.tar.gz" "klang-cli-linux-arm64"
+          install_unix "klang-android-arm64.tar.gz" "klang-cli-android-arm64"
           install_unix "klang-macos-aarch64-apple-silicon.tar.gz" "klang-cli-darwin-arm64"
           install_unix "klang-macos-x86_64-intel.tar.gz" "klang-cli-darwin-x64"
           install_win "klang-windows-x86_64.zip" "klang-cli-windows-x64"
