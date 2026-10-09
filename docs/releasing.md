@@ -9,10 +9,15 @@ see the README Quick start and `docs/install.md`.
 1. Push a version tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
    (or trigger the workflow manually via `workflow_dispatch` for a dry build).
 2. The `build` job (`.github/workflows/release.yml`) compiles `klang` for
-   five targets: Linux x86_64, Linux aarch64-musl (also used for Termux),
-   Windows x86_64, macOS Apple Silicon, and macOS Intel (cross-compiled on
-   the Apple Silicon runner).
-3. The `release` job attaches those archives to a GitHub Release.
+   six targets: Linux x86_64, Linux aarch64 (musl static, ordinary ARM64
+   Linux), Android aarch64 (bionic via the Android NDK, API 24+, for
+   Termux), Windows x86_64, macOS Apple Silicon, and macOS Intel
+   (cross-compiled on the Apple Silicon runner).
+3. The `release` job attaches those archives plus a generated `SHA256SUMS`
+   file to a GitHub Release. `install.sh` (repo root) downloads the right
+   asset per platform — Termux/Android detected via `$PREFIX` containing
+   `com.termux` or `uname -o` reporting `Android` — and verifies against
+   `SHA256SUMS` when `sha256sum` is available.
 4. The `publish-npm` job downloads the build artifacts, copies each binary
    into its npm platform package, stamps all seven package versions from
    the git tag (`vX.Y.Z` → `X.Y.Z`), and runs `npm publish` for the six
@@ -28,14 +33,33 @@ see the README Quick start and `docs/install.md`.
   `klang-cli-darwin-x64`, `klang-cli-darwin-arm64`, `klang-cli-windows-x64` —
   one prebuilt binary each, with `os`/`cpu` fields so npm installs only the
   matching one. Termux (Node reports `android`/`arm64`) resolves to
-  `klang-cli-android-arm64`, which ships the same static musl binary as
-  `klang-cli-linux-arm64`.
+  `klang-cli-android-arm64`, which ships the real `aarch64-linux-android`
+  (bionic, NDK, API 24+) build — never the musl binary, which cannot resolve
+  DNS on Android. `klang-cli-linux-arm64` ships the musl static build for
+  ordinary ARM64 Linux.
 - `tests/` — offline launcher tests (mapping table, fake-package spawn and
   exit-code forwarding, error text). Run with plain `node`, no dependencies:
   `node npm-package/tests/test-launcher-mapping.js` and
   `node npm-package/tests/test-launcher-spawn.js`.
 - `build.sh` — local cross-build helper that fills the same `bin/`
   directories; only CI artifacts are published, never local builds.
+  `android-arm64` needs an NDK (r27c, API 24+) via `ANDROID_NDK_HOME`.
+
+## Android build (NDK)
+
+The `android-arm64` matrix entry targets `aarch64-linux-android` on the
+Ubuntu runner. The workflow installs a pinned NDK (`nttld/setup-ndk@v1`,
+`ndk-version: r27c`; the preinstalled `ANDROID_NDK_HOME` is used when the
+step output is empty) and builds with the NDK LLVM clang wrapper as both
+linker and C compiler at API level 24:
+
+- `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=.../aarch64-linux-android24-clang`
+- `CC_aarch64_linux_android` (same clang wrapper)
+- `AR_aarch64_linux_android=.../llvm-ar`
+
+TLS needs no extra work on Android: `Cargo.toml` pins ureq to
+`rustls` + `rustls-webpki-roots`, so HTTPS uses the bundled Mozilla roots
+(`RootCerts::WebPki`) with no system CA path or config.
 
 Binaries are **not** committed to git (`npm-package/*/bin/klang*` is
 gitignored); the release workflow stages them from build artifacts at

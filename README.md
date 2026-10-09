@@ -41,7 +41,7 @@ export PATH="$HOME/.local/bin:$PATH"
 klang --version
 ```
 
-To keep `klang` on your `PATH` in future terminal sessions, add `$HOME/.local/bin` to your shell's startup file. The latest release also provides [macOS Apple Silicon, Windows x86_64, and Linux ARM64/Termux packages][6]. Download the asset matching your operating system and processor from the [releases page][7].
+To keep `klang` on your `PATH` in future terminal sessions, add `$HOME/.local/bin` to your shell's startup file. The latest release also provides [macOS Apple Silicon, Windows x86_64, Linux ARM64, and Android/Termux (bionic) packages][6]. Download the asset matching your operating system and processor from the [releases page][7].
 
 Create `hello.klang`:
 
