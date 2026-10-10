@@ -485,7 +485,7 @@ fn run_fmt_mode(rest: &[String]) {
         let pb = std::path::Path::new(p.as_str());
         if pb.is_dir() {
             saw_dir = true;
-            collect_klang_files(pb, &mut files);
+            collect_klang_files(pb, &mut files, 0);
         } else {
             files.push(p.to_string());
         }
@@ -549,7 +549,12 @@ fn run_fmt_mode(rest: &[String]) {
 
 /// Recursively collect `*.klang` files under `dir` (sorted by the caller).
 /// `.git` trees are skipped so `fmt <repo>` never touches version control.
-fn collect_klang_files(dir: &std::path::Path, out: &mut Vec<String>) {
+/// `depth` bounds recursion so a symlink cycle ends loudly at the limit
+/// instead of overflowing the native stack.
+fn collect_klang_files(dir: &std::path::Path, out: &mut Vec<String>, depth: usize) {
+    if depth > 64 {
+        return;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -568,7 +573,7 @@ fn collect_klang_files(dir: &std::path::Path, out: &mut Vec<String>) {
     }
     subs.sort();
     for s in subs {
-        collect_klang_files(&s, out);
+        collect_klang_files(&s, out, depth + 1);
     }
 }
 
