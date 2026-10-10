@@ -578,7 +578,20 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                             start,
                             end: j,
                         }),
-                        Err(_) => return Err(err(start, "integer literal out of range")),
+                        Err(_) => match source[i..j].parse::<u64>() {
+                            // D3: exactly 2^63 is the magnitude of
+                            // `-9223372036854775808` (i64::MIN). It lexes
+                            // as an i64::MIN placeholder: the checker
+                            // accepts it only under unary minus and
+                            // rejects the bare form with E-TYPE.
+                            // Anything larger stays E-PARSE.
+                            Ok(mag) if mag == 1u64 << 63 => toks.push(Token {
+                                kind: TokenKind::IntLit(i64::MIN),
+                                start,
+                                end: j,
+                            }),
+                            _ => return Err(err(start, "integer literal out of range")),
+                        },
                     }
                     i = j;
                 }

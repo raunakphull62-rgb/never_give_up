@@ -1,9 +1,12 @@
-//! Phase 1d — `W-TYPE-NARROW` gates.
+//! Phase 1d — `W-TYPE-NARROW` gates, retired by D3 (Wave1 S4).
 //!
-//! `i64`/`u32`/`u64` annotations are accepted but enforce the `i32` range,
-//! and `u8` is an unchecked `Unknown`. Behavior is unchanged (everything
-//! still compiles and runs as before); the compiler now says so out loud
-//! with a `warning`-severity diagnostic that never fails `check`.
+//! D3 decision: `Int` is 64-bit with checked arithmetic and every integer
+//! spelling (`i32`, `i64`, `u32`, `u64`, `u8`) is an honest checked type —
+//! the narrower spellings enforce their range at value boundaries
+//! (parameter passing, return, assignment) with `E-RUNTIME`. There is
+//! nothing left to warn about that is now correct, so
+//! `narrow_type_warnings` always returns empty. These gates pin that
+//! retirement: no annotation (and no stdlib package) warns anymore.
 
 use klang::parser::Parser;
 
@@ -18,40 +21,22 @@ fn lint(src: &str) -> Vec<klang::diagnostics::Diagnostic> {
     klang::hir::narrow_type_warnings(&prog, "probe.klang")
 }
 
-fn codes(ds: &[klang::diagnostics::Diagnostic]) -> Vec<String> {
-    ds.iter().map(|d| d.code.clone()).collect()
-}
-
 #[test]
-fn narrow_aliases_warn_with_enforced_range() {
-    // One warning per narrowing annotation, naming the `i32` range and a fix.
+fn narrow_aliases_no_longer_warn() {
+    // D3: `i64`/`u32`/`u64` are honest checked spellings now — silent.
+    // (Was: one `W-TYPE-NARROW` warning per annotation.)
     let ds = lint("fn f(x: i64, y: u32) -> u64 { return 1 } fn main() -> i32 { return 0 }");
-    assert_eq!(ds.len(), 3, "{}", dump(&ds));
-    for d in &ds {
-        assert_eq!(d.code, "W-TYPE-NARROW", "{}", d.to_json());
-        assert_eq!(d.severity, "warning", "{}", d.to_json());
-        assert!(d.message.contains("Klang enforces the `i32` range"), "{}", d.to_json());
-        assert!(
-            d.fixes.iter().any(|f| f.label.contains("use `i32`")),
-            "{}",
-            d.to_json()
-        );
-    }
-    assert!(ds[0].message.contains("parameter `x`"), "{}", ds[0].to_json());
-    assert!(ds[1].message.contains("parameter `y`"), "{}", ds[1].to_json());
-    assert!(ds[2].message.contains("return type"), "{}", ds[2].to_json());
-    println!("narrow aliases OK");
+    assert!(ds.is_empty(), "D3 retired the warning: {}", dump(&ds));
+    println!("narrow aliases silent OK");
 }
 
 #[test]
-fn unchecked_u8_warns_as_dynamic() {
+fn u8_no_longer_warns_as_dynamic() {
+    // D3: `u8` is a checked type (0..255 at boundaries) — silent.
+    // (Was: one `W-TYPE-NARROW` "stays dynamic" warning.)
     let ds = lint("fn f(x: u8) -> i32 { return 1 } fn main() -> i32 { return 0 }");
-    assert_eq!(ds.len(), 1, "{}", dump(&ds));
-    assert_eq!(ds[0].code, "W-TYPE-NARROW", "{}", ds[0].to_json());
-    assert_eq!(ds[0].severity, "warning", "{}", ds[0].to_json());
-    assert!(ds[0].message.contains("`u8`"), "{}", ds[0].to_json());
-    assert!(ds[0].message.contains("stays dynamic"), "{}", ds[0].to_json());
-    println!("u8 unchecked OK");
+    assert!(ds.is_empty(), "D3 retired the warning: {}", dump(&ds));
+    println!("u8 checked OK");
 }
 
 #[test]
@@ -73,26 +58,19 @@ fn honest_annotations_stay_silent() {
 }
 
 #[test]
-fn narrow_warns_in_fields_variants_and_closures() {
+fn no_warnings_in_fields_variants_and_closures() {
     // Struct fields, enum payloads, closure literals, and closure-type
-    // spellings are annotation positions too.
+    // spellings are annotation positions too — all silent under D3.
+    // (Was: 4 warnings for the first program, 1 for the closure-type one.)
     let ds = lint(
         "struct S { n: i64 } enum E { V(x: u8) } \
          fn main() -> i32 { let f = fn(x: i64) -> i64 { return x } return f(1) }",
     );
-    assert_eq!(ds.len(), 4, "{}", dump(&ds));
-    assert!(ds.iter().any(|d| d.message.contains("field `n` of struct `S`")), "{}", dump(&ds));
-    assert!(
-        ds.iter().any(|d| d.message.contains("variant `V` in enum `E`")),
-        "{}",
-        dump(&ds)
-    );
-    assert!(ds.iter().any(|d| d.message.contains("closure")), "{}", dump(&ds));
+    assert!(ds.is_empty(), "D3 retired the warnings: {}", dump(&ds));
     // `fn(i64) -> i32` written as a parameter type.
     let ds = lint("fn apply(f: fn(i64) -> i32, x: i32) -> i32 { return f(x) } fn main() -> i32 { return 0 }");
-    assert_eq!(ds.len(), 1, "{}", dump(&ds));
-    assert!(ds[0].message.contains("`i64`"), "{}", ds[0].to_json());
-    // Generic arguments narrow at instantiation (`Opt<i64>` holds `i32`s).
+    assert!(ds.is_empty(), "D3 retired the warning: {}", dump(&ds));
+    // Generic arguments never warned without a narrow spelling.
     let ds = lint("enum Opt<T> { Some(x: T), None } fn main() -> i32 { let o = Opt::Some(1) return 1 }");
     assert!(ds.is_empty(), "no warning without a narrow spelling: {}", dump(&ds));
     println!("fields/variants/closures OK");
@@ -100,9 +78,10 @@ fn narrow_warns_in_fields_variants_and_closures() {
 
 #[test]
 fn no_stdlib_package_triggers_narrow() {
-    // Phase 1d acceptance: walk every `.klang` file under the 26 published
-    // packages and prove none of them would warn. (Published versions are
-    // immutable, so a warning there would be unactionable noise.)
+    // Phase 1d acceptance, kept under D3: walk every `.klang` file under
+    // the 26 published packages and prove none of them would warn.
+    // (Published versions are immutable, so a warning there would be
+    // unactionable noise — and now there are no warnings at all.)
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib-packages");
     let mut pkgs = std::collections::HashSet::new();
     let mut files = 0;
@@ -145,10 +124,9 @@ fn dump(ds: &[klang::diagnostics::Diagnostic]) -> String {
 }
 
 #[test]
-fn narrow_codes_stay_warnings() {
-    // Every diagnostic this lint can ever emit is a warning (future-proof
-    // against new spellings sneaking in as errors).
-    assert!(codes(&lint("fn f(x: i64) -> i64 { return x } fn main() -> i32 { return 0 }"))
-        .iter()
-        .all(|c| c == "W-TYPE-NARROW"));
+fn narrow_lint_emits_nothing() {
+    // The retired lint never emits any diagnostic for any spelling
+    // (future-proof against new spellings sneaking back in as warnings).
+    assert!(lint("fn f(x: i64) -> i64 { return x } fn main() -> i32 { return 0 }").is_empty());
+    assert!(lint("fn f(x: u8) -> u8 { return x } fn main() -> i32 { return 0 }").is_empty());
 }

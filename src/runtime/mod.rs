@@ -209,28 +209,24 @@ fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Integer overflow: an `i32` arithmetic result left the
-/// `i32::MIN..=i32::MAX` range. Loud error, never a silent wrap or an
+/// Integer overflow: a 64-bit arithmetic result left the
+/// `i64::MIN..=i64::MAX` range. Loud error, never a silent wrap or an
 /// out-of-range value (cf. the checker, which already rejects
-/// out-of-range literals with `E-TYPE`).
+/// out-of-range literals with `E-TYPE`). Narrower annotations (`i32`,
+/// `u32`, `u64`, `u8`) enforce their own ranges at value boundaries
+/// (parameter passing, return, assignment); this error is only for
+/// genuinely unrepresentable 64-bit results.
 fn overflow_err(op: &str) -> Diagnostic {
     Diagnostic::error(
         "E-OVERFLOW",
-        &format!("integer overflow in `{op}`: result out of i32 range"),
+        &format!("integer overflow in `{op}`: result out of i64 range"),
         "runtime",
         0,
         0,
-        "i32 arithmetic never wraps: out-of-range results are errors",
+        "i64 arithmetic never wraps: out-of-range results are errors",
         &["use smaller operands", "check bounds before operating"],
         "arithmetic/overflow",
     )
-}
-
-/// Convert a runtime `Int` operand to `i32`, failing loudly when the
-/// stored `i64` is already outside `i32` range (e.g. from `int()` on a
-/// huge string). Keeps every arithmetic site in one enforcement point.
-fn to_i32_checked(v: i64, op: &str) -> Result<i32, Diagnostic> {
-    i32::try_from(v).map_err(|_| overflow_err(op))
 }
 
 /// Concurrency-specific runtime failure (task panics, task limits): the
@@ -812,10 +808,11 @@ fn run_instrs(
                     (a, Value::Str(b)) => Value::Str(format!("{}{b}", a.render())),
                     _ if l.is_float() || r.is_float() => Value::Float(l.as_float() + r.as_float()),
                     _ => {
-                        let x = to_i32_checked(l.as_int(), "add")?;
-                        let y = to_i32_checked(r.as_int(), "add")?;
-                        let z = x.checked_add(y).ok_or_else(|| overflow_err("add"))?;
-                        Value::Int(i64::from(z))
+                        let z = l
+                            .as_int()
+                            .checked_add(r.as_int())
+                            .ok_or_else(|| overflow_err("add"))?;
+                        Value::Int(z)
                     }
                 };
                 values.insert(into.clone(), v.clone());
@@ -845,7 +842,7 @@ fn run_instrs(
                     }
                     _ => {}
                 }
-                // `i32::MIN / -1` overflows `i32` (checked_div is None):
+                // `i64::MIN / -1` overflows `i64` (checked_div is None):
                 // loud `E-OVERFLOW`, never a silent out-of-range value.
                 let v = num2_checked("div", l, r, |a, b| a.checked_div(b), |a, b| a / b)?;
                 values.insert(into.clone(), v.clone());
@@ -862,10 +859,10 @@ fn run_instrs(
                 if r == 0 {
                     return Err(runtime_err("modulo by zero"));
                 }
-                let x = to_i32_checked(l, "mod")?;
-                let y = to_i32_checked(r, "mod")?;
-                let z = x.checked_rem(y).ok_or_else(|| overflow_err("mod"))?;
-                let v = Value::Int(i64::from(z));
+                let z = l
+                    .checked_rem(r)
+                    .ok_or_else(|| overflow_err("mod"))?;
+                let v = Value::Int(z);
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
@@ -939,9 +936,11 @@ fn run_instrs(
                 let out = match v {
                     Value::Float(x) => Value::Float(-x),
                     _ => {
-                        let x = to_i32_checked(v.as_int(), "neg")?;
-                        let z = x.checked_neg().ok_or_else(|| overflow_err("neg"))?;
-                        Value::Int(i64::from(z))
+                        let z = v
+                            .as_int()
+                            .checked_neg()
+                            .ok_or_else(|| overflow_err("neg"))?;
+                        Value::Int(z)
                     }
                 };
                 values.insert(into.clone(), out.clone());
@@ -2403,25 +2402,20 @@ fn num2(
     }
 }
 
-/// Checked integer arithmetic over `i32` semantics: both `i64` operands
-/// must already fit `i32`, and the `i32::checked_*` result must too.
-/// Float-involved pairs stay unchecked `f64` math (no `i32` range applies).
+/// Checked integer arithmetic over `i64` semantics: the `i64::checked_*`
+/// result must fit. Float-involved pairs stay unchecked `f64` math.
 fn num2_checked(
     op: &str,
     l: Num,
     r: Num,
-    int_op: impl Fn(i32, i32) -> Option<i32>,
+    int_op: impl Fn(i64, i64) -> Option<i64>,
     float_op: impl Fn(f64, f64) -> f64,
 ) -> Result<Value, Diagnostic> {
     match (l, r) {
         (Num::Float(a), Num::Float(b)) => Ok(Value::Float(float_op(a, b))),
-        (Num::Int(a), Num::Int(b)) => {
-            let x = to_i32_checked(a, op)?;
-            let y = to_i32_checked(b, op)?;
-            int_op(x, y)
-                .map(|v| Value::Int(i64::from(v)))
-                .ok_or_else(|| overflow_err(op))
-        }
+        (Num::Int(a), Num::Int(b)) => int_op(a, b)
+            .map(Value::Int)
+            .ok_or_else(|| overflow_err(op)),
         (a, b) => {
             let (x, y) = (
                 match a {

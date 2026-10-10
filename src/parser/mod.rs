@@ -546,17 +546,28 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
                             start,
                             end: j,
                         }),
-                        Err(_) => {
-                            // Overflow beyond i64 (and thus i32): do not
-                            // silently become 0. Surface as invalid so the
-                            // parser reports instead of evaluating to 0.
-                            lex_errs.push((start, j, "integer literal out of range".to_string()));
-                            toks.push(Token {
-                                kind: TokenKind::Invalid,
+                        Err(_) => match source[i..j].parse::<u64>() {
+                            // D3: exactly 2^63 is the magnitude of
+                            // `-9223372036854775808` (i64::MIN); see the
+                            // twin branch in `lexer/resonance.rs`.
+                            Ok(mag) if mag == 1u64 << 63 => toks.push(Token {
+                                kind: TokenKind::IntLit(i64::MIN),
                                 start,
                                 end: j,
-                            });
-                        }
+                            }),
+                            _ => {
+                                // Overflow beyond i64 (and thus every int
+                                // type): do not silently become 0. Surface
+                                // as invalid so the parser reports instead
+                                // of evaluating to 0.
+                                lex_errs.push((start, j, "integer literal out of range".to_string()));
+                                toks.push(Token {
+                                    kind: TokenKind::Invalid,
+                                    start,
+                                    end: j,
+                                });
+                            }
+                        },
                     }
                     i = j;
                 }

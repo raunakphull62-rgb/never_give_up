@@ -34,25 +34,19 @@ fn rt_err(msg: &str) -> Diagnostic {
 fn overflow_err(op: &str) -> Diagnostic {
     Diagnostic::error(
         "E-OVERFLOW",
-        &format!("integer overflow in `{op}`: result out of i32 range"),
+        &format!("integer overflow in `{op}`: result out of i64 range"),
         "input.v2",
         0,
         0,
-        "i32 arithmetic never wraps: out-of-range results are errors",
+        "i64 arithmetic never wraps: out-of-range results are errors",
         &["use smaller operands", "check bounds before operating"],
         "arithmetic/overflow",
     )
 }
 
-fn to_i32_checked(v: i64, op: &str) -> Result<i32, Diagnostic> {
-    i32::try_from(v).map_err(|_| overflow_err(op))
-}
-
-fn checked_int_op(op: &str, a: i64, b: i64, f: impl Fn(i32, i32) -> Option<i32>) -> Result<Value, Diagnostic> {
-    let x = to_i32_checked(a, op)?;
-    let y = to_i32_checked(b, op)?;
-    f(x, y)
-        .map(|v| Value::Int(i64::from(v)))
+fn checked_int_op(op: &str, a: i64, b: i64, f: impl Fn(i64, i64) -> Option<i64>) -> Result<Value, Diagnostic> {
+    f(a, b)
+        .map(Value::Int)
         .ok_or_else(|| overflow_err(op))
 }
 
