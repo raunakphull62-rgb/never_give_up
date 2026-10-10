@@ -615,9 +615,9 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
 }
 
 /// `klang_fmt`: canonical source out, or the parse diagnostic.
+/// Comment-preserving like the CLI (`fmt_source`): comments round-trip.
 pub fn tool_fmt(source: &str) -> (bool, Json) {
-    let mut p = Parser::new(source);
-    match p.parse_program() {
+    match crate::fmt::fmt_source(source, "input.warden") {
         Err(d) => (
             true,
             Json::Obj(vec![
@@ -628,14 +628,11 @@ pub fn tool_fmt(source: &str) -> (bool, Json) {
                 ),
             ]),
         ),
-        Ok(prog) => (
+        Ok(formatted) => (
             false,
             Json::Obj(vec![
                 ("ok".to_string(), Json::Bool(true)),
-                (
-                    "formatted".to_string(),
-                    Json::Str(crate::fmt::fmt_program(&prog)),
-                ),
+                ("formatted".to_string(), Json::Str(formatted)),
             ]),
         ),
     }

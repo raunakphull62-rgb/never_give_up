@@ -441,6 +441,137 @@ fn main() -> i32 async {
     println!("all klang full-language stages hold");
 }
 
+/// `klang fmt [--write] [--check] <file|dir> [paths...]` (S3a).
+///
+/// Canonical style (see `docs/progress/S3-notes.md`): 4-space indent, one
+/// statement per line, binary ops fully parenthesized, comments preserved
+/// (standalone keep their anchor, trailing move to end of line with one
+/// space), exactly one trailing newline. `fmt(fmt(x)) == fmt(x)`.
+///
+/// - No flag, one file: print the formatted source to stdout (backcompat).
+/// - `--write`: rewrite every selected file that would change in place,
+///   printing `fmt: wrote <path>` per rewritten file.
+/// - `--check`: print `fmt: would change <path>` per file that would
+///   change and exit 1 when any would (0 + `fmt: clean` otherwise).
+///   Nothing is written in `--check` mode.
+/// - Directories expand recursively to `*.klang` files in sorted order
+///   (`.git` skipped); directories require `--write` or `--check`.
+/// - Bad syntax: `parse: FAIL` + the diagnostic JSON on stdout, exit 1,
+///   file untouched (nothing is ever written before a successful format).
+/// Exit codes: 0 ok/clean, 1 would-change/parse/IO error, 2 usage error.
+fn run_fmt_mode(rest: &[String]) {
+    let write = rest.iter().any(|a| a == "--write");
+    let check = rest.iter().any(|a| a == "--check");
+    if write && check {
+        eprintln!("usage: fmt [--write | --check] <file|dir> [paths...]");
+        std::process::exit(2);
+    }
+    let paths: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
+    // Unknown flags (anything `--...` besides the two modes) are usage errors.
+    for a in rest.iter().filter(|a| a.starts_with("--")) {
+        if a.as_str() != "--write" && a.as_str() != "--check" {
+            eprintln!("unknown option {a}");
+            eprintln!("usage: fmt [--write | --check] <file|dir> [paths...]");
+            std::process::exit(2);
+        }
+    }
+    if paths.is_empty() {
+        eprintln!("usage: fmt [--write | --check] <file|dir> [paths...]");
+        std::process::exit(2);
+    }
+    let mut files: Vec<String> = Vec::new();
+    let mut saw_dir = false;
+    for p in &paths {
+        let pb = std::path::Path::new(p.as_str());
+        if pb.is_dir() {
+            saw_dir = true;
+            collect_klang_files(pb, &mut files);
+        } else {
+            files.push(p.to_string());
+        }
+    }
+    files.sort();
+    if saw_dir && !write && !check {
+        eprintln!("fmt: directories need --write or --check (plain fmt prints one file)");
+        eprintln!("usage: fmt [--write | --check] <file|dir> [paths...]");
+        std::process::exit(2);
+    }
+    if files.len() != 1 && !write && !check {
+        eprintln!("usage: fmt [--write | --check] <file|dir> [paths...]");
+        std::process::exit(2);
+    }
+    let mut would_change: Vec<String> = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("cannot read {path}: {e}");
+            std::process::exit(1);
+        });
+        let out = match klang::fmt::fmt_source(&src, path) {
+            Ok(out) => out,
+            Err(d) => {
+                println!("parse: FAIL");
+                println!("{}", d.to_json());
+                std::process::exit(1);
+            }
+        };
+        if out == src {
+            // Already canonical: nothing to write or report per file (the
+            // `--check` summary below still says `clean`). Plain `fmt`
+            // still prints (backcompat: output is the formatted source).
+            if !check && !write {
+                print!("{out}");
+            }
+            continue;
+        }
+        if check {
+            would_change.push(path.clone());
+        } else if write {
+            std::fs::write(path, &out).unwrap_or_else(|e| {
+                eprintln!("cannot write {path}: {e}");
+                std::process::exit(1);
+            });
+            println!("fmt: wrote {path}");
+        } else {
+            print!("{out}");
+        }
+    }
+    if check {
+        if would_change.is_empty() {
+            println!("fmt: clean");
+        } else {
+            for p in &would_change {
+                println!("fmt: would change {p}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Recursively collect `*.klang` files under `dir` (sorted by the caller).
+/// `.git` trees are skipped so `fmt <repo>` never touches version control.
+fn collect_klang_files(dir: &std::path::Path, out: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut subs: Vec<std::path::PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if p.file_name().map(|n| n == ".git").unwrap_or(false) {
+                continue;
+            }
+            subs.push(p);
+        } else if p.extension().map(|x| x == "klang").unwrap_or(false) {
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+    subs.sort();
+    for s in subs {
+        collect_klang_files(&s, out);
+    }
+}
+
 /// File CLI with `import` support: check / fmt / run / build.
 fn run_file_mode(args: &[String]) {
     use std::collections::HashMap;
@@ -610,29 +741,7 @@ fn run_file_mode(args: &[String]) {
         return;
     }
     if cmd == "fmt" {
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("cannot read {path}: {e}");
-            std::process::exit(1);
-        });
-        let mut p = Parser::new_with_file(&src, path);
-        let prog = match p.parse_program() {
-            Ok(prog) => prog,
-            Err(d) => {
-                println!("parse: FAIL");
-                println!("{}", d.to_json());
-                std::process::exit(1);
-            }
-        };
-        let out = klang::fmt::fmt_program(&prog);
-        if rest.iter().any(|a| a == "--write") {
-            std::fs::write(path, &out).unwrap_or_else(|e| {
-                eprintln!("cannot write {path}: {e}");
-                std::process::exit(1);
-            });
-            println!("fmt: wrote {path}");
-        } else {
-            print!("{out}");
-        }
+        run_fmt_mode(rest);
         return;
     }
     let entry = rest
