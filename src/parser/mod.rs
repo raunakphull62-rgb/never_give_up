@@ -110,10 +110,33 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
+/// One comment kept as trivia by the lexer (S3): `//...` to end of line
+/// or `/* ... */`. The parser still ignores comments (behavior unchanged);
+/// the formatter re-attaches them to the canonical output so `fmt` never
+/// deletes them. `start`/`end` are byte offsets into the lexed source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Comment {
+    pub fn text<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.start..self.end]
+    }
+}
+
+fn tokenize(
+    source: &str,
+) -> (
+    Vec<Token>,
+    Vec<(usize, usize, String)>,
+    Vec<Comment>,
+) {
     let bytes = source.as_bytes();
     let mut toks: Vec<Token> = Vec::new();
     let mut lex_errs: Vec<(usize, usize, String)> = Vec::new();
+    let mut comments: Vec<Comment> = Vec::new();
     let mut i: usize = 0;
     let n = bytes.len();
     while i < n {
@@ -123,10 +146,12 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
             continue;
         }
         if c == '/' && i + 1 < n && bytes[i + 1] == b'/' {
+            let cstart = i;
             i += 2;
             while i < n && bytes[i] != b'\n' {
                 i += 1;
             }
+            comments.push(Comment { start: cstart, end: i });
             continue;
         }
         if c == '/' && i + 1 < n && bytes[i + 1] == b'*' {
@@ -152,6 +177,8 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
                     end: n,
                 });
                 i = n;
+            } else {
+                comments.push(Comment { start: cstart, end: i });
             }
             continue;
         }
@@ -639,7 +666,23 @@ fn tokenize(source: &str) -> (Vec<Token>, Vec<(usize, usize, String)>) {
         start: n,
         end: n,
     });
-    (toks, lex_errs)
+    (toks, lex_errs, comments)
+}
+
+/// Lex `source` keeping comments as trivia (S3): tokens (with a trailing
+/// `Eof`), comments in source order, and the first lex error as a
+/// diagnostic (like [`Parser::new_with_file`]). The parser itself still
+/// ignores comments; the formatter uses the trivia to re-attach them.
+pub fn lex_with_comments(
+    source: &str,
+    file: &str,
+) -> (Vec<Token>, Vec<Comment>, Option<Diagnostic>) {
+    let (tokens, lex_errs, comments) = tokenize(source);
+    let lex_error = lex_errs
+        .into_iter()
+        .next()
+        .map(|(s, e, msg)| Diagnostic::parse_error(file, s, e, &msg));
+    (tokens, comments, lex_error)
 }
 
 #[derive(Debug, Clone)]
@@ -669,11 +712,7 @@ impl Parser {
     }
 
     pub fn new_with_file(source: &str, file: &str) -> Self {
-        let (tokens, lex_errs) = tokenize(source);
-        let lex_error = lex_errs
-            .into_iter()
-            .next()
-            .map(|(s, e, msg)| Diagnostic::parse_error(file, s, e, &msg));
+        let (tokens, _comments, lex_error) = lex_with_comments(source, file);
         Self {
             tokens,
             pos: 0,
