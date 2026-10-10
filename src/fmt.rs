@@ -490,24 +490,11 @@ pub fn fmt_source(source: &str, file: &str) -> Result<String, Diagnostic> {
     Ok(merge_comments(source, &comments, &otokens, &base, &ftokens))
 }
 
-/// Segmented token mapping between the original stream `o` and the
-/// formatted stream `f` (both without the trailing `Eof`): `align[i]` is
-/// the formatted index of `o[i]` (if any).
-///
-/// `fmt_program` groups top-level items by kind (imports, structs, enums,
-/// mods, then functions — and the same grouping for members inside `mod`),
-/// so the two streams agree on the *multiset* of items but not their order.
-/// Mapping splits both spans into items, matches by key (order-insensitive),
-/// and maps each pair greedily (order-preserving within one item, where
-/// `fmt` only drops `;`, adds `(`/`)` and `-> void`, and collapses `fK: T`
-/// names — each with a confirmed lookahead). Linear time; unmatchable
-/// tokens stay `None` (their comments fall back to file end, in order).
-fn align_tokens(o: &[TokenKind], f: &[TokenKind]) -> Vec<Option<usize>> {
-    let mut map = vec![None; o.len()];
-    map_span(o, 0, o.len(), f, 0, f.len(), &mut map);
-    map
-}
-
+/// Greedy order-preserving token mapping over one span pair: every other
+/// pair comes from [`map_span`]'s item matching, so within a pair `fmt`
+/// only drops `;`, adds `(`/`)` and `-> void`, and collapses `fK: T` names
+/// or empty `()` — each with a confirmed lookahead. Bounded recovery past
+/// that (never reads past the span, never panics).
 fn greedy_map(
     o_full: &[TokenKind],
     o_from: usize,
@@ -761,9 +748,11 @@ fn map_pair(
     );
 }
 
-/// Segmented mapping over a span pair: split into items, match by key,
-/// map each pair. All indices absolute. Unmatchable O tokens stay `None`
-/// (their comments fall back to file end, in order).
+/// Segmented mapping over a span pair: split into items, match by key
+/// (order-insensitive — `fmt_program` groups items by kind, so the two
+/// streams agree on the *multiset* of items but not their order), map each
+/// pair. All indices absolute. Unmatchable O tokens stay `None` (their
+/// comments fall back to file end, in order).
 fn map_span(
     o_full: &[TokenKind],
     o_from: usize,
