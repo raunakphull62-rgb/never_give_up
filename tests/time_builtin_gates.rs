@@ -59,9 +59,11 @@ fn s6_now_ms_monotonic_and_plausible() {
     );
     assert_eq!(int_of(&v), 42, "t2>=t1 (monotonic-ish)");
     // Plausible range checked on the Rust side (raw Int, no i32 literal).
-    let (raw1, _) = run_ok("fn main() -> i32 { return now_ms() }");
+    // D3: epoch millis are far past i32, so the raw-value probes declare
+    // `-> i64` (returning them from `-> i32` is now a loud E-RUNTIME).
+    let (raw1, _) = run_ok("fn main() -> i64 { return now_ms() }");
     let t1 = int_of(&raw1);
-    let (raw2, _) = run_ok("fn main() -> i32 { return now_ms() }");
+    let (raw2, _) = run_ok("fn main() -> i64 { return now_ms() }");
     let t2 = int_of(&raw2);
     assert!(t2 >= t1, "raw monotonic: {t1} <= {t2}");
     for t in [t1, t2] {
@@ -77,7 +79,8 @@ fn s6_now_ms_raw_value_plausible() {
     let _dir = test_dir("now-ms-raw");
     // Raw Int value must be plausible millis (2020-01-01 .. 2286-11-20).
     // Checked in Rust: Klang i32 literals cannot spell 1e12.
-    let (v, _) = run_ok("fn main() -> i32 { return now_ms() }");
+    // D3: `-> i64`, since epoch millis exceed the `i32` return boundary.
+    let (v, _) = run_ok("fn main() -> i64 { return now_ms() }");
     let t = int_of(&v);
     assert!(
         (1_577_836_800_000..=10_000_000_000_000).contains(&t),

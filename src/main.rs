@@ -814,25 +814,10 @@ fn run_file_mode(args: &[String]) {
                     println!("{line}");
                 }
             }
-            // Out-of-range `Int` returns stay loud `E-OVERFLOW`, matching
-            // `run_with_output`.
-            if let klang::runtime::Value::Int(n) = &v {
-                if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
-                    let d = klang::diagnostics::Diagnostic::error(
-                        "E-OVERFLOW",
-                        "integer overflow in `return`: result out of i32 range",
-                        "runtime",
-                        0,
-                        0,
-                        "i32 arithmetic never wraps: out-of-range results are errors",
-                        &["use smaller operands", "check bounds before operating"],
-                        "arithmetic/overflow",
-                    );
-                    eprintln!("run: FAIL");
-                    eprintln!("{}", d.to_json());
-                    std::process::exit(1);
-                }
-            }
+            // D3: return boundaries are enforced inside the runtime
+            // (`exec_function` checks the declared annotation, and
+            // arithmetic overflow is `E-OVERFLOW`); a wide `Int` return
+            // legitimately reaches here and maps to the exit code below.
             if verbose {
                 println!("run {run_entry}() = {}", v.render());
             }
