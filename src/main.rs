@@ -505,6 +505,23 @@ fn run_file_mode(args: &[String]) {
     } else {
         rest
     };
+    // D2 strict (Wave1 S4): `--strict[=true|false]` selects strict
+    // truthiness for this invocation (`run`/`check`/`build`); otherwise
+    // `[project] strict` in klang.toml decides. The flag is stripped
+    // before positional parsing (never a file/entry name) but only
+    // before `--`: after it, `--strict` is program argv, untouched.
+    // It overrides nothing else (registry/verbose/offline all independent).
+    let (strict_flag, rest_strict_owned): (Option<bool>, Vec<String>) =
+        if cmd == "run" || cmd == "check" || cmd == "build" {
+            strip_strict_flag(rest)
+        } else {
+            (None, rest.to_vec())
+        };
+    let rest: &[String] = if cmd == "run" || cmd == "check" || cmd == "build" {
+        &rest_strict_owned
+    } else {
+        rest
+    };
     // Explicit v2 mode: `check --lang v2 <file>` or `check-v2 <file>`.
     // v1 files never silently use v2 semantics: the mode is always chosen
     // by the caller, never inferred.
@@ -732,13 +749,19 @@ fn run_file_mode(args: &[String]) {
             std::process::exit(1);
         }
     };
-    match TypedHIR::check_with_file(prog.clone(), run_path) {
+    // D2 strict resolution: explicit `--strict[=true|false]` wins;
+    // otherwise `[project] strict` in the entry's klang.toml decides
+    // (absent file or key means default mode). Independent of every
+    // other flag.
+    let strict = strict_flag.unwrap_or_else(|| project_strict(run_path));
+    match TypedHIR::check_with_file_strict(prog.clone(), run_path, strict) {
         Ok(_) => {
             if dump {
                 println!("check: OK (0 diagnostics)");
             }
-            // Phase 1d: non-failing `W-TYPE-NARROW` warnings go to stderr
-            // (stdout stays the program's own output under `run`).
+            // Retired-lint drain: `narrow_type_warnings` is empty since D3
+            // (all integer spellings are honest checked types); the loop
+            // stays so any future warning surfaces on stderr, never stdout.
             for w in klang::hir::narrow_type_warnings(&prog, run_path) {
                 eprintln!("warning: {}", w.to_json());
             }
@@ -1686,6 +1709,89 @@ fn split_run_lang(rest: &[String]) -> (bool, Vec<String>) {
 /// scripts keep working.
 fn has_verbose_flag(rest: &[String]) -> bool {
     rest.iter().any(|a| a == "--verbose" || a == "-v")
+}
+
+/// D2 strict flag (Wave1 S4): split `--strict[=true|false]` out of the arg
+/// list. Returns the flag value (`--strict` means true; the last
+/// occurrence wins) plus the remaining args. Stripping stops at `--`:
+/// anything after it is program argv, even a literal `--strict`.
+/// A malformed value (`--strict=maybe`) exits 2 with usage.
+fn strip_strict_flag(rest: &[String]) -> (Option<bool>, Vec<String>) {
+    let mut flag: Option<bool> = None;
+    let mut out = Vec::with_capacity(rest.len());
+    let mut argv = false;
+    for a in rest {
+        if argv {
+            out.push(a.clone());
+            continue;
+        }
+        if a == "--" {
+            argv = true;
+            out.push(a.clone());
+            continue;
+        }
+        if a == "--strict" {
+            flag = Some(true);
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--strict=") {
+            match v {
+                "true" => flag = Some(true),
+                "false" => flag = Some(false),
+                _ => {
+                    eprintln!("usage: --strict[=true|false] (want `--strict`, `--strict=true`, or `--strict=false`)");
+                    std::process::exit(2);
+                }
+            }
+            continue;
+        }
+        out.push(a.clone());
+    }
+    (flag, out)
+}
+
+/// D2 strict via manifest (Wave1 S4): `strict = true` under `[project]` in
+/// the entry file's `klang.toml` (walked up via `find_project_root`, like
+/// registry resolution). Missing file, unreadable file, or absent key all
+/// mean default mode — never an error, never a warning.
+fn project_strict(entry_path: &str) -> bool {
+    let start = std::path::Path::new(entry_path);
+    let Some(root) = klang::registry::find_project_root(start) else {
+        return false;
+    };
+    let text = match std::fs::read_to_string(root.join("klang.toml")) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_string();
+            continue;
+        }
+        if section != "project" {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() != "strict" {
+                continue;
+            }
+            // Strip an inline `#` comment outside quotes, then quotes.
+            let mut val = v.trim();
+            if let Some(hash) = val.find('#') {
+                val = val[..hash].trim();
+            }
+            let val = val.trim_matches('"').trim_matches('\'').trim();
+            if val.eq_ignore_ascii_case("true") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Map a v1 return value to a process exit code. `Int` becomes the exit

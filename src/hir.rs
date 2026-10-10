@@ -257,6 +257,20 @@ impl TypedHIR {
     }
 
     pub fn check_with_file(program: Program, file: &str) -> Result<Self, Vec<Diagnostic>> {
+        Self::check_with_file_strict(program, file, false)
+    }
+
+    /// D2 strict mode: when `strict` is true, a statically-known non-`Bool`
+    /// condition (`if`/`while`, `&&`/`||`/`!` operands) is `E-TYPE` naming
+    /// the offending type. `Unknown` (dynamic) stays allowed — the runtime
+    /// erases `Bool` to `Int` 0/1, so no runtime check could distinguish
+    /// them; full runtime strictness awaits real `Bool` values (D2
+    /// follow-up). Default (`false`) keeps today's `Bool`/`Int` rule.
+    pub fn check_with_file_strict(
+        program: Program,
+        file: &str,
+        strict: bool,
+    ) -> Result<Self, Vec<Diagnostic>> {
         // Modules resolve first: `mod` blocks flatten into qualified
         // top-level items (`m::f`) with references rewritten and visibility
         // enforced. Module-free programs come back identical.
@@ -513,6 +527,7 @@ impl TypedHIR {
                 &enums,
                 &mut diags,
                 &alias_scopes,
+                strict,
             );
         }
         if diags.is_empty() {
@@ -569,6 +584,7 @@ fn check_function(
     enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
     alias_scopes: &[crate::ast::AliasScope],
+    strict: bool,
 ) {
     let mut defined: HashMap<String, Ty> = HashMap::new();
     for p in &f.params {
@@ -585,6 +601,7 @@ fn check_function(
     }
     let mut cx = Ctx::default();
     cx.alias_scopes = alias_scopes.to_vec();
+    cx.strict = strict;
     check_block(
         file,
         &f.body,
@@ -627,6 +644,11 @@ struct Ctx {
     /// alias-free programs, so method-call checking is byte-identical
     /// unless the file actually uses `import ... as ...`.
     alias_scopes: Vec<crate::ast::AliasScope>,
+    /// D2 strict truthiness (Wave1 S4): statically-known non-`Bool`
+    /// conditions are `E-TYPE`. False by default; enabled by
+    /// `check_with_file_strict` (`klang run/check --strict`,
+    /// `[project] strict = true`).
+    strict: bool,
     loop_depth: usize,
     /// `loop_depth` at each enclosing `try` entry, innermost last.
     /// `break`/`continue` inside a `try` must target a loop that also
@@ -979,7 +1001,7 @@ fn check_block(
                     group_stack,
                     cx,
                 );
-                require_condition(file, &cond_ty, "while", diags);
+                require_condition(file, &cond_ty, "while", cx.strict, diags);
                 cx.loop_depth += 1;
                 let mut body_defined = defined.clone();
                 let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
@@ -1209,7 +1231,7 @@ fn check_block(
                     group_stack,
                     cx,
                 );
-                require_condition(file, &cond_ty, "if", diags);
+                require_condition(file, &cond_ty, "if", cx.strict, diags);
                 // Branches are block-scoped: new lets inside do not leak out.
                 // Must-analysis: only awaits on every path satisfy an outer
                 // spawn. Awaits in one branch alone never propagate.
@@ -1384,15 +1406,22 @@ fn assignable(got: &Ty, want: &Ty) -> bool {
     }
 }
 
-fn require_condition(file: &str, ty: &Ty, what: &str, diags: &mut Vec<Diagnostic>) {
-    match ty {
-        Ty::Bool | Ty::Int | Ty::Unknown => {}
-        other => diags.push(type_mismatch(
-            file,
-            &format!("{what} condition"),
-            "bool",
-            other,
-        )),
+fn require_condition(
+    file: &str,
+    ty: &Ty,
+    what: &str,
+    strict: bool,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // D2 strict: only `Bool` (and dynamic `Unknown`, which no static rule
+    // can judge) may condition. Default keeps the historical `Bool`/`Int`.
+    let ok = if strict {
+        matches!(ty, Ty::Bool | Ty::Unknown)
+    } else {
+        matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown)
+    };
+    if !ok {
+        diags.push(type_mismatch(file, &format!("{what} condition"), "bool", ty));
     }
 }
 
@@ -2675,7 +2704,14 @@ fn check_expr(
                 cx,
             );
             for (ty, what) in [(&l, "left `&&`/`||`"), (&r, "right `&&`/`||`")] {
-                if !matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown) {
+                // D2 strict: operands must be `Bool` (or dynamic
+                // `Unknown`); default also accepts `Int`.
+                let ok = if cx.strict {
+                    matches!(ty, Ty::Bool | Ty::Unknown)
+                } else {
+                    matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown)
+                };
+                if !ok {
                     diags.push(type_mismatch(file, what, "bool", ty));
                 }
             }
@@ -2697,7 +2733,14 @@ fn check_expr(
                 group_stack,
                 cx,
             );
-            if !matches!(t, Ty::Bool | Ty::Int | Ty::Unknown) {
+            // D2 strict: the operand must be `Bool` (or dynamic `Unknown`);
+            // default also accepts `Int`.
+            let ok = if cx.strict {
+                matches!(t, Ty::Bool | Ty::Unknown)
+            } else {
+                matches!(t, Ty::Bool | Ty::Int | Ty::Unknown)
+            };
+            if !ok {
                 diags.push(type_mismatch(file, "`!` operand", "bool", &t));
             }
             Ty::Bool
@@ -2990,7 +3033,9 @@ fn check_arm_body(
             group_stack,
             cx,
         );
-        require_condition(file, &g_ty, "match guard", diags);
+        // D2 strict does not cover match guards (only `if`/`while` and the
+        // boolean operators): they keep the default `Bool`/`Int` rule.
+        require_condition(file, &g_ty, "match guard", false, diags);
     }
     check_expr(
         file,
