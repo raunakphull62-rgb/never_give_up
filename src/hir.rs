@@ -3621,17 +3621,17 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
     }
     let arity = match func {
         "len" | "pop" | "keys" => 1,
-        "push" | "range" | "write_file" | "append_file" | "run_process" => 2,
+        "push" | "range" | "write_file" | "append_file" | "run_process" | "spawn" | "run" => 2,
         "insert" => 3,
         "http_post" | "http_post_async" => 3,
         "str" | "int" | "float" => 1,
         "assert" => 1,
         "read_line" => 0,
         "parse_int" | "parse_float" => 1,
-        "read_file" | "exists" | "env" | "remove_file" | "http_get" | "http_get_async" => 1,
+        "read_file" | "exists" | "env" | "get_env" | "remove_file" | "http_get" | "http_get_async" => 1,
         "regex_is_match" | "regex_find" => 2,
-        "time_sleep" | "time_elapsed" => 1,
-        "time_now" => 0,
+        "time_sleep" | "time_elapsed" | "sleep_ms" => 1,
+        "time_now" | "now_ms" | "now_iso" => 0,
         "args" | "cwd" => 0,
         "exit" => 1,
         "set_env" | "rename_file" | "copy_file" => 2,
@@ -3861,6 +3861,12 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Str
         }
+        "get_env" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`get_env()` name", "str", &args[0]));
+            }
+            Ty::Str
+        }
         "run_process" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`run_process()` cmd", "str", &args[0]));
@@ -3874,6 +3880,34 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
                 ));
             }
             Ty::Map
+        }
+        "spawn" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`spawn()` cmd", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(
+                    file,
+                    "`spawn()` args",
+                    "array",
+                    &args[1],
+                ));
+            }
+            Ty::Map
+        }
+        "run" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`run()` cmd", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(
+                    file,
+                    "`run()` args",
+                    "array",
+                    &args[1],
+                ));
+            }
+            Ty::Int
         }
         "regex_is_match" => {
             for (i, a) in args.iter().enumerate() {
@@ -3907,7 +3941,15 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Int
         }
+        "sleep_ms" => {
+            if !matches!(&args[0], Ty::Int | Ty::Float | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`sleep_ms()` millis", "number", &args[0]));
+            }
+            Ty::Int
+        }
         "time_now" => Ty::Float,
+        "now_ms" => Ty::Int,
+        "now_iso" => Ty::Str,
         "time_elapsed" => {
             if !matches!(&args[0], Ty::Int | Ty::Float | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`time_elapsed()` since", "number", &args[0]));
@@ -4201,6 +4243,12 @@ pub fn is_builtin(name: &str) -> bool {
             | "random_float"
             | "sha256"
             | "hmac_sha256"
+            | "spawn"
+            | "run"
+            | "now_ms"
+            | "now_iso"
+            | "sleep_ms"
+            | "get_env"
     )
 }
 

@@ -26,10 +26,10 @@
 use crate::diagnostics::Diagnostic;
 
 /// `E-PROCESS-NOT-FOUND`: command doesn't exist / isn't executable.
-fn process_not_found(cmd: &str, cause: &str) -> Diagnostic {
+fn process_not_found_for(op: &str, cmd: &str, cause: &str) -> Diagnostic {
     Diagnostic::error(
         "E-PROCESS-NOT-FOUND",
-        &format!("run_process({cmd}) failed: command not found or not executable"),
+        &format!("{op}({cmd}) failed: command not found or not executable"),
         "runtime",
         0,
         0,
@@ -45,10 +45,10 @@ fn process_not_found(cmd: &str, cause: &str) -> Diagnostic {
 /// generic message (cf. AUDIT F14). Note: a process that runs and
 /// exits non-zero is NOT this error; it is an `Ok` map with a non-zero
 /// `exit_code` for the caller to check.
-fn process_failed(cmd: &str, cause: &str) -> Diagnostic {
+fn process_failed_for(op: &str, cmd: &str, cause: &str) -> Diagnostic {
     Diagnostic::error(
         "E-PROCESS-FAILED",
-        &format!("run_process({cmd}) failed to spawn: {cause}"),
+        &format!("{op}({cmd}) failed to spawn: {cause}"),
         "runtime",
         0,
         0,
@@ -56,6 +56,39 @@ fn process_failed(cmd: &str, cause: &str) -> Diagnostic {
         &["check OS process limits and permissions"],
         "process/spawn",
     )
+}
+
+/// `E-PROCESS-NOT-FOUND`: command doesn't exist / isn't executable.
+fn process_not_found(cmd: &str, cause: &str) -> Diagnostic {
+    process_not_found_for("run_process", cmd, cause)
+}
+
+/// `E-PROCESS-FAILED`: the process could not be spawned for a reason
+/// other than not-found (OS refusal, resource exhaustion, …). The OS
+/// error string is carried as the cause verbatim — never a shared
+/// generic message (cf. AUDIT F14). Note: a process that runs and
+/// exits non-zero is NOT this error; it is an `Ok` map with a non-zero
+/// `exit_code` for the caller to check.
+fn process_failed(cmd: &str, cause: &str) -> Diagnostic {
+    process_failed_for("run_process", cmd, cause)
+}
+
+/// Map a spawn-time `io::Error` to the specific `E-PROCESS-*`
+/// diagnostic for `op` on `cmd`. `NotFound` and `PermissionDenied`
+/// (binary missing / not executable) get `E-PROCESS-NOT-FOUND`;
+/// everything else is `E-PROCESS-FAILED` with the real OS message.
+/// Both are runtime diagnostics, so `try`/`catch` catches them
+/// (`e["code"]` is the `E-PROCESS-*` code); `E-CANCELLED`/`exit()`
+/// stay uncatchable as before.
+pub fn map_spawn_error_for(op: &str, cmd: &str, err: &std::io::Error) -> Diagnostic {
+    use std::io::ErrorKind;
+    let cause = err.to_string();
+    match err.kind() {
+        ErrorKind::NotFound | ErrorKind::PermissionDenied => {
+            process_not_found_for(op, cmd, &cause)
+        }
+        _ => process_failed_for(op, cmd, &cause),
+    }
 }
 
 /// Map a spawn-time `io::Error` to the specific `E-PROCESS-*`
@@ -129,4 +162,48 @@ pub fn run(cmd: &str, args: &[String]) -> Result<ProcessOutput, Diagnostic> {
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         exit_code: out.status.code().unwrap_or(-1),
     })
+}
+
+/// S6 `spawn(cmd, args)`: argv-array spawn without a shell, capturing
+/// stdout/stderr and the exit code. Identical transport to [`run`]
+/// (same `Command::output`, which reads both pipes on threads so
+/// >1 MB outputs cannot deadlock); only the caller's view differs
+/// (the interpreter renders `status` instead of `exit_code`).
+/// No shell, no globbing, no interpolation, no timeout.
+pub fn spawn_capture(cmd: &str, args: &[String]) -> Result<ProcessOutput, Diagnostic> {
+    let out = std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .map_err(|e| map_spawn_error_for("spawn", cmd, &e))?;
+    Ok(ProcessOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        exit_code: out.status.code().unwrap_or(-1),
+    })
+}
+
+/// S6 `run(cmd, args)`: argv-array spawn without a shell, with
+/// stdin/stdout/stderr inherited from the parent. Returns only the
+/// exit code (`-1` when terminated by signal / unknown). A non-zero
+/// exit is a normal `Ok` result; only a failure to start (missing
+/// binary, permission denied, OS refusal) is `E-PROCESS-*`.
+/// No shell, no globbing, no interpolation, no timeout, no capture.
+pub fn run_inherit(cmd: &str, args: &[String]) -> Result<i32, Diagnostic> {
+    use std::process::Stdio;
+    let status = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| map_spawn_error_for("run", cmd, &e))?;
+    Ok(status.code().unwrap_or(-1))
+}
+
+/// S6 `get_env(name)`: value of the variable or `""` when unset.
+/// Klang has no `null`/`Option`, so absence is `""` — the same
+/// convention as the existing `env` builtin (never an error).
+/// Reads the process environment only; it never lists or dumps it.
+pub fn get_env(name: &str) -> String {
+    std::env::var(name).unwrap_or_default()
 }

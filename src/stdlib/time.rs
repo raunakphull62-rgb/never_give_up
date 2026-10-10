@@ -119,3 +119,87 @@ pub fn sleep(seconds: f64) -> Result<(), Diagnostic> {
 pub fn elapsed(since: f64) -> f64 {
     now() - since
 }
+
+/// S6 `now_ms()`: milliseconds since the Unix epoch as an `i64`.
+///
+/// Stored in the language's `Int` (which is `i64` at runtime; values
+/// far exceed the `i32` checked-arithmetic range, like `file_size`
+/// past 2 GiB — they flow as values but `E-OVERFLOW` on arithmetic).
+/// Falls back to `0` only when the clock is before the epoch.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+/// S6 `now_iso()`: current UTC time as an RFC 3339 string
+/// (`YYYY-MM-DDTHH:MM:SS.mmmZ`, e.g. `2026-10-10T04:35:00.123Z`).
+/// Pure std (no chrono): civil date via Howard Hinnant's
+/// days-to-civil algorithm over days since the Unix epoch.
+pub fn now_iso() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let millis = now.subsec_millis();
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (hour, minu, sec) = ((sod / 3_600) as u32, ((sod % 3_600) / 60) as u32, (sod % 60) as u32);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minu:02}:{sec:02}.{millis:03}Z")
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// S6 `sleep_ms(millis)`: block the calling thread for `millis`
+/// milliseconds. `millis` must be finite and `>= 0`; negatives (and
+/// `NaN`/infinite) are loud `E-TIME-INVALID`, never a silent no-op.
+/// Uses `Duration::try_from_secs_f64(millis / 1000.0)` so huge finite
+/// values are a diagnostic, never a panic. No timeout is added: the
+/// caller decides the bound, exactly like `time_sleep`.
+pub fn sleep_ms(millis: f64) -> Result<(), Diagnostic> {
+    if millis.is_nan() {
+        return Err(time_invalid(
+            "sleep_ms",
+            "sleep duration is NaN, which cannot be slept",
+            "NaN is not a valid sleep duration",
+        ));
+    }
+    if millis.is_infinite() {
+        return Err(time_invalid(
+            "sleep_ms",
+            &format!("sleep duration {millis}ms is infinite, which cannot be slept"),
+            "infinite is not a valid sleep duration",
+        ));
+    }
+    if millis < 0.0 {
+        return Err(time_invalid(
+            "sleep_ms",
+            &format!("sleep duration {millis}ms is negative"),
+            &format!("negative duration {millis}ms is not a valid sleep duration"),
+        ));
+    }
+    let dur =
+        std::time::Duration::try_from_secs_f64(millis / 1000.0).map_err(|e| {
+            time_invalid(
+                "sleep_ms",
+                &format!("sleep duration {millis}ms cannot be represented: {e}"),
+                &format!("duration {millis}ms overflows the representable range: {e}"),
+            )
+        })?;
+    std::thread::sleep(dur);
+    Ok(())
+}
