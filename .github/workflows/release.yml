@@ -101,6 +101,97 @@ jobs:
           ndk-version: ${{ matrix.ndk_version }}
           add-to-path: false
 
+      # S1b: stamp the real release version into Cargo.toml (and Cargo.lock)
+      # BEFORE cargo build, only on version tags (refs/tags/v*). The binary
+      # reports env!("CARGO_PKG_VERSION"), so stamping makes `klang --version`
+      # print the tag (vX.Y.Z -> X.Y.Z) instead of the repo's 0.7.0.
+      # Portable across Linux/macOS/Windows runners (bash + python3/python).
+      # Non-tag runs leave Cargo.toml untouched.
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Stamping Cargo.toml version to $TAG (from $GITHUB_REF_NAME)"
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - "$TAG" <<'PYEOF'
+          import pathlib
+          import re
+          import sys
+          ver = sys.argv[1]
+          if not re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?", ver):
+              print(f"warning: tag version '{ver}' is not X.Y.Z; stamping anyway", file=sys.stderr)
+          # Cargo.toml: replace version under [package] only.
+          toml_path = pathlib.Path("Cargo.toml")
+          text = toml_path.read_text()
+          lines = text.splitlines(keepends=True)
+          in_package = False
+          done = False
+          for i, line in enumerate(lines):
+              s = line.strip()
+              if s.startswith("["):
+                  in_package = (s == "[package]")
+                  continue
+              if in_package and not done and re.match(r'^version\s*=\s*".*?"\s*(#.*)?$', s):
+                  indent = line[: len(line) - len(line.lstrip())]
+                  comment = ""
+                  m = re.match(r'^(.*?)(\s*#.*)$', line.rstrip("\r\n"))
+                  # Preserve trailing comment if any.
+                  if m and '"' in m.group(1):
+                      # m.group(2) is the comment part.
+                      comment = m.group(2)
+                      lines[i] = f'{indent}version = "{ver}"{comment}\n'
+                  else:
+                      # Keep original newline style.
+                      nl = "\r\n" if line.endswith("\r\n") else "\n"
+                      lines[i] = f'{indent}version = "{ver}"{nl}'
+                  done = True
+          if not done:
+              print("error: [package] version not found in Cargo.toml", file=sys.stderr)
+              sys.exit(1)
+          toml_path.write_text("".join(lines))
+          # Cargo.lock: update the klang package entry consistently.
+          lock_path = pathlib.Path("Cargo.lock")
+          if lock_path.is_file():
+              lock = lock_path.read_text().splitlines(keepends=True)
+              out = []
+              expect_version = False
+              updated = False
+              for line in lock:
+                  s = line.strip()
+                  if s == 'name = "klang"':
+                      expect_version = True
+                      out.append(line)
+                      continue
+                  if expect_version and re.match(r'^version\s*=\s*".*?"\s*$', s):
+                      indent = line[: len(line) - len(line.lstrip())]
+                      nl = "\r\n" if line.endswith("\r\n") else "\n"
+                      out.append(f'{indent}version = "{ver}"{nl}')
+                      expect_version = False
+                      updated = True
+                      continue
+                  # A new [[package]] resets the expectation (klang entry is one block).
+                  if s == "[[package]]":
+                      expect_version = False
+                  else:
+                      # Keep expectation only for the immediate next version line;
+                      # any other key clears it to avoid touching other packages.
+                      if expect_version and "=" in s:
+                          # If this line is not the version line, clear (should not happen
+                          # for well-formed lock where version follows name directly).
+                          pass
+                  out.append(line)
+              if updated:
+                  lock_path.write_text("".join(out))
+                  print(f"stamped Cargo.lock klang version to {ver}")
+              else:
+                  print("warning: klang entry not found in Cargo.lock; leaving it", file=sys.stderr)
+          print(f"stamped Cargo.toml version to {ver}")
+          PYEOF
+          echo "Stamped version:"
+          grep -E '^version =' Cargo.toml | head -n 1
+
       - name: Build (native)
         if: ${{ !matrix.use_cross && !matrix.use_ndk }}
         run: cargo build --release --target ${{ matrix.target }} --bin klang

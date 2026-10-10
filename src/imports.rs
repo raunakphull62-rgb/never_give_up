@@ -376,6 +376,208 @@ fn canonical(path: &str) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
+/// True when `raw` is a bare package name (`math`, not `a/b.klang`).
+/// Single-segment `[A-Za-z0-9_-]+` only — anything with `/` or `.` keeps
+/// the legacy relative/vendor-slash path untouched.
+fn is_bare_package_name(raw: &str) -> bool {
+    crate::registry::valid_pkg_name(raw)
+}
+
+/// Local candidates for a bare name, in priority order: `<dir>/<name>`,
+/// `<dir>/<name>.klang`, `<dir>/<name>/lib.klang`. First existing file wins.
+fn local_bare_candidate(importer_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let a = importer_dir.join(name);
+    if a.is_file() {
+        return Some(a);
+    }
+    let b = importer_dir.join(format!("{name}.klang"));
+    if b.is_file() {
+        return Some(b);
+    }
+    let c = importer_dir.join(name).join("lib.klang");
+    if c.is_file() {
+        return Some(c);
+    }
+    None
+}
+
+/// Package entry inside `.klang_pkgs/<name>/<version>/`: `lib.klang` first,
+/// then `<name>.klang`, then `main.klang`.
+fn package_entry_candidate(pkg_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    for cand in [
+        pkg_dir.join("lib.klang"),
+        pkg_dir.join(format!("{name}.klang")),
+        pkg_dir.join("main.klang"),
+    ] {
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Pinned version for a bare name from `klang.lock` (exact version).
+/// When the manifest declares a constraint for the name, picks the max
+/// locked version satisfying it; otherwise picks the max locked version
+/// (transitive visibility). `None` when the lock has no pin for `name`.
+fn bare_locked_version(
+    root: &std::path::Path,
+    deps: &[(String, String)],
+    name: &str,
+) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("klang.lock")).ok()?;
+    let pins = crate::registry::parse_package_locks(&text);
+    let mut cands: Vec<&crate::registry::PackageLock> =
+        pins.iter().filter(|l| l.name == name).collect();
+    if cands.is_empty() {
+        return None;
+    }
+    let mut constraint: Option<String> = None;
+    for (dep_name, value) in deps {
+        if dep_name == name {
+            if let Some((_, req)) = crate::registry::parse_registry_req(value, dep_name) {
+                constraint = Some(req);
+                break;
+            }
+        }
+    }
+    if let Some(req) = constraint {
+        if let Ok(c) = crate::package::version::parse_constraint(&req) {
+            cands.retain(|l| crate::package::version::matches(&l.version, &c));
+            if cands.is_empty() {
+                return None;
+            }
+        }
+    }
+    cands.sort_by(|a, b| crate::package::version::version_cmp(&a.version, &b.version));
+    cands.last().map(|l| l.version.clone())
+}
+
+/// Vendor entry for a bare name, if the lock pins it and the entry file
+/// exists. Returns `(entry_path, version)`.
+fn try_bare_vendor_entry(
+    root: &std::path::Path,
+    deps: &[(String, String)],
+    name: &str,
+) -> Option<(PathBuf, String)> {
+    let ver = bare_locked_version(root, deps, name)?;
+    let dir = crate::registry::pkg_dir(root, name, &ver);
+    let entry = package_entry_candidate(&dir, name)?;
+    Some((entry, ver))
+}
+
+/// Project root + deps for bare resolution. Prefers the load's `vendor`
+/// context (entry's project); when there is none (entry outside any
+/// project), falls back to walking up from the importing file so the
+/// unknown-name error can still name both places searched.
+fn bare_root_and_deps(
+    path: &str,
+    vendor: &Option<VendorCtx>,
+) -> Option<(PathBuf, Vec<(String, String)>)> {
+    if let Some(ctx) = vendor.as_ref() {
+        return Some((ctx.root.clone(), ctx.deps.clone()));
+    }
+    let start = std::path::Path::new(path);
+    let root = crate::registry::find_project_root(start)?;
+    let text = std::fs::read_to_string(root.join("klang.toml")).ok()?;
+    let manifest = crate::package::Manifest::parse(&text).ok()?;
+    let mut deps: Vec<(String, String)> = manifest
+        .deps
+        .into_iter()
+        .chain(manifest.dev_deps)
+        .filter(|(k, v)| {
+            crate::registry::parse_registry_dep(v).is_some()
+                || crate::registry::parse_registry_req(v, k).is_some()
+        })
+        .collect();
+    if let Ok(lock_text) = std::fs::read_to_string(root.join("klang.lock")) {
+        for pin in crate::registry::parse_package_locks(&lock_text) {
+            if !deps.iter().any(|(n, _)| n == &pin.name) {
+                deps.push((
+                    pin.name.clone(),
+                    format!("registry:{}@{}", pin.name, pin.version),
+                ));
+            }
+        }
+    }
+    Some((root, deps))
+}
+
+/// Clear `E-IO-NOT-FOUND` for a bare name, naming both places searched and
+/// suggesting the fix. Distinguishes "not a dependency" (`klang add`) from
+/// "listed but not locked" (`klang.lock` missing the pin).
+fn bare_resolve_error(
+    root_opt: Option<(&std::path::Path, &[(String, String)])>,
+    importer_dir: &std::path::Path,
+    name: &str,
+) -> ImportError {
+    let local_a = importer_dir.join(name).to_string_lossy().to_string();
+    let local_b = importer_dir
+        .join(format!("{name}.klang"))
+        .to_string_lossy()
+        .to_string();
+    match root_opt {
+        None => ImportError::new(
+            "E-IO-NOT-FOUND",
+            format!(
+                "cannot resolve package \"{name}\": searched local \"{local_a}\" (and \"{local_b}\") with no project klang.toml found (run: klang add {name})"
+            ),
+        ),
+        Some((root, deps)) => {
+            let has_manifest_entry = deps.iter().any(|(n, _)| n == name);
+            // Also check the manifest directly: `bare_root_and_deps` may
+            // have synthesized the dep from the lock, so re-read the
+            // manifest to tell "listed but not locked" apart from unknown.
+            let mut manifest_lists = has_manifest_entry;
+            if let Ok(text) = std::fs::read_to_string(root.join("klang.toml")) {
+                if let Ok(m) = crate::package::Manifest::parse(&text) {
+                    manifest_lists = m
+                        .deps
+                        .iter()
+                        .chain(m.dev_deps.iter())
+                        .any(|(k, v)| {
+                            k == name
+                                || crate::registry::parse_registry_req(v, k)
+                                    .map(|(p, _)| p == name)
+                                    .unwrap_or(false)
+                                || crate::registry::parse_registry_dep(v)
+                                    .map(|(p, _)| p == name)
+                                    .unwrap_or(false)
+                        });
+                }
+            }
+            let lock_text = std::fs::read_to_string(root.join("klang.lock")).unwrap_or_default();
+            let has_lock_pin = crate::registry::parse_package_locks(&lock_text)
+                .iter()
+                .any(|l| l.name == name);
+            if manifest_lists && !has_lock_pin {
+                return ImportError::new(
+                    "E-IO-NOT-FOUND",
+                    format!(
+                        "cannot resolve package \"{name}\": listed in klang.toml but missing pinned version in klang.lock (searched local \"{local_a}\", \"{local_b}\" and vendor \".klang_pkgs/{name}/<version>/\"; run klang fetch to pin it)"
+                    ),
+                );
+            }
+            if has_lock_pin {
+                // Pinned but the entry file is absent (vendor dir missing or
+                // no lib entry).
+                return ImportError::new(
+                    "E-IO-NOT-FOUND",
+                    format!(
+                        "cannot resolve package \"{name}\": pinned in klang.lock but entry file missing (searched local \"{local_a}\", \"{local_b}\" and vendor \".klang_pkgs/{name}/<version>/lib.klang\"; run klang fetch to restore it)"
+                    ),
+                );
+            }
+            ImportError::new(
+                "E-IO-NOT-FOUND",
+                format!(
+                    "cannot resolve package \"{name}\": searched local \"{local_a}\" (and \"{local_b}\") and vendor \".klang_pkgs/{name}/<version>/\" (run: klang add {name})"
+                ),
+            )
+        }
+    }
+}
+
 /// Read + parse one file (once per canonical path), assigning it the next
 /// file index for globally unique `NodeId` prefixes. When the relative
 /// read fails and the import names a registry dependency
@@ -384,6 +586,26 @@ fn canonical(path: &str) -> String {
 /// Returns the REAL path that was read, so callers can base nested
 /// imports on the vendored location (B1 fix).
 fn resolve_real(path: &str, raw: &str, vendor: &Option<VendorCtx>) -> Option<String> {
+    if is_bare_package_name(raw) {
+        let importer_dir = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Some(local) = local_bare_candidate(&importer_dir, raw) {
+            return Some(local.to_string_lossy().to_string());
+        }
+        if let Some((root, deps)) = bare_root_and_deps(path, vendor) {
+            if let Some((entry, _)) = try_bare_vendor_entry(&root, &deps, raw) {
+                return Some(entry.to_string_lossy().to_string());
+            }
+        }
+        // No local and no vendor entry: let `ensure_parsed` raise the
+        // detailed error (naming both places + fix suggestion).
+        if std::path::Path::new(path).is_file() {
+            return Some(path.to_string());
+        }
+        return vendor_fallback(raw, vendor);
+    }
     if std::path::Path::new(path).is_file() {
         return Some(path.to_string());
     }
@@ -398,6 +620,90 @@ fn ensure_parsed(
     path_of_idx: &mut Vec<String>,
     files: &mut Vec<LoadedFile>,
 ) -> Result<String, ImportError> {
+    // Bare package names (`import "math"`): local file wins with a
+    // one-line note when a package shadows it; otherwise resolve through
+    // klang.toml [dependencies] + klang.lock + .klang_pkgs/<name>/<ver>/.
+    if is_bare_package_name(raw) {
+        let importer_dir = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Some(local) = local_bare_candidate(&importer_dir, raw) {
+            if let Some((root, deps)) = bare_root_and_deps(path, vendor) {
+                if let Some((_, ver)) = try_bare_vendor_entry(&root, &deps, raw) {
+                    eprintln!(
+                        "note: local \"{}\" shadows package \"{raw}@{ver}\"",
+                        local.to_string_lossy()
+                    );
+                }
+            }
+            let local_str = local.to_string_lossy().to_string();
+            let src = std::fs::read_to_string(&local).map_err(|e| {
+                ImportError::new(
+                    "E-IO-NOT-FOUND",
+                    format!(
+                        "cannot read {}: {e}",
+                        diagnostics::sanitize_for_terminal(&local_str)
+                    ),
+                )
+            })?;
+            let real_path = local_str;
+            let canon_real = canonical(&real_path);
+            if parsed.contains_key(&canon_real) {
+                return Ok(real_path);
+            }
+            let mut p = Parser::new_with_file(&src, &real_path);
+            let prog = p
+                .parse_program()
+                .map_err(|d| ImportError::new("E-PARSE", d.to_json()))?;
+            let idx = path_of_idx.len() as u32;
+            path_of_idx.push(canon_real.clone());
+            files.push(LoadedFile {
+                path: real_path.clone(),
+                bytes: src.len(),
+            });
+            parsed.insert(canon_real, prog.with_file_prefix(idx));
+            return Ok(real_path);
+        }
+        // No local file: vendor entry or a clear error naming both places.
+        if let Some((root, deps)) = bare_root_and_deps(path, vendor) {
+            if let Some((entry, _)) = try_bare_vendor_entry(&root, &deps, raw) {
+                let entry_str = entry.to_string_lossy().to_string();
+                let src = std::fs::read_to_string(&entry).map_err(|e| {
+                    ImportError::new(
+                        "E-IO-NOT-FOUND",
+                        format!(
+                            "cannot read {}: {e}",
+                            diagnostics::sanitize_for_terminal(&entry_str)
+                        ),
+                    )
+                })?;
+                let real_path = entry_str;
+                let canon_real = canonical(&real_path);
+                if parsed.contains_key(&canon_real) {
+                    return Ok(real_path);
+                }
+                let mut p = Parser::new_with_file(&src, &real_path);
+                let prog = p
+                    .parse_program()
+                    .map_err(|d| ImportError::new("E-PARSE", d.to_json()))?;
+                let idx = path_of_idx.len() as u32;
+                path_of_idx.push(canon_real.clone());
+                files.push(LoadedFile {
+                    path: real_path.clone(),
+                    bytes: src.len(),
+                });
+                parsed.insert(canon_real, prog.with_file_prefix(idx));
+                return Ok(real_path);
+            }
+            return Err(bare_resolve_error(
+                Some((&root, &deps)),
+                &importer_dir,
+                raw,
+            ));
+        }
+        return Err(bare_resolve_error(None, &importer_dir, raw));
+    }
     // Resolve the real file first so the canonical key is stable
     // across different logical importers of the same vendored file.
     let (real_path, src) = match std::fs::read_to_string(path) {
@@ -649,6 +955,30 @@ struct AliasFile {
     own_fns: Vec<String>,
 }
 
+/// Package dir for a bare alias target (entry file at the package root).
+/// Returns `None` when the target has no parent (should not happen).
+fn bare_pkg_dir(target_canon: &str) -> Option<PathBuf> {
+    std::path::Path::new(target_canon)
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+
+/// All parsed files belonging to one bare package (entry + everything
+/// under its dir). Used so `import "pkg" as m` exposes the package's full
+/// API (lib re-exports src modules), not just the entry file's own items.
+fn pkg_files_for<'a>(
+    parsed: &'a HashMap<String, Program>,
+    pkg_dir: &std::path::Path,
+) -> Vec<(&'a String, &'a Program)> {
+    parsed
+        .iter()
+        .filter(|(canon, _)| {
+            let p = std::path::Path::new(canon.as_str());
+            p == pkg_dir || p.starts_with(pkg_dir)
+        })
+        .collect()
+}
+
 /// Resolve every `import "p" as m` edge:
 /// 1. reject alias/alias and alias/`let`-binding collisions loudly;
 /// 2. merge the target's own functions under canonical internal names
@@ -684,7 +1014,40 @@ fn resolve_aliases(
             }
         }
         let target_prog = parsed.get(target).expect("alias target parsed").clone();
-        let own_fns: Vec<String> = target_prog.functions.iter().map(|f| f.name.clone()).collect();
+        // Bare package alias (`import "pkg" as m`): expose the whole
+        // package closure (entry + src files it re-exports), not just the
+        // entry file. Slash aliases keep the single-file behavior.
+        let is_bare_pkg = is_bare_package_name(raw);
+        let (own_fns, pkg_files): (Vec<String>, Vec<(String, Program)>) = if is_bare_pkg {
+            if let Some(pkg_dir) = bare_pkg_dir(target) {
+                let files = pkg_files_for(parsed, &pkg_dir);
+                let mut union: Vec<String> = files
+                    .iter()
+                    .flat_map(|(_, p)| p.functions.iter().map(|f| f.name.clone()))
+                    .collect();
+                union.sort();
+                union.dedup();
+                let owned: Vec<(String, Program)> = files
+                    .into_iter()
+                    .map(|(c, p)| (c.clone(), p.clone()))
+                    .collect();
+                (union, owned)
+            } else {
+                let own: Vec<String> = target_prog
+                    .functions
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                (own, vec![(target.clone(), target_prog.clone())])
+            }
+        } else {
+            let own: Vec<String> = target_prog
+                .functions
+                .iter()
+                .map(|f| f.name.clone())
+                .collect();
+            (own, vec![(target.clone(), target_prog.clone())])
+        };
         let af = AliasFile {
             alias: alias.clone(),
             target: target.clone(),
@@ -698,6 +1061,10 @@ fn resolve_aliases(
         // Merge the target unit once per canonical file (two aliases for
         // one file share the copy): renamed functions plus flat
         // structs/enums/mods, exactly as a whole import would merge them.
+        // For bare packages the renamed set covers every file in the
+        // package (entry hash shared, so two aliases for one package share
+        // one copy); structs/enums/mods stay entry-only to avoid
+        // double-merging src files already merged flat via the whole walk.
         if units_done.insert(target.clone()) {
             for s in &target_prog.structs {
                 merged.structs.push(s.clone());
@@ -709,11 +1076,34 @@ fn resolve_aliases(
                 mod_origins.push(target.clone());
             }
             merged.mods.extend(target_prog.mods.clone());
-            for f in &target_prog.functions {
-                let mut renamed = f.clone();
-                renamed.name = internal_name(target, &f.name);
-                rewrite_self_calls(&mut renamed, &af);
-                insert_renamed(merged, fn_origins, fn_names, merged_items, target, renamed)?;
+            if is_bare_pkg {
+                for (file_canon, file_prog) in &pkg_files {
+                    // Per-file self scope would be ideal, but package-wide
+                    // union keeps cross-file package calls renamed too
+                    // (all share the entry hash, so one copy per package).
+                    // Calls to outside deps (e.g. itertools) stay flat.
+                    for f in &file_prog.functions {
+                        let mut renamed = f.clone();
+                        renamed.name = internal_name(target, &f.name);
+                        rewrite_self_calls(&mut renamed, &af);
+                        insert_renamed(
+                            merged,
+                            fn_origins,
+                            fn_names,
+                            merged_items,
+                            target,
+                            renamed,
+                        )?;
+                        let _ = file_canon;
+                    }
+                }
+            } else {
+                for f in &target_prog.functions {
+                    let mut renamed = f.clone();
+                    renamed.name = internal_name(target, &f.name);
+                    rewrite_self_calls(&mut renamed, &af);
+                    insert_renamed(merged, fn_origins, fn_names, merged_items, target, renamed)?;
+                }
             }
         }
         // Rewrite this importer's `alias.name(...)` call sites (in every
