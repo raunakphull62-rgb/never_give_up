@@ -1296,6 +1296,12 @@ fn is_builtin(name: &str) -> bool {
             | "random_float"
             | "sha256"
             | "hmac_sha256"
+            | "spawn"
+            | "run"
+            | "now_ms"
+            | "now_iso"
+            | "sleep_ms"
+            | "get_env"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -1548,6 +1554,13 @@ fn exec_builtin(
             let name = get(&args[0]).render();
             Ok(Value::Str(std::env::var(&name).unwrap_or_default()))
         }
+        "get_env" => {
+            if args.len() != 1 {
+                return Err(runtime_err("get_env() takes 1 argument"));
+            }
+            let name = get(&args[0]).render();
+            Ok(Value::Str(crate::stdlib::process::get_env(&name)))
+        }
         "run_process" => {
             if args.len() != 2 {
                 return Err(runtime_err("run_process() takes 2 arguments"));
@@ -1569,6 +1582,45 @@ fn exec_builtin(
                 ("stderr".to_string(), Value::Str(o.stderr)),
                 ("exit_code".to_string(), Value::Int(i64::from(o.exit_code))),
             ]))
+        }
+        "spawn" => {
+            if args.len() != 2 {
+                return Err(runtime_err("spawn() takes 2 arguments"));
+            }
+            let cmd = get(&args[0]).render();
+            let argv = match get(&args[1]) {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        out.push(v.render());
+                    }
+                    out
+                }
+                _ => return Err(runtime_err("spawn() needs an array of strings second")),
+            };
+            let o = crate::stdlib::process::spawn_capture(&cmd, &argv)?;
+            Ok(Value::Map(vec![
+                ("status".to_string(), Value::Int(i64::from(o.exit_code))),
+                ("stdout".to_string(), Value::Str(o.stdout)),
+                ("stderr".to_string(), Value::Str(o.stderr)),
+            ]))
+        }
+        "run" => {
+            if args.len() != 2 {
+                return Err(runtime_err("run() takes 2 arguments"));
+            }
+            let cmd = get(&args[0]).render();
+            let argv = match get(&args[1]) {
+                Value::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        out.push(v.render());
+                    }
+                    out
+                }
+                _ => return Err(runtime_err("run() needs an array of strings second")),
+            };
+            crate::stdlib::process::run_inherit(&cmd, &argv).map(|code| Value::Int(i64::from(code)))
         }
         "regex_is_match" => {
             if args.len() != 2 {
@@ -1630,6 +1682,35 @@ fn exec_builtin(
                 return Err(runtime_err("time_now() takes 0 arguments"));
             }
             Ok(Value::Float(crate::stdlib::time::now()))
+        }
+        "now_ms" => {
+            if !args.is_empty() {
+                return Err(runtime_err("now_ms() takes 0 arguments"));
+            }
+            Ok(Value::Int(crate::stdlib::time::now_ms()))
+        }
+        "now_iso" => {
+            if !args.is_empty() {
+                return Err(runtime_err("now_iso() takes 0 arguments"));
+            }
+            Ok(Value::Str(crate::stdlib::time::now_iso()))
+        }
+        "sleep_ms" => {
+            if args.len() != 1 {
+                return Err(runtime_err("sleep_ms() takes 1 argument"));
+            }
+            let millis = match get(&args[0]) {
+                Value::Int(v) => v as f64,
+                Value::Float(v) => v,
+                other => {
+                    return Err(crate::stdlib::time::not_a_number(
+                        "sleep_ms",
+                        "sleep_ms() millis",
+                        &other.render(),
+                    ));
+                }
+            };
+            crate::stdlib::time::sleep_ms(millis).map(|()| Value::Int(1))
         }
         "time_elapsed" => {
             if args.len() != 1 {

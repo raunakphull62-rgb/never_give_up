@@ -2197,6 +2197,58 @@ impl Parser {
                 Ok(e)
             }
             TokenKind::Spawn => {
+                // S6 `spawn(cmd, args)` process builtin shares the `spawn`
+                // spelling with task-group `spawn <call>`. A `spawn(`
+                // parenthesized list is the builtin Call, except the one
+                // shape task code legitimately uses: a single Call inside
+                // (`spawn (f())`). Anything else (0 args, 1 non-Call arg,
+                // 2 args, 3+ args) is the builtin, so arity/type checking
+                // reports `E-ARITY`/`E-TYPE` instead of a task error. No
+                // valid existing program has Spawn+LParen+comma or
+                // Spawn+LParen+non-Call, so no existing meaning changes.
+                if self.tokens.get(self.pos + 1).map(|t| t.kind.clone())
+                    == Some(TokenKind::LParen)
+                {
+                    let saved = self.pos;
+                    let scopes_next: Vec<u32> =
+                        self.scopes.iter().map(|s| s.next).collect();
+                    self.bump();
+                    self.bump();
+                    let mut args = Vec::new();
+                    let mut ok = true;
+                    if self.peek().kind != TokenKind::RParen {
+                        loop {
+                            match self.parse_expr() {
+                                Ok(a) => args.push(a),
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if self.peek().kind == TokenKind::Comma {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if ok && self.peek().kind == TokenKind::RParen {
+                        let single_call = args.len() == 1
+                            && matches!(args[0], Expr::Call { .. });
+                        if !single_call {
+                            self.bump();
+                            let id = self.next_id();
+                            return Ok(Expr::Call {
+                                id,
+                                func: "spawn".to_string(),
+                                type_args: Vec::new(),
+                                args,
+                            });
+                        }
+                    }
+                    self.pos = saved;
+                    restore_scope_next(&mut self.scopes, &scopes_next);
+                }
                 let kw = self.bump();
                 let inner = self.parse_primary()?;
                 let id = self.next_id();
