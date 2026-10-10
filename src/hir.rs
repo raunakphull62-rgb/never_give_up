@@ -78,7 +78,12 @@ impl Ty {
 /// Parse a declared type annotation (`i32`, `f64`, `str`, `bool`, ...).
 /// Unknown names become `Unknown` (user struct names resolve via structs map).
 pub fn parse_ty(s: &str) -> Ty {    match s {
-        "i32" | "i64" | "u32" | "u64" | "int" => Ty::Int,
+        // D3: every integer spelling is a checked 64-bit `Int`. The
+        // narrower spellings (`i32`, `u32`, `u64`, `u8`) enforce their
+        // range at value boundaries (parameter passing, return,
+        // assignment to an annotated place) at run time; `i64`/`int`
+        // accept the full `i64` range.
+        "i32" | "i64" | "u32" | "u64" | "u8" | "int" => Ty::Int,
         "f32" | "f64" | "float" => Ty::Float,
         "str" | "string" => Ty::Str,
         "bool" => Ty::Bool,
@@ -90,248 +95,18 @@ pub fn parse_ty(s: &str) -> Ty {    match s {
 /// Enum registry: enum name -> variant name -> payload field types.
 pub type EnumTable = HashMap<String, HashMap<String, Vec<Ty>>>;
 
-/// Phase 1d: annotations that spell a wider type than Klang enforces.
+/// Phase 1d lint, retired by D3 (Wave1 S4).
 ///
-/// `i64`/`u32`/`u64` parse to `Ty::Int` (checked `i32` range); `u8` — like
-/// any other unknown name — stays `Unknown` (unchecked, dynamic). Both
-/// keep compiling EXACTLY as before: this pass only surfaces the fact as
-/// `W-TYPE-NARROW` (severity `warning`, never an error), so no existing
-/// program changes meaning and `check` stays green. Real enforcement is
-/// design item D3.
-///
-/// Mirrors resolution (`resolve_param_ty`/`resolve_generic_ty`): a name
-/// that is a type parameter or a known struct/enum (nominal) never warns,
-/// and qualified `m::T` paths are module lookups, not builtins.
-pub fn narrow_type_warnings(program: &Program, file: &str) -> Vec<Diagnostic> {
-    let structs: Vec<String> = program
-        .structs
-        .iter()
-        .map(|s| s.name.clone())
-        .chain(program.mods.iter().flat_map(|m| m.structs.iter().map(|s| s.name.clone())))
-        .collect();
-    let enums: Vec<String> = program
-        .enums
-        .iter()
-        .map(|e| e.name.clone())
-        .chain(program.mods.iter().flat_map(|m| m.enums.iter().map(|e| e.name.clone())))
-        .collect();
-    let mut out = Vec::new();
-    let mut fns: Vec<(&FunctionDecl, String)> = program
-        .functions
-        .iter()
-        .map(|f| (f, String::new()))
-        .collect();
-    for m in &program.mods {
-        for f in &m.functions {
-            fns.push((f, format!("{}::", m.name)));
-        }
-    }
-    for (f, prefix) in &fns {
-        let owner = format!("{prefix}{}", f.name);
-        for p in &f.params {
-            lint_annotation(
-                &p.ty,
-                &format!("parameter `{}` of function `{owner}`", p.name),
-                &f.type_params,
-                &enums,
-                &structs,
-                file,
-                f.name_span,
-                &mut out,
-            );
-        }
-        lint_annotation(
-            &f.return_ty,
-            &format!("return type of function `{owner}`"),
-            &f.type_params,
-            &enums,
-            &structs,
-            file,
-            f.name_span,
-            &mut out,
-        );
-        let mut lits = Vec::new();
-        crate::closures::collect_closures(&f.body, &mut lits);
-        for lit in &lits {
-            for p in &lit.params {
-                lint_annotation(
-                    &p.ty,
-                    &format!("parameter `{}` of a closure in function `{owner}`", p.name),
-                    &f.type_params,
-                    &enums,
-                    &structs,
-                    file,
-                    f.name_span,
-                    &mut out,
-                );
-            }
-            lint_annotation(
-                &lit.return_ty,
-                &format!("return type of a closure in function `{owner}`"),
-                &f.type_params,
-                &enums,
-                &structs,
-                file,
-                f.name_span,
-                &mut out,
-            );
-        }
-    }
-    for s in program.structs.iter().chain(
-        program
-            .mods
-            .iter()
-            .flat_map(|m| m.structs.iter()),
-    ) {
-        for fld in &s.fields {
-            lint_annotation(
-                &fld.ty,
-                &format!("field `{}` of struct `{}`", fld.name, s.name),
-                &s.type_params,
-                &enums,
-                &structs,
-                file,
-                (0, 0),
-                &mut out,
-            );
-        }
-    }
-    for e in program.enums.iter().chain(
-        program.mods.iter().flat_map(|m| m.enums.iter()),
-    ) {
-        for v in &e.variants {
-            for fld in &v.fields {
-                lint_annotation(
-                    &fld.ty,
-                    &format!(
-                        "field `{}` of variant `{}` in enum `{}`",
-                        fld.name, v.name, e.name
-                    ),
-                    &e.type_params,
-                    &enums,
-                    &structs,
-                    file,
-                    (0, 0),
-                    &mut out,
-                );
-            }
-        }
-    }
-    out
-}
-
-/// Lint one raw annotation string: closure-type spellings split first,
-/// then the base name plus every generic argument is checked.
-fn lint_annotation(
-    raw: &str,
-    where_: &str,
-    type_params: &[String],
-    enums: &[String],
-    structs: &[String],
-    file: &str,
-    span: (usize, usize),
-    out: &mut Vec<Diagnostic>,
-) {
-    // `fn(A, B) -> R` spellings name real parameter/return positions.
-    if let Some((ps, r)) = crate::closures::split_closure_ty(raw) {
-        for p in &ps {
-            lint_annotation(p, where_, type_params, enums, structs, file, span, out);
-        }
-        lint_annotation(&r, where_, type_params, enums, structs, file, span, out);
-        return;
-    }
-    let base = base_ty_name(raw);
-    // Nominal bindings never narrow: type parameters, known structs/enums,
-    // and qualified module paths (a different namespace entirely).
-    let nominal = type_params.iter().any(|t| t == base)
-        || enums.iter().any(|n| n == base)
-        || structs.iter().any(|n| n == base)
-        || base.contains("::");
-    if !nominal {
-        if matches!(base, "i64" | "u32" | "u64") {
-            out.push(Diagnostic::warning(
-                "W-TYPE-NARROW",
-                &format!(
-                    "{where_} is annotated `{base}`, but Klang enforces the `i32` range (-2147483648..2147483647)"
-                ),
-                file,
-                span.0,
-                span.1,
-                "`i64`/`u32`/`u64` are aliases for the `i32`-checked int; real widths are a future design item",
-                &["use `i32` to spell what is enforced"],
-                "types/narrow",
-            ));
-        } else if base == "u8" {
-            out.push(Diagnostic::warning(
-                "W-TYPE-NARROW",
-                &format!(
-                    "{where_} is annotated `u8`, which is not a checked type (it stays dynamic)"
-                ),
-                file,
-                span.0,
-                span.1,
-                "unknown type names stay `Unknown` (dynamic); only known annotations are checked",
-                &["use `i32` for a checked integer"],
-                "types/narrow",
-            ));
-        }
-    }
-    for arg in split_generic_args(raw) {
-        lint_annotation(&arg, where_, type_params, enums, structs, file, span, out);
-    }
-}
-
-/// Top-level `<...>` arguments of one annotation (`Opt<i64>` -> [`i64`]);
-/// empty unless the annotation carries explicit generic arguments.
-fn split_generic_args(raw: &str) -> Vec<String> {
-    let bytes = raw.as_bytes();
-    let Some(start) = raw.find('<') else {
-        return Vec::new();
-    };
-    // Find the `<` matching `start` (annotations are parser-built, so a
-    // match exists; bail out silently otherwise — no warning is safer
-    // than a wrong one).
-    let mut depth = 0;
-    let mut end = None;
-    for (i, b) in bytes.iter().enumerate().skip(start) {
-        if *b == b'<' {
-            depth += 1;
-        } else if *b == b'>' {
-            depth -= 1;
-            if depth == 0 {
-                end = Some(i);
-                break;
-            }
-        }
-    }
-    let Some(end) = end else {
-        return Vec::new();
-    };
-    let inner = &raw[start + 1..end];
-    let mut args = Vec::new();
-    let mut cur_depth = 0;
-    let mut cur = String::new();
-    for c in inner.chars() {
-        match c {
-            '<' => {
-                cur_depth += 1;
-                cur.push(c);
-            }
-            '>' => {
-                cur_depth -= 1;
-                cur.push(c);
-            }
-            ',' if cur_depth == 0 => {
-                args.push(cur.trim().to_string());
-                cur.clear();
-            }
-            _ => cur.push(c),
-        }
-    }
-    if !cur.trim().is_empty() {
-        args.push(cur.trim().to_string());
-    }
-    args
+/// `i64`/`u32`/`u64` used to parse to `Ty::Int` while only the `i32` range
+/// was enforced, and `u8` stayed unchecked `Unknown`; this pass surfaced
+/// that as `W-TYPE-NARROW`. Under D3 every integer spelling is an honest
+/// checked type (`Int` is 64-bit; the narrower spellings enforce their
+/// range at value boundaries with `E-RUNTIME`), so there is nothing left
+/// to warn about that is now correct. The function stays (same signature)
+/// so `check`/`lsp` call sites are untouched; it always returns empty.
+/// Real enforcement lives in the runtime boundary checks (see D3).
+pub fn narrow_type_warnings(_program: &Program, _file: &str) -> Vec<Diagnostic> {
+    Vec::new()
 }
 
 /// Base nominal name of a possibly-generic annotation (`Opt<i32>` -> `Opt`,
@@ -482,6 +257,20 @@ impl TypedHIR {
     }
 
     pub fn check_with_file(program: Program, file: &str) -> Result<Self, Vec<Diagnostic>> {
+        Self::check_with_file_strict(program, file, false)
+    }
+
+    /// D2 strict mode: when `strict` is true, a statically-known non-`Bool`
+    /// condition (`if`/`while`, `&&`/`||`/`!` operands) is `E-TYPE` naming
+    /// the offending type. `Unknown` (dynamic) stays allowed — the runtime
+    /// erases `Bool` to `Int` 0/1, so no runtime check could distinguish
+    /// them; full runtime strictness awaits real `Bool` values (D2
+    /// follow-up). Default (`false`) keeps today's `Bool`/`Int` rule.
+    pub fn check_with_file_strict(
+        program: Program,
+        file: &str,
+        strict: bool,
+    ) -> Result<Self, Vec<Diagnostic>> {
         // Modules resolve first: `mod` blocks flatten into qualified
         // top-level items (`m::f`) with references rewritten and visibility
         // enforced. Module-free programs come back identical.
@@ -738,6 +527,7 @@ impl TypedHIR {
                 &enums,
                 &mut diags,
                 &alias_scopes,
+                strict,
             );
         }
         if diags.is_empty() {
@@ -794,6 +584,7 @@ fn check_function(
     enums: &EnumTable,
     diags: &mut Vec<Diagnostic>,
     alias_scopes: &[crate::ast::AliasScope],
+    strict: bool,
 ) {
     let mut defined: HashMap<String, Ty> = HashMap::new();
     for p in &f.params {
@@ -810,6 +601,7 @@ fn check_function(
     }
     let mut cx = Ctx::default();
     cx.alias_scopes = alias_scopes.to_vec();
+    cx.strict = strict;
     check_block(
         file,
         &f.body,
@@ -852,6 +644,11 @@ struct Ctx {
     /// alias-free programs, so method-call checking is byte-identical
     /// unless the file actually uses `import ... as ...`.
     alias_scopes: Vec<crate::ast::AliasScope>,
+    /// D2 strict truthiness (Wave1 S4): statically-known non-`Bool`
+    /// conditions are `E-TYPE`. False by default; enabled by
+    /// `check_with_file_strict` (`klang run/check --strict`,
+    /// `[project] strict = true`).
+    strict: bool,
     loop_depth: usize,
     /// `loop_depth` at each enclosing `try` entry, innermost last.
     /// `break`/`continue` inside a `try` must target a loop that also
@@ -1204,7 +1001,7 @@ fn check_block(
                     group_stack,
                     cx,
                 );
-                require_condition(file, &cond_ty, "while", diags);
+                require_condition(file, &cond_ty, "while", cx.strict, diags);
                 cx.loop_depth += 1;
                 let mut body_defined = defined.clone();
                 let pending_before = group_stack.last().map(|v| v.len()).unwrap_or(0);
@@ -1434,7 +1231,7 @@ fn check_block(
                     group_stack,
                     cx,
                 );
-                require_condition(file, &cond_ty, "if", diags);
+                require_condition(file, &cond_ty, "if", cx.strict, diags);
                 // Branches are block-scoped: new lets inside do not leak out.
                 // Must-analysis: only awaits on every path satisfy an outer
                 // spawn. Awaits in one branch alone never propagate.
@@ -1609,15 +1406,22 @@ fn assignable(got: &Ty, want: &Ty) -> bool {
     }
 }
 
-fn require_condition(file: &str, ty: &Ty, what: &str, diags: &mut Vec<Diagnostic>) {
-    match ty {
-        Ty::Bool | Ty::Int | Ty::Unknown => {}
-        other => diags.push(type_mismatch(
-            file,
-            &format!("{what} condition"),
-            "bool",
-            other,
-        )),
+fn require_condition(
+    file: &str,
+    ty: &Ty,
+    what: &str,
+    strict: bool,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // D2 strict: only `Bool` (and dynamic `Unknown`, which no static rule
+    // can judge) may condition. Default keeps the historical `Bool`/`Int`.
+    let ok = if strict {
+        matches!(ty, Ty::Bool | Ty::Unknown)
+    } else {
+        matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown)
+    };
+    if !ok {
+        diags.push(type_mismatch(file, &format!("{what} condition"), "bool", ty));
     }
 }
 
@@ -2012,12 +1816,15 @@ fn check_expr(
 ) -> Ty {
     match e {
         Expr::Int { value, .. } => {
-            // `run` narrows to i32: reject literals that would wrap.
-            if *value > i32::MAX as i64 {
+            // D3: `run` holds the full `i64` range. The lexers guarantee
+            // the magnitude fits `u64`; exactly 2^63 arrives as the
+            // `i64::MIN` placeholder (no bare `-2^63` spelling exists —
+            // minus is unary), which is only valid under negation below.
+            if *value == i64::MIN {
                 diags.push(type_mismatch(
                     file,
                     "integer literal",
-                    "i32 range",
+                    "i64 range",
                     &Ty::Int,
                 ));
                 return Ty::Unknown;
@@ -2897,7 +2704,14 @@ fn check_expr(
                 cx,
             );
             for (ty, what) in [(&l, "left `&&`/`||`"), (&r, "right `&&`/`||`")] {
-                if !matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown) {
+                // D2 strict: operands must be `Bool` (or dynamic
+                // `Unknown`); default also accepts `Int`.
+                let ok = if cx.strict {
+                    matches!(ty, Ty::Bool | Ty::Unknown)
+                } else {
+                    matches!(ty, Ty::Bool | Ty::Int | Ty::Unknown)
+                };
+                if !ok {
                     diags.push(type_mismatch(file, what, "bool", ty));
                 }
             }
@@ -2919,23 +2733,26 @@ fn check_expr(
                 group_stack,
                 cx,
             );
-            if !matches!(t, Ty::Bool | Ty::Int | Ty::Unknown) {
+            // D2 strict: the operand must be `Bool` (or dynamic `Unknown`);
+            // default also accepts `Int`.
+            let ok = if cx.strict {
+                matches!(t, Ty::Bool | Ty::Unknown)
+            } else {
+                matches!(t, Ty::Bool | Ty::Int | Ty::Unknown)
+            };
+            if !ok {
                 diags.push(type_mismatch(file, "`!` operand", "bool", &t));
             }
             Ty::Bool
         }
         Expr::Neg { inner, .. } => {
-            // `-2147483648` is valid i32::MIN although the positive
-            // literal alone exceeds the range: check the negated value.
+            // D3: any lexed magnitude negates into `i64`. In particular
+            // `-9223372036854775808` is valid `i64::MIN`: its magnitude
+            // (2^63) arrives as the `i64::MIN` placeholder, which is only
+            // meaningful here (the bare form is rejected above).
             if let Expr::Int { value, .. } = inner.as_ref() {
-                if *value > 2147483648 {
-                    diags.push(type_mismatch(
-                        file,
-                        "integer literal",
-                        "i32 range",
-                        &Ty::Int,
-                    ));
-                    return Ty::Unknown;
+                if *value == i64::MIN {
+                    return Ty::Int;
                 }
                 return Ty::Int;
             }
@@ -3216,7 +3033,9 @@ fn check_arm_body(
             group_stack,
             cx,
         );
-        require_condition(file, &g_ty, "match guard", diags);
+        // D2 strict does not cover match guards (only `if`/`while` and the
+        // boolean operators): they keep the default `Bool`/`Int` rule.
+        require_condition(file, &g_ty, "match guard", false, diags);
     }
     check_expr(
         file,

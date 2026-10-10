@@ -80,27 +80,30 @@ fn bugs3_other_escapes_still_work() {
 
 #[test]
 fn bugs3_add_overflow_is_error() {
-    let d = run_err_code("fn main() -> i32 { let a = 2147483647 let b = a + 1 print(b) return 0 }");
+    // D3: the boundary moved from i32 to i64 (was `2147483647 + 1`).
+    let d = run_err_code("fn main() -> i32 { let a = 9223372036854775807 let b = a + 1 print(b) return 0 }");
     assert_eq!(d.code, "E-OVERFLOW", "{}", d.to_json());
     assert_eq!(d.rule, "arithmetic/overflow");
 }
 
 #[test]
 fn bugs3_sub_overflow_is_error() {
-    let d = run_err_code("fn main() -> i32 { let a = -2147483648 let b = a - 1 print(b) return 0 }");
+    // D3: the boundary moved from i32 to i64 (was `-2147483648 - 1`).
+    let d = run_err_code("fn main() -> i32 { let a = -9223372036854775808 let b = a - 1 print(b) return 0 }");
     assert_eq!(d.code, "E-OVERFLOW", "{}", d.to_json());
 }
 
 #[test]
 fn bugs3_mul_overflow_is_error() {
-    let d = run_err_code("fn main() -> i32 { let a = 2147483647 let b = a * 2 print(b) return 0 }");
+    // D3: the boundary moved from i32 to i64 (was `2147483647 * 2`).
+    let d = run_err_code("fn main() -> i32 { let a = 9223372036854775807 let b = a * 2 print(b) return 0 }");
     assert_eq!(d.code, "E-OVERFLOW", "{}", d.to_json());
 }
 
 #[test]
 fn bugs3_div_overflow_is_error() {
-    // i32::MIN / -1 is the division overflow edge case.
-    let d = run_err_code("fn main() -> i32 { let a = -2147483648 let b = a / -1 print(b) return 0 }");
+    // D3: i64::MIN / -1 is the division overflow edge case (was i32::MIN / -1).
+    let d = run_err_code("fn main() -> i32 { let a = -9223372036854775808 let b = a / -1 print(b) return 0 }");
     assert_eq!(d.code, "E-OVERFLOW", "{}", d.to_json());
 }
 

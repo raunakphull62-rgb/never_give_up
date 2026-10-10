@@ -103,6 +103,10 @@ impl LowerContext {
             name: func.name.clone(),
             origin: func.id.clone(),
             params: func.params.iter().map(|p| p.name.clone()).collect(),
+            // Listing-only lowering (execution goes through the v2
+            // tree-walker): no boundary metadata needed.
+            param_tys: vec![String::new(); func.params.len()],
+            return_ty: "unknown".to_string(),
             instrs,
         }
     }
@@ -591,6 +595,8 @@ fn lower_echo_fn(echo_fn: &EchoDecl) -> MirFunction {
         name: echo_fn.name.clone(),
         origin: echo_fn.id.clone(),
         params: echo_fn.params.iter().map(|(n, _)| n.clone()).collect(),
+        param_tys: vec![String::new(); echo_fn.params.len()],
+        return_ty: "unknown".to_string(),
         instrs,
     }
 }
@@ -610,7 +616,9 @@ fn lower_flow_decl(flow_decl: &crate::ast::flow::FlowDecl) -> MirFunction {
     MirFunction {
         name: flow_decl.name.clone().unwrap_or_else(|| "flow_anon".to_string()),
         origin: flow_decl.id.clone(),
-        params: lowered.env,
+        params: lowered.env.clone(),
+        param_tys: vec![String::new(); lowered.env.len()],
+        return_ty: "unknown".to_string(),
         instrs,
     }
 }

@@ -162,10 +162,15 @@ fn type_method_arity_is_exact() {
 }
 
 #[test]
-fn type_int_literals_checked_against_i32() {
+fn type_int_literals_checked_against_i64() {
+    // D3: the literal boundary moved from i32 to i64 (was `3000000000`
+    // and `-2147483649` as E-TYPE, `2147483647`/`-2147483648` clean).
     // Out-of-range literals would wrap silently at `run` time.
-    check_err_code("fn main() -> i32 { return 3000000000 }", "E-TYPE");
-    check_err_code("fn main() -> i32 { return -2147483649 }", "E-TYPE");
+    check_err_code("fn main() -> i32 { return 9223372036854775808 }", "E-TYPE");
+    check_clean("fn main() -> i32 { return 3000000000 }");
+    check_clean("fn main() -> i32 { return -2147483649 }");
+    check_clean("fn main() -> i32 { return 9223372036854775807 }");
+    check_clean("fn main() -> i32 { return -9223372036854775808 }");
     check_clean("fn main() -> i32 { return 2147483647 }");
     check_clean("fn main() -> i32 { return -2147483648 }");
     check_clean("fn main() -> i32 { let x = 5 return -x }");

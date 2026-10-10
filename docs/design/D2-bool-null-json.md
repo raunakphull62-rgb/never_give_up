@@ -235,3 +235,69 @@ truthy; `==` just agrees).
 JSON dual-read + encoder modes; bridge-rule tests; release-note audit of
 printed-bool snapshots). The checker half alone would be S — the runtime
 and JSON compat are the work.
+
+## 8. Decision (Wave1 S4, owner-approved, implemented)
+
+**Neither A, B, nor C is implemented in this wave. What is implemented
+is a strict-mode opt-in that changes no default behavior at all** —
+the recommended Option B (real `Value::Bool`/`Value::Null` with the
+truthiness bridge) stays future work, and this decision constrains
+nothing about it.
+
+Default mode is byte-for-byte unchanged: `Bool` and `Int` conditions
+(`if`/`while`, `&&`/`||`/`!` operands) all check clean and run with
+today's truthiness. Strict mode is selected per invocation or per
+project:
+
+```text
+klang run --strict prog.klang
+klang check --strict prog.klang
+```
+
+```text
+# klang.toml
+[project]
+strict = true
+```
+
+In strict mode, a statically-known non-`Bool` value used as a
+condition in `if`/`while` or with `&&`, `||`, `!` is `E-TYPE` naming
+the offending type (e.g. ``if condition: want bool, got i32``).
+`--strict`/`--strict=true` enables, `--strict=false` explicitly
+disables; without a flag, `[project] strict` decides (absent key or
+absent file means default). An explicit flag beats the manifest either
+way. The flag is stripped before positional parsing and never acts as
+a file, entry, or program argument name — anything after `--` stays
+program argv untouched — and it overrides nothing else
+(registry/verbose/offline are independent). `build` honors the same
+flag through its shared check stage; `run-v2`/`check-v2`, LSP, and MCP
+stay default-mode (the v2 track and the editor/tool surfaces have no
+strict switch in this wave).
+
+Compile-time vs run-time (the choice the task leaves to the
+implementation): **strictness is compile-time only, over statically
+known types.** `Bool` and `Unknown` pass; every other static type —
+including `Int` — fails. `Unknown` (map lookups, dynamic index,
+generic positions) stays allowed by necessity, not by leniency: the
+runtime erases `Bool` to `Int` 0/1, so no runtime rule could
+distinguish a dynamic `true` from a dynamic `1`, and rejecting all
+dynamic conditions would outlaw working programs. A strict violation
+therefore surfaces at the check stage, identically for `check
+--strict` (exit 1, `check: FAIL`) and `run --strict` (fails before
+executing a line). There is no runtime truthiness change in either
+mode.
+
+Scope boundary (deliberate): only `if`/`while` conditions and
+`&&`/`||`/`!` operands are strict-gated. `assert()`, match guards,
+and `for`-range bounds keep the default `Bool`/`Int` rule in both
+modes — they are not conditions in the decided sense, and widening
+the gate would change diagnostics the task did not ask to change.
+
+Gates: `tests/strict_mode_gates.rs` covers default vs strict for each
+of the five positions (`if`, `while`, `&&`, `||`, `!`); `Bool` accepted
+and `Unknown` allowed in strict mode; the flag via CLI (before/after
+the file, `run` and `check`); the manifest key (true/false/absent,
+wrong section ignored); flag-beats-manifest precedence in both
+directions; and flag inertness (a `Bool` program prints and exits
+identically with and without `--strict`; `--strict` after `--` is
+argv).

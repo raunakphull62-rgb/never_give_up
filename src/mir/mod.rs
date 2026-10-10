@@ -14,6 +14,8 @@ pub mod echo_lowering;
 /// v2 Flow lowering (explicit `dep=` environments).
 pub mod flow_lowering;
 
+use std::collections::HashMap;
+
 use crate::ast::{AssignTarget, Expr, MatchBinding, NodeId, Program, Stmt};
 
 /// One MIR instruction with source origin.
@@ -234,6 +236,12 @@ pub struct MirFunction {
     pub name: String,
     pub origin: NodeId,
     pub params: Vec<String>,
+    /// Raw declared annotation per parameter (D3: the runtime enforces
+    /// `i32`/`u32`/`u64`/`u8` ranges at call boundaries from these;
+    /// `""` means "no annotation", e.g. closure capture prefixes).
+    pub param_tys: Vec<String>,
+    /// Raw declared return annotation (D3: enforced at `return`).
+    pub return_ty: String,
     pub instrs: Vec<MirInstr>,
 }
 
@@ -241,6 +249,12 @@ pub struct MirFunction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MirModule {
     pub functions: Vec<MirFunction>,
+    /// Struct name -> (field name -> raw declared field type). D3 uses
+    /// this for construction (`StructNew`) and field-assignment
+    /// (`FieldSet`) boundary checks. Enum payloads are not listed
+    /// (they lower through `StructNew` under the enum name and stay
+    /// statically checked only — a documented gap).
+    pub struct_fields: HashMap<String, HashMap<String, String>>,
 }
 
 impl MirModule {
@@ -825,6 +839,27 @@ fn lower_expr_to_value(e: &Expr, instrs: &mut Vec<MirInstr>, tmp: &mut u32) -> S
             dst
         }
         Expr::Neg { inner, .. } => {
+            // D3: fold a negated literal. In particular the 2^63
+            // magnitude placeholder (`i64::MIN` from the lexer) negates
+            // to `i64::MIN`, which cannot go through `MirOp::Neg` (that
+            // would overflow on it); every other magnitude folds exactly.
+            if let Expr::Int { value, .. } = inner.as_ref() {
+                let folded = if *value == i64::MIN {
+                    i64::MIN
+                } else {
+                    -value
+                };
+                let dst = tmp_name(tmp);
+                push(
+                    instrs,
+                    e.id(),
+                    MirOp::Const {
+                        into: dst.clone(),
+                        value: folded,
+                    },
+                );
+                return dst;
+            }
             let v = lower_expr_to_value(inner, instrs, tmp);
             let dst = tmp_name(tmp);
             push(
@@ -1036,6 +1071,13 @@ pub fn lower(program: &Program) -> MirModule {
     let (flat, _) = crate::modules::resolve(program);
     let program = &flat;
     let mut out = MirModule::default();
+    for s in &program.structs {
+        let mut fields = HashMap::new();
+        for fld in &s.fields {
+            fields.insert(fld.name.clone(), fld.ty.clone());
+        }
+        out.struct_fields.insert(s.name.clone(), fields);
+    }
     for f in &program.functions {
         let mut instrs = Vec::new();
         let mut tmp: u32 = 0;
@@ -1045,6 +1087,8 @@ pub fn lower(program: &Program) -> MirModule {
             name: f.name.clone(),
             origin: f.id.clone(),
             params: f.params.iter().map(|p| p.name.clone()).collect(),
+            param_tys: f.params.iter().map(|p| p.ty.clone()).collect(),
+            return_ty: f.return_ty.clone(),
             instrs,
         });
         // Lambda-lifted closure bodies: one synthetic function per
@@ -1065,10 +1109,17 @@ pub fn lower(program: &Program) -> MirModule {
             lower_block(&lit.body.stmts, &mut cinstrs, &mut ctmp, &mut cloops);
             let mut cparams = caps;
             cparams.extend(lit.params.iter().map(|p| p.name.clone()));
+            // Captures carry no annotation (unchecked prefix); the
+            // declared parameters keep theirs for boundary checks.
+            let mut cparam_tys: Vec<String> =
+                vec![String::new(); cparams.len().saturating_sub(lit.params.len())];
+            cparam_tys.extend(lit.params.iter().map(|p| p.ty.clone()));
             out.functions.push(MirFunction {
                 name: crate::closures::closure_fn_name(&lit.id),
                 origin: lit.id.clone(),
                 params: cparams,
+                param_tys: cparam_tys,
+                return_ty: lit.return_ty.clone(),
                 instrs: cinstrs,
             });
         }

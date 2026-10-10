@@ -533,41 +533,11 @@ pub fn tool_run(source: &str, entry: &str) -> (bool, Json) {
         Ok((Ok(v), out)) => {
             // Preserve the value's actual type: `Float` stays a JSON
             // number with its fractional part (the old `i32` channel
-            // truncated `42.0` to `42`); out-of-range `Int` stays a loud
-            // `E-OVERFLOW` instead of a silent wrap.
+            // truncated `42.0` to `42`). D3: return boundaries are
+            // enforced inside the runtime, so a wide `Int` legitimately
+            // reaches here.
             let ret = match &v {
-                crate::runtime::Value::Int(n) => {
-                    if *n < i32::MIN as i64 || *n > i32::MAX as i64 {
-                        let d = crate::diagnostics::Diagnostic::error(
-                            "E-OVERFLOW",
-                            "integer overflow in `return`: result out of i32 range",
-                            "runtime",
-                            0,
-                            0,
-                            "i32 arithmetic never wraps: out-of-range results are errors",
-                            &["use smaller operands", "check bounds before operating"],
-                            "arithmetic/overflow",
-                        );
-                        return (
-                            true,
-                            Json::Obj(vec![
-                                ("ok".to_string(), Json::Bool(false)),
-                                ("stage".to_string(), Json::Str("run".to_string())),
-                                (
-                                    "stdout".to_string(),
-                                    Json::Arr(
-                                        out.iter().cloned().map(Json::Str).collect(),
-                                    ),
-                                ),
-                                (
-                                    "error".to_string(),
-                                    parse_json(&d.to_json()).expect("to_json is valid json"),
-                                ),
-                            ]),
-                        );
-                    }
-                    Json::Int(*n)
-                }
+                crate::runtime::Value::Int(n) => Json::Int(*n),
                 crate::runtime::Value::Float(f) => Json::Float(*f),
                 other => Json::Str(other.render()),
             };

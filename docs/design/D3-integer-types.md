@@ -201,3 +201,79 @@ conversions keep today's truncation rules.
 migration + lint update). Option A would be **L**; the `u8` follow-up is
 **S/M**. C is **M** too (a bigint package is real work) but solves
 nothing in the core — not recommended.
+
+## 8. Decision (Wave1 S4, owner-approved, implemented)
+
+**Adopted: Option B with checked narrow boundaries and a checked `u8`,
+in one step.** `Int` is 64-bit with checked arithmetic: every arithmetic
+op (`+ - * / %`, unary `-`, `abs`) traps past 64 bits as loud
+`E-OVERFLOW` (rule `arithmetic/overflow`), never wrapping. The
+annotations `i32`, `u32`, `i64`, `u64`, `u8` (plus `int`, a full-range
+spelling) are all honest checked types: the narrower four enforce their
+range at value boundaries, and a value outside the range is a loud
+`E-RUNTIME` (rule `types/range`) naming the type and the value, e.g.
+
+```text
+`id` arg 0: value 256 out of `u8` range 0..255
+```
+
+Ranges: `i32` −2147483648..2147483647, `u32` 0..4294967295,
+`i64`/`int` the full `i64` range (no narrowing), `u64` 0..2⁶⁴−1
+(non-negative `i64` values pass; magnitudes past `i64::MAX` are
+unspellable — still unrepresentable, as documented in §4),
+`u8` 0..255. `W-TYPE-NARROW` is retired (the lint stays as an empty
+pass so call sites are untouched): nothing it used to flag is wrong
+anymore.
+
+Boundaries covered (all three, runtime-enforced for checked and
+unchecked callers alike):
+
+- **Parameter passing**: each call argument is checked against the
+  callee's declared annotation, including closure calls (captures
+  carry no annotation and skip).
+- **Return**: explicit `return` and fall-off values are checked against
+  the declared return annotation.
+- **Assignment to an annotated variable**: rebinding an annotated
+  parameter name (`x = …`, lowered to `Copy`) re-checks it; struct
+  construction (`S { n: … }`) and field assignment (`s.n = …`) check
+  against the struct schema. (A `let` shadowing an annotated parameter
+  name checks against that name's annotation too — the name is
+  annotated in its scope. `let`-fresh names, array elements, and
+  `Unknown`-typed positions never check.)
+
+Compile-time vs run-time split: the checker owns what it can know —
+bare literals past 64 bits are `E-TYPE` (`9223372036854775808` bare;
+`-9223372036854775808` is valid `i64::MIN` via the generalized
+negated-limit rule, folded to a constant at lowering so it never goes
+through a trapping `Neg`), and static type agreement is unchanged (all
+integer spellings are still `Ty::Int`, so no program that checks today
+stops checking). The runtime owns values: boundaries and overflow are
+`E-RUNTIME`/`E-OVERFLOW` at execution. Literals past `u64::MAX`
+magnitudes stay `E-PARSE` ("integer literal out of range").
+
+Unchanged by decision: `parse_int` stays strict-`i32` (`E-PARSE-INT`
+outside it); `random_int(lo, hi)` keeps 32-bit bounds;
+`ord`/`chr` keep their scalar rules; `len`/`file_size` keep returning
+`Int` (now able to report past 2 GiB — e.g. `now_ms()` epoch millis
+must be returned from `-> i64`, not `-> i32`); the `run_with_output`
+`i32` channel keeps its limit (a test-helper channel, not a language
+boundary). Enum payloads stay statically checked only (they lower
+through `StructNew` under the enum name and are not in the struct
+schema — a documented gap). The int-only JIT is untouched (wrapping
+stays a loud-or-allowlisted divergence per D6, now pinned at the 64-bit
+boundary instead of the 32-bit one).
+
+Interpreter/v2 overlap: the v2 tree-walker gets the same 64-bit
+checked arithmetic and the same `E-OVERFLOW` edges (same corpus
+assertions run under `run` and `run-v2`). v2 has no annotated
+boundaries — its parameter model does not spell widths — so boundary
+behavior is v1-only by construction, and parity agrees wherever the
+two overlap.
+
+Gates: `tests/int_boundary_gates.rs` covers every annotated boundary
+(parameter, return, assignment incl. struct construction/field
+assignment) at, just inside, and just outside each type's range;
+negatives for every unsigned type; `u8` checked; 64-bit overflow
+still `E-OVERFLOW` on both backends; CLI exit codes (0 vs 1 with
+`E-RUNTIME`). The moved i32-era assertions are enumerated in
+`docs/progress/S4.md`.

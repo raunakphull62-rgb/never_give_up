@@ -68,27 +68,27 @@ programs = ["tests/parity/ovf_add.klang"]
 backend = "jit"
 outcome = "exit"
 exit = 0
-stdout = "2147483648\n"
+stdout = "-9223372036854775808\n"
 stderr_contains = ""
-reason = "S2: JIT adds i64-wide with no overflow check, printing 2147483648 and exiting 0 where v1/v2 fail E-OVERFLOW. Silent wrong answer, not a crash."
+reason = "S2: JIT adds wrapping-i64 with no overflow check, printing -9223372036854775808 and exiting 0 where v1/v2 fail E-OVERFLOW at the i64 boundary (D3 moved the corpus here from the old i32 case). Silent wrong answer, not a crash."
 
 [[entry]]
 programs = ["tests/parity/ovf_sub.klang"]
 backend = "jit"
 outcome = "exit"
 exit = 0
-stdout = "-2147483649\n"
+stdout = "9223372036854775807\n"
 stderr_contains = ""
-reason = "S2: same i64-wide class as ovf_add (MIN - 1 computed exactly, where v1/v2 fail E-OVERFLOW)."
+reason = "S2: same wrapping-i64 class as ovf_add (MIN - 1 wraps to MAX, where v1/v2 fail E-OVERFLOW at the i64 boundary)."
 
 [[entry]]
 programs = ["tests/parity/ovf_mul.klang"]
 backend = "jit"
 outcome = "exit"
 exit = 0
-stdout = "3000000000\n"
+stdout = "-2\n"
 stderr_contains = ""
-reason = "S2: same i64-wide class as ovf_add (1000000 * 3000 exceeds i32; v1/v2 fail E-OVERFLOW)."
+reason = "S2: same wrapping-i64 class as ovf_add (MAX * 2 wraps to -2; v1/v2 fail E-OVERFLOW at the i64 boundary)."
 
 [[entry]]
 programs = ["tests/parity/ovf_neg.klang"]
@@ -97,16 +97,15 @@ outcome = "exit"
 exit = 0
 stdout = ""
 stderr_contains = ""
-reason = "S2: negating i32::MIN wraps i64-wide (exit code is the low byte, 0) where v1/v2 fail E-OVERFLOW in `sub`. No output makes this the quietest wrong answer in the corpus."
+reason = "S2: negating i64::MIN wraps (exit code is the low byte, 0) where v1/v2 fail E-OVERFLOW in `sub`. No output makes this the quietest wrong answer in the corpus."
 
 [[entry]]
 programs = ["tests/parity/ovf_mindiv.klang"]
 backend = "jit"
-outcome = "exit"
-exit = 0
+outcome = "crash"
 stdout = ""
 stderr_contains = ""
-reason = "S2: MIN / -1 overflows i32 (v1/v2 fail E-OVERFLOW in `div`); the JIT computes i64-wide and exits 0 silently."
+reason = "S1: i64::MIN / -1 traps the JIT's raw sdiv (SIGFPE) where v1/v2 fail loud E-OVERFLOW in `div`. Same trap class as div_zero/mod_zero; D3 moved the corpus here from the old i32 case (which the JIT computed exactly)."
 
 [[entry]]
 programs = ["tests/parity/recursion_deep.klang"]

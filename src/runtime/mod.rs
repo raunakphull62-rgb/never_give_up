@@ -209,28 +209,89 @@ fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Integer overflow: an `i32` arithmetic result left the
-/// `i32::MIN..=i32::MAX` range. Loud error, never a silent wrap or an
+/// Integer overflow: a 64-bit arithmetic result left the
+/// `i64::MIN..=i64::MAX` range. Loud error, never a silent wrap or an
 /// out-of-range value (cf. the checker, which already rejects
-/// out-of-range literals with `E-TYPE`).
+/// out-of-range literals with `E-TYPE`). Narrower annotations (`i32`,
+/// `u32`, `u64`, `u8`) enforce their own ranges at value boundaries
+/// (parameter passing, return, assignment); this error is only for
+/// genuinely unrepresentable 64-bit results.
 fn overflow_err(op: &str) -> Diagnostic {
     Diagnostic::error(
         "E-OVERFLOW",
-        &format!("integer overflow in `{op}`: result out of i32 range"),
+        &format!("integer overflow in `{op}`: result out of i64 range"),
         "runtime",
         0,
         0,
-        "i32 arithmetic never wraps: out-of-range results are errors",
+        "i64 arithmetic never wraps: out-of-range results are errors",
         &["use smaller operands", "check bounds before operating"],
         "arithmetic/overflow",
     )
 }
 
-/// Convert a runtime `Int` operand to `i32`, failing loudly when the
-/// stored `i64` is already outside `i32` range (e.g. from `int()` on a
-/// huge string). Keeps every arithmetic site in one enforcement point.
-fn to_i32_checked(v: i64, op: &str) -> Result<i32, Diagnostic> {
-    i32::try_from(v).map_err(|_| overflow_err(op))
+/// D3: enforceable range of one raw integer annotation, as
+/// `(lo, hi)` bounds over `i128` (so `u64::MAX` is expressible).
+/// `i64`/`int` accept the full 64-bit `Int` (no narrowing: `None`), and
+/// every non-integer spelling (floats, strings, structs, enums,
+/// generics, `Unknown`, closure types, qualified paths) is `None`
+/// (unchecked here — the static checker owns those).
+pub fn int_range_for(ty_raw: &str) -> Option<(i128, i128)> {
+    let t = ty_raw.trim();
+    let base = match t.find('<') {
+        Some(i) => &t[..i],
+        None => t,
+    };
+    let base = base.trim();
+    // Closure-type spellings and qualified paths are never int bounds.
+    if base.contains("::")
+        || base.contains('(')
+        || base.contains(')')
+        || base.contains("->")
+    {
+        return None;
+    }
+    match base {
+        "i32" => Some((i32::MIN as i128, i32::MAX as i128)),
+        "u32" => Some((0, u32::MAX as i128)),
+        "u64" => Some((0, u64::MAX as i128)),
+        "u8" => Some((0, u8::MAX as i128)),
+        _ => None,
+    }
+}
+
+/// D3: one value-boundary check. An `Int` value outside its annotation's
+/// range is a loud `E-RUNTIME` naming the type and the value; anything
+/// else (wide annotations, non-`Int` values, non-integer annotations)
+/// passes — dynamic code keeps working and the checker owns static
+/// mismatches.
+pub fn check_int_boundary(value: &Value, ty_raw: &str, ctx: &str) -> Result<(), Diagnostic> {
+    let Some((lo, hi)) = int_range_for(ty_raw) else {
+        return Ok(());
+    };
+    let Value::Int(n) = value else {
+        return Ok(());
+    };
+    let v = *n as i128;
+    if v < lo || v > hi {
+        let base = match ty_raw.trim().find('<') {
+            Some(i) => ty_raw.trim()[..i].trim(),
+            None => ty_raw.trim(),
+        };
+        return Err(Diagnostic::error(
+            "E-RUNTIME",
+            &format!("{ctx}: value {n} out of `{base}` range {lo}..{hi}"),
+            "runtime",
+            0,
+            0,
+            "integer annotations enforce their range at value boundaries",
+            &[
+                "narrow the value before passing it",
+                "use a wider annotation such as `i64`",
+            ],
+            "types/range",
+        ));
+    }
+    Ok(())
 }
 
 /// Concurrency-specific runtime failure (task panics, task limits): the
@@ -504,6 +565,8 @@ fn exec_function(
     })?;
     let instrs = f.instrs.clone();
     let params = f.params.clone();
+    let param_tys = f.param_tys.clone();
+    let return_ty = f.return_ty.clone();
     let mut values: HashMap<String, Value> = HashMap::new();
     for (param, val) in params.iter().zip(args.iter()) {
         values.insert(param.clone(), val.clone());
@@ -522,10 +585,26 @@ fn exec_function(
             "calls/arity",
         ));
     }
+    // D3 parameter boundary: each argument must fit the callee's declared
+    // annotation (`i32`/`u32`/`u64`/`u8`; wide spellings and non-`Int`
+    // values pass). Runs for checked and unchecked callers alike.
+    for (i, (val, ty)) in args.iter().zip(param_tys.iter()).enumerate() {
+        check_int_boundary(val, ty, &format!("`{name}` arg {i}"))?;
+    }
+    // D3 assignment boundary: rebinding an annotated parameter name
+    // (`x = ...`, lowered to `Copy`) re-checks that annotation. A `let`
+    // shadowing the same name checks too (the name is annotated in this
+    // scope — documented in the S4 notes); unannotated names never check.
+    let var_ann: HashMap<String, String> = params
+        .iter()
+        .zip(param_tys.iter())
+        .filter(|(_, ty)| int_range_for(ty).is_some())
+        .map(|(p, ty)| (p.clone(), ty.clone()))
+        .collect();
     let mut groups: Vec<(String, CancelToken)> = Vec::new();
     let mut group_depth: usize = 0;
     let mut pending: HashMap<String, JoinHandle<Result<Value, Diagnostic>>> = HashMap::new();
-    match run_instrs(
+    let outcome = run_instrs(
         ctx,
         name,
         &instrs,
@@ -535,7 +614,12 @@ fn exec_function(
         &mut pending,
         depth,
         parent,
-    )? {
+        &var_ann,
+    )?;
+    // D3 return boundary: explicit `return` and fall-off values alike
+    // must fit the declared return annotation.
+    let check_return = |v: &Value| check_int_boundary(v, &return_ty, &format!("`{name}` return"));
+    match outcome {
         ExecFlow::Done(v) => {
             // Fall-off-the-end with live tasks means a group was never
             // left (unchecked MIR): join (never detach) then fail closed.
@@ -549,10 +633,14 @@ fn exec_function(
                 }
                 return Err(Diagnostic::task_leak("runtime", 0, 0, "task group"));
             }
+            check_return(&v)?;
             Ok(v)
         }
         // `return` already joined-or-failed at its own site below.
-        ExecFlow::Returned(v) => Ok(v),
+        ExecFlow::Returned(v) => {
+            check_return(&v)?;
+            Ok(v)
+        }
     }
 }
 
@@ -571,6 +659,7 @@ fn run_instrs(
     mut pending: &mut HashMap<String, JoinHandle<Result<Value, Diagnostic>>>,
     depth: usize,
     parent: &CancelToken,
+    var_ann: &HashMap<String, String>,
 ) -> Result<ExecFlow, Diagnostic> {
     validate_jumps(instrs)?;
     let mut pc: usize = 0;
@@ -799,6 +888,10 @@ fn run_instrs(
             }
             MirOp::Copy { into, from } => {
                 let v = lookup(&values, &ctx.stubs, from).unwrap_or(Value::Int(0));
+                // D3 assignment boundary for annotated parameter names.
+                if let Some(ty) = var_ann.get(into) {
+                    check_int_boundary(&v, ty, &format!("assignment to `{into}`"))?;
+                }
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
@@ -812,10 +905,11 @@ fn run_instrs(
                     (a, Value::Str(b)) => Value::Str(format!("{}{b}", a.render())),
                     _ if l.is_float() || r.is_float() => Value::Float(l.as_float() + r.as_float()),
                     _ => {
-                        let x = to_i32_checked(l.as_int(), "add")?;
-                        let y = to_i32_checked(r.as_int(), "add")?;
-                        let z = x.checked_add(y).ok_or_else(|| overflow_err("add"))?;
-                        Value::Int(i64::from(z))
+                        let z = l
+                            .as_int()
+                            .checked_add(r.as_int())
+                            .ok_or_else(|| overflow_err("add"))?;
+                        Value::Int(z)
                     }
                 };
                 values.insert(into.clone(), v.clone());
@@ -845,7 +939,7 @@ fn run_instrs(
                     }
                     _ => {}
                 }
-                // `i32::MIN / -1` overflows `i32` (checked_div is None):
+                // `i64::MIN / -1` overflows `i64` (checked_div is None):
                 // loud `E-OVERFLOW`, never a silent out-of-range value.
                 let v = num2_checked("div", l, r, |a, b| a.checked_div(b), |a, b| a / b)?;
                 values.insert(into.clone(), v.clone());
@@ -862,10 +956,10 @@ fn run_instrs(
                 if r == 0 {
                     return Err(runtime_err("modulo by zero"));
                 }
-                let x = to_i32_checked(l, "mod")?;
-                let y = to_i32_checked(r, "mod")?;
-                let z = x.checked_rem(y).ok_or_else(|| overflow_err("mod"))?;
-                let v = Value::Int(i64::from(z));
+                let z = l
+                    .checked_rem(r)
+                    .ok_or_else(|| overflow_err("mod"))?;
+                let v = Value::Int(z);
                 values.insert(into.clone(), v.clone());
                 last = v;
                 pc += 1;
@@ -939,9 +1033,11 @@ fn run_instrs(
                 let out = match v {
                     Value::Float(x) => Value::Float(-x),
                     _ => {
-                        let x = to_i32_checked(v.as_int(), "neg")?;
-                        let z = x.checked_neg().ok_or_else(|| overflow_err("neg"))?;
-                        Value::Int(i64::from(z))
+                        let z = v
+                            .as_int()
+                            .checked_neg()
+                            .ok_or_else(|| overflow_err("neg"))?;
+                        Value::Int(z)
                     }
                 };
                 values.insert(into.clone(), out.clone());
@@ -1012,6 +1108,25 @@ fn run_instrs(
             }
             MirOp::FieldSet { base, field, value } => {
                 let v = lookup(&values, &ctx.stubs, value).unwrap_or(Value::Int(0));
+                // D3 field-assignment boundary against the struct schema.
+                let owner: Option<String> = match values.get(base) {
+                    Some(Value::Struct { name, .. }) => Some(name.clone()),
+                    _ => None,
+                };
+                if let Some(sname) = owner {
+                    if let Some(ty) = ctx
+                        .module
+                        .struct_fields
+                        .get(&sname)
+                        .and_then(|fs| fs.get(field))
+                    {
+                        check_int_boundary(
+                            &v,
+                            ty,
+                            &format!("field `{field}` of struct `{sname}`"),
+                        )?;
+                    }
+                }
                 match values.get_mut(base) {
                     Some(Value::Struct { fields, .. }) => {
                         if let Some(slot) = fields.iter_mut().find(|(k, _)| k == field) {
@@ -1025,12 +1140,20 @@ fn run_instrs(
                 pc += 1;
             }
             MirOp::StructNew { into, name, fields } => {
+                // D3 construction boundary: each field value must fit the
+                // struct schema's declared annotation.
+                let schema = ctx.module.struct_fields.get(name).cloned();
                 let mut fvals = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
-                    fvals.push((
-                        k.clone(),
-                        lookup(&values, &ctx.stubs, v).unwrap_or(Value::Int(0)),
-                    ));
+                    let fv = lookup(&values, &ctx.stubs, v).unwrap_or(Value::Int(0));
+                    if let Some(ty) = schema.as_ref().and_then(|fs| fs.get(k)) {
+                        check_int_boundary(
+                            &fv,
+                            ty,
+                            &format!("field `{k}` of struct `{name}`"),
+                        )?;
+                    }
+                    fvals.push((k.clone(), fv));
                 }
                 let v = Value::Struct {
                     name: name.clone(),
@@ -1107,6 +1230,7 @@ fn run_instrs(
                     &mut *pending,
                     depth,
                     parent,
+                    var_ann,
                 ) {
                     Ok(ExecFlow::Done(v)) => {
                         last = v;
@@ -1135,6 +1259,7 @@ fn run_instrs(
                             &mut *pending,
                             depth,
                             parent,
+                            var_ann,
                         )? {
                             ExecFlow::Done(v) => {
                                 last = v;
@@ -2403,25 +2528,20 @@ fn num2(
     }
 }
 
-/// Checked integer arithmetic over `i32` semantics: both `i64` operands
-/// must already fit `i32`, and the `i32::checked_*` result must too.
-/// Float-involved pairs stay unchecked `f64` math (no `i32` range applies).
+/// Checked integer arithmetic over `i64` semantics: the `i64::checked_*`
+/// result must fit. Float-involved pairs stay unchecked `f64` math.
 fn num2_checked(
     op: &str,
     l: Num,
     r: Num,
-    int_op: impl Fn(i32, i32) -> Option<i32>,
+    int_op: impl Fn(i64, i64) -> Option<i64>,
     float_op: impl Fn(f64, f64) -> f64,
 ) -> Result<Value, Diagnostic> {
     match (l, r) {
         (Num::Float(a), Num::Float(b)) => Ok(Value::Float(float_op(a, b))),
-        (Num::Int(a), Num::Int(b)) => {
-            let x = to_i32_checked(a, op)?;
-            let y = to_i32_checked(b, op)?;
-            int_op(x, y)
-                .map(|v| Value::Int(i64::from(v)))
-                .ok_or_else(|| overflow_err(op))
-        }
+        (Num::Int(a), Num::Int(b)) => int_op(a, b)
+            .map(Value::Int)
+            .ok_or_else(|| overflow_err(op)),
         (a, b) => {
             let (x, y) = (
                 match a {
