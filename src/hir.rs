@@ -3659,7 +3659,7 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "http_post" | "http_post_async" => 3,
         "str" | "int" | "float" => 1,
         "assert" => 1,
-        "read_line" => 0,
+        "read_line" | "is_eof" => 0,
         "parse_int" | "parse_float" => 1,
         "read_file" | "exists" | "env" | "get_env" | "remove_file" | "http_get" | "http_get_async" => 1,
         "regex_is_match" | "regex_find" => 2,
@@ -3667,6 +3667,8 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "time_now" | "now_ms" | "now_iso" => 0,
         "args" | "cwd" => 0,
         "exit" => 1,
+        "print_raw" | "chdir" => 1,
+        "sort_by" => 2,
         "set_env" | "rename_file" | "copy_file" => 2,
         "list_dir" | "make_dir" | "make_dirs" | "is_dir" | "is_file" | "file_size"
         | "ord" | "chr" | "sort" => 1,
@@ -3824,6 +3826,48 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             Ty::Str
         }
         "read_line" => Ty::Str,
+        "is_eof" => Ty::Bool,
+        "print_raw" => Ty::Int,
+        "chdir" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`chdir()` path", "str", &args[0]));
+            }
+            Ty::Int
+        },
+        "sort_by" => {
+            if !matches!(&args[0], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`sort_by()` list", "array", &args[0]));
+            }
+            match &args[1] {
+                Ty::Closure { params, .. } => {
+                    if params.len() != 1 {
+                        diags.push(Diagnostic::error(
+                            "E-ARITY",
+                            &format!(
+                                "`sort_by()` key function takes 1 argument, got {}",
+                                params.len()
+                            ),
+                            file,
+                            0,
+                            0,
+                            "builtin arity must match",
+                            &["pass a one-argument key function"],
+                            "calls/arity",
+                        ));
+                    }
+                }
+                Ty::Unknown => {}
+                other => {
+                    diags.push(type_mismatch(
+                        file,
+                        "`sort_by()` key function",
+                        "a one-argument function",
+                        other,
+                    ));
+                }
+            }
+            Ty::Array
+        }
         "parse_int" => {
             if !matches!(&args[0], Ty::Str | Ty::Unknown) {
                 diags.push(type_mismatch(file, "`parse_int()` text", "str", &args[0]));
@@ -4100,10 +4144,15 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
                     ));
                 }
             }
-            if matches!(&args[0], Ty::Array) {
-                Ty::Array
-            } else {
-                Ty::Str
+            // S9 B1: an `Unknown` input stays `Unknown` (it is an array at
+            // runtime exactly when the value is one — strings stay
+            // strings). Typing it `Str` rejected
+            // `spawn(cmd, slice(toks, 1, len(toks)))` for dynamic arrays
+            // with `` `spawn()` args: want array, got str ``.
+            match &args[0] {
+                Ty::Array => Ty::Array,
+                Ty::Str => Ty::Str,
+                _ => Ty::Unknown,
             }
         }
         "sort" => {
@@ -4311,6 +4360,10 @@ pub fn is_builtin(name: &str) -> bool {
             | "http_get_async"
             | "http_post_async"
             | "read_line"
+            | "is_eof"
+            | "print_raw"
+            | "chdir"
+            | "sort_by"
             | "parse_int"
             | "parse_float"
             | "format"

@@ -1,4 +1,4 @@
-// examples/real/logsum.klang — summarize a log file (S7 dogfood).
+// examples/real/logsum.klang — summarize a log file (S7 dogfood, S9 sort_by).
 //
 // Reads a log file with lines "TIMESTAMP LEVEL MESSAGE" and prints counts
 // per level (INFO/WARN/ERROR), the top 5 most frequent messages, and the
@@ -11,9 +11,9 @@
 //   2026-10-11T10:00:00 INFO server started
 //   2026-10-11T10:01:00 WARN low memory
 //
-// Notes (see docs/FINDINGS.md):
+// Notes (see docs/FINDINGS.md, S9):
 // - No regex needed: parsing uses split(" ") and join.
-// - Top-5 uses repeated max-scan: sort() cannot order by count.
+// - S9 sort_by orders messages by count (stable, ascending; top-5 reads back from the end).
 fn join_from(parts: array, start: i32, sep: str) -> str {
     let out = ""
     let first = 1
@@ -98,32 +98,20 @@ fn main() -> i32 {
     print(("first: " + first_ts))
     print(("last: " + last_ts))
     print("top:")
-    let shown = {}
-    let n = 0
-    while (n < 5) {
-        let best = ""
-        let best_c = 0
-        let found = 0
-        for k in counts {
-            if shown.contains(k) {
-            } else {
-                let c = counts[k]
-                if (found == 0) {
-                    best = k
-                    best_c = c
-                    found = 1
-                } else if (c > best_c) {
-                    best = k
-                    best_c = c
-                }
-            }
-        }
-        if (found == 0) {
-            break
-        }
-        print(((best + ": ") + str(best_c)))
-        shown[best] = 1
-        n = (n + 1)
+    let msgs = keys(counts)
+    let ordered = sort_by(msgs, fn(k: str) -> i32 {
+    return counts[k]
+})
+    let total = len(ordered)
+    let start = (total - 5)
+    if (start < 0) {
+        start = 0
+    }
+    let i = (total - 1)
+    while (i >= start) {
+        let k = ordered[i]
+        print(((k + ": ") + str(counts[k])))
+        i = (i - 1)
     }
     return 0
 }

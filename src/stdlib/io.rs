@@ -37,6 +37,17 @@ static MCP_OWNS_STDIN: AtomicBool = AtomicBool::new(false);
 /// exactly one complete line.
 static STDIN_LOCK: Mutex<()> = Mutex::new(());
 
+/// One-line lookahead for [`is_eof`]: `line` holds a buffered line (without
+/// the newline, like [`read_line`] returns) peeked by `is_eof` but not yet
+/// consumed; `eof` is true once EOF has been observed (then every further
+/// read is `""` without touching the OS handle).
+struct PeekState {
+    line: Option<String>,
+    eof: bool,
+}
+
+static STDIN_PEEK: Mutex<PeekState> = Mutex::new(PeekState { line: None, eof: false });
+
 /// Mark process stdin as owned by the MCP server. After this call,
 /// [`read_line`] returns `""` without touching stdin.
 pub fn reserve_stdin_for_mcp() {
@@ -101,6 +112,9 @@ fn parse_float_err(text: &str) -> Diagnostic {
 /// Returns `""` at EOF (indistinguishable from an empty line, by design).
 /// When stdin is reserved for the MCP server, returns `""` immediately.
 ///
+/// A line previously peeked by [`is_eof`] is returned first (the peek
+/// buffers exactly one line, so `is_eof` never consumes input).
+///
 /// On a live TTY with no piped input this blocks waiting for a line, like
 /// Python's `input()` — that is expected for `klang run`, not a hang:
 /// Ctrl+D sends EOF (`""`) and Ctrl+C (SIGINT) interrupts the read.
@@ -112,12 +126,62 @@ pub fn read_line() -> String {
         return String::new();
     }
     let _guard = STDIN_LOCK.lock().unwrap();
+    // A peeked line wins over a fresh OS read (never lose the lookahead).
+    if let Some(buf) = STDIN_PEEK.lock().unwrap().line.take() {
+        return buf;
+    }
+    if STDIN_PEEK.lock().unwrap().eof {
+        return String::new();
+    }
     let stdin = std::io::stdin();
     let mut line = String::new();
     match stdin.lock().read_line(&mut line) {
-        Ok(0) => String::new(),
+        Ok(0) => {
+            STDIN_PEEK.lock().unwrap().eof = true;
+            String::new()
+        }
         Ok(_) => strip_line(&line),
         Err(_) => String::new(),
+    }
+}
+
+/// True when stdin has reached end of input, peeking without consuming.
+///
+/// Buffers at most one line: when not at EOF the next line is read from
+/// the OS (blocking like [`read_line`] on a TTY) and held for the next
+/// [`read_line`] call, which returns it unchanged. When stdin is reserved
+/// for the MCP server this is immediately true (reads there see EOF).
+/// `read_line()` behavior is otherwise unchanged.
+///
+/// This distinguishes an empty line (`is_eof()` false, `read_line()`
+/// yields `""`) from EOF (`is_eof()` true) — the bare-`Enter`-quits-REPL
+/// gap in docs/FINDINGS.md.
+pub fn is_eof() -> bool {
+    if stdin_reserved_for_mcp() {
+        return true;
+    }
+    let _guard = STDIN_LOCK.lock().unwrap();
+    {
+        let peek = STDIN_PEEK.lock().unwrap();
+        if peek.line.is_some() {
+            return false;
+        }
+        if peek.eof {
+            return true;
+        }
+    }
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    match stdin.lock().read_line(&mut line) {
+        Ok(0) => {
+            STDIN_PEEK.lock().unwrap().eof = true;
+            true
+        }
+        Ok(_) => {
+            STDIN_PEEK.lock().unwrap().line = Some(strip_line(&line));
+            false
+        }
+        Err(_) => true,
     }
 }
 
