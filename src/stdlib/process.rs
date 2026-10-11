@@ -163,7 +163,13 @@ pub struct ProcessOutput {
 /// and the exit code. Arguments are passed as an argv array via
 /// `std::process::Command` — no shell is involved, so spaces and shell
 /// metacharacters are literal.
+///
+/// X1 sandbox: denied with `E-SANDBOX-SPAWN` when
+/// [`crate::sandbox::is_sandbox`] is set (`klang run --sandbox`).
 pub fn run(cmd: &str, args: &[String]) -> Result<ProcessOutput, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_spawn("run_process"));
+    }
     let out = std::process::Command::new(cmd)
         .args(args)
         .output()
@@ -181,7 +187,12 @@ pub fn run(cmd: &str, args: &[String]) -> Result<ProcessOutput, Diagnostic> {
 /// >1 MB outputs cannot deadlock); only the caller's view differs
 /// (the interpreter renders `status` instead of `exit_code`).
 /// No shell, no globbing, no interpolation, no timeout.
+///
+/// X1 sandbox: denied with `E-SANDBOX-SPAWN` under `klang run --sandbox`.
 pub fn spawn_capture(cmd: &str, args: &[String]) -> Result<ProcessOutput, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_spawn("spawn"));
+    }
     let out = std::process::Command::new(cmd)
         .args(args)
         .output()
@@ -199,7 +210,12 @@ pub fn spawn_capture(cmd: &str, args: &[String]) -> Result<ProcessOutput, Diagno
 /// exit is a normal `Ok` result; only a failure to start (missing
 /// binary, permission denied, OS refusal) is `E-PROCESS-*`.
 /// No shell, no globbing, no interpolation, no timeout, no capture.
+///
+/// X1 sandbox: denied with `E-SANDBOX-SPAWN` under `klang run --sandbox`.
 pub fn run_inherit(cmd: &str, args: &[String]) -> Result<i32, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_spawn("run"));
+    }
     use std::process::Stdio;
     let status = std::process::Command::new(cmd)
         .args(args)

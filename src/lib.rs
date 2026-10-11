@@ -26,6 +26,7 @@ pub mod registry;
 pub mod registry_storage;
 pub mod repair;
 pub mod runtime;
+pub mod sandbox;
 pub mod sema;
 pub mod stdlib;
 

@@ -712,13 +712,19 @@ fn run_file_mode(args: &[String]) {
     }
     if cmd == "run-v2" {
         if rest.is_empty() {
-            eprintln!("usage: run-v2 <file.v2> [entry] [--verbose|-v]");
+            eprintln!("usage: run-v2 [--sandbox] <file.v2> [entry] [--verbose|-v]");
             std::process::exit(2);
         }
         let verbose = has_verbose_flag(rest);
+        // X1: v2 has no sandbox-sensitive surface today; accept and set the
+        // flag anyway so `--sandbox` is never a silent no-op.
+        if has_sandbox_flag(rest) {
+            klang::sandbox::set_sandbox(true);
+            klang::runtime::set_file_guard_relaxed(false);
+        }
         let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
         if positional.is_empty() {
-            eprintln!("usage: run-v2 <file.v2> [entry] [--verbose|-v]");
+            eprintln!("usage: run-v2 [--sandbox] <file.v2> [entry] [--verbose|-v]");
             std::process::exit(2);
         }
         let entry = positional
@@ -757,6 +763,10 @@ fn run_file_mode(args: &[String]) {
                 .copied()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
+            if has_sandbox_flag(rest) {
+                klang::sandbox::set_sandbox(true);
+                klang::runtime::set_file_guard_relaxed(false);
+            }
             run_v2_mode(positional[0], entry, has_verbose_flag(rest));
             return;
         }
@@ -790,8 +800,8 @@ fn run_file_mode(args: &[String]) {
         eprintln!(
             "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init|login|logout> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
-        eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
-        eprintln!("       run [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
+        eprintln!("       check [--json] <file.klang> | check --lang v2 [--json] <file.v2> | check-v2 [--json] <file.v2>");
+        eprintln!("       run [--sandbox] [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
         eprintln!("       publish [--dir PATH] [--registry URL] [--token TOKEN] (least safe; prefer `klang login` or KLANG_REGISTRY_TOKEN)");
         eprintln!("       add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline] | fetch [--registry URL] [--offline]");
         eprintln!("       install [name[@constraint]] [--registry URL] [--offline] | remove <name> | update [name] | list [--all] | init [name] [--dir PATH]");
@@ -838,7 +848,7 @@ fn run_file_mode(args: &[String]) {
             .map(String::as_str)
             .collect();
         if plain.is_empty() {
-            eprintln!("usage: run [--verbose|-v] <file.klang> [entry]  (default: only program output)");
+            eprintln!("usage: run [--sandbox] [--verbose|-v] <file.klang> [entry]  (default: only program output)");
             std::process::exit(2);
         }
         (
@@ -971,6 +981,13 @@ fn run_file_mode(args: &[String]) {
         eprintln!(
             "warning: --backend-jit is experimental: int-only subset; out-of-subset programs are refused loudly"
         );
+        // X1 sandbox: the JIT has no file/spawn/network surface of its own
+        // (out-of-subset builtins are loudly refused); still set the flags
+        // so `--sandbox --backend-jit` is never a silent bypass.
+        if cmd == "run" && has_sandbox_flag(rest) {
+            klang::sandbox::set_sandbox(true);
+            klang::runtime::set_file_guard_relaxed(false);
+        }
         let omitted = entry_omitted_return(&prog, &run_entry);
         match klang::jit::run_jit_fallible(&mir, &run_entry, &[]) {
             Ok((v, out)) => {
@@ -1012,10 +1029,17 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    // S9 item 6: plain `klang run` allows normal relative paths
-    // (including `..`, resolved against the current directory).
-    // MCP `tool_run` and library callers keep the strict sandbox guard.
-    klang::runtime::set_file_guard_relaxed(true);
+    // X1 sandbox: `klang run --sandbox` limits files to the temp dir
+    // (strict guard + E-SANDBOX-FILE) and denies spawn/run/network with
+    // E-SANDBOX-* (see src/sandbox.rs). Plain `klang run` keeps the S9
+    // relaxed behavior (relative `..` allowed, spawn/network allowed).
+    if cmd == "run" && has_sandbox_flag(rest) {
+        klang::sandbox::set_sandbox(true);
+        klang::runtime::set_file_guard_relaxed(false);
+    } else {
+        klang::sandbox::set_sandbox(false);
+        klang::runtime::set_file_guard_relaxed(true);
+    }
     match klang::runtime::run_with_argv_chunks(&mir, &run_entry, &[], &prog_argv, &HashMap::new()) {
         (Ok(v), out) => {
             emit_program_output(&out, verbose);
@@ -1885,6 +1909,21 @@ fn split_run_lang(rest: &[String]) -> (bool, Vec<String>) {
 /// scripts keep working.
 fn has_verbose_flag(rest: &[String]) -> bool {
     rest.iter().any(|a| a == "--verbose" || a == "-v")
+}
+
+/// X1: `--sandbox` for `klang run` (and `run-v2`). True when an exact
+/// `--sandbox` appears before a `--` separator (after `--` it is program
+/// argv, e.g. `run prog.klang -- --sandbox` passes it through).
+fn has_sandbox_flag(rest: &[String]) -> bool {
+    for a in rest {
+        if a == "--" {
+            break;
+        }
+        if a == "--sandbox" {
+            return true;
+        }
+    }
+    false
 }
 
 /// D2 strict flag (Wave1 S4): split `--strict[=true|false]` out of the arg

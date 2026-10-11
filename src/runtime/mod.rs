@@ -2645,8 +2645,8 @@ fn exec_sort_by(
 }
 
 /// S9 file-guard mode: false (default) keeps the strict sandbox guard
-/// for MCP/agent execution (`klang_run` tool) and every library caller;
-/// true relaxes plain `klang run` to allow normal relative paths
+/// for sandboxed execution (`klang run --sandbox`) and every library
+/// caller; true relaxes plain `klang run` to allow normal relative paths
 /// (including `..`, resolved against the current directory by the OS,
 /// so `chdir` + relative reads work). Absolute paths outside the temp
 /// dir stay rejected in both modes (the minimal relaxation in S9 item
@@ -2655,14 +2655,14 @@ static FILE_GUARD_RELAXED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Enable (`true`) or disable (`false`) the S9 relaxed file guard for
-/// plain `klang run`. The CLI sets this before executing; MCP
-/// `tool_run` and library tests leave the strict default.
+/// plain `klang run`. The CLI sets this before executing; sandboxed
+/// runs (`--sandbox`) and library tests leave the strict default.
 pub fn set_file_guard_relaxed(relaxed: bool) {
     FILE_GUARD_RELAXED.store(relaxed, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// True when plain-`klang run` relaxation is active (relative paths,
-/// including `..`, allowed). Library/MCP callers see false.
+/// including `..`, allowed). Library/sandbox callers see false.
 pub fn is_file_guard_relaxed() -> bool {
     FILE_GUARD_RELAXED.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -2672,11 +2672,13 @@ pub fn is_file_guard_relaxed() -> bool {
 /// use temp-dir or relative paths and are unaffected. `env` is left
 /// unrestricted (reads process env, returns empty when unset).
 ///
-/// S9: the strict form stays for MCP/agent execution and library calls;
+/// S9: the strict form stays for sandboxed execution and library calls;
 /// plain `klang run` (see [`set_file_guard_relaxed`]) additionally
 /// allows relative paths containing `..` (resolved against the current
 /// directory, which `chdir` may have changed). Absolute paths outside
-/// the temp dir stay `E-RUNTIME` in both modes.
+/// the temp dir stay rejected in both modes. X1: sandboxed rejections
+/// use `E-SANDBOX-FILE`; non-sandbox strict rejections stay `E-RUNTIME`
+/// (pinned by existing gates).
 fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
     if path.is_empty() {
         return Err(runtime_err("empty path"));
@@ -2689,6 +2691,12 @@ fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
     if p.is_absolute() {
         let tmp = std::env::temp_dir();
         if !p.starts_with(&tmp) {
+            if crate::sandbox::is_sandbox() {
+                return Err(crate::sandbox::deny_file(
+                    path,
+                    "absolute paths outside the temp dir are not allowed",
+                ));
+            }
             return Err(runtime_err(&format!("unsafe absolute path `{path}`")));
         }
         return Ok(());
@@ -2703,6 +2711,12 @@ fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
             comp,
             std::path::Component::ParentDir | std::path::Component::RootDir
         ) {
+            if crate::sandbox::is_sandbox() {
+                return Err(crate::sandbox::deny_file(
+                    path,
+                    "parent (`..`) components are not allowed",
+                ));
+            }
             return Err(runtime_err(&format!("unsafe path `{path}`")));
         }
     }

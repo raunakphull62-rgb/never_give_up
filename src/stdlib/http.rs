@@ -249,7 +249,11 @@ fn to_response(
 
 /// `GET url` → [`HttpResponse`]. Transport failures raise `E-NET-*`;
 /// HTTP error statuses do not (they populate `status`).
+/// X1 sandbox: denied with `E-SANDBOX-NETWORK` under `klang run --sandbox`.
 pub fn get(url: &str) -> Result<HttpResponse, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network("http_get"));
+    }
     let res = agent()
         .get(url)
         .call()
@@ -259,7 +263,11 @@ pub fn get(url: &str) -> Result<HttpResponse, Diagnostic> {
 
 /// `POST url` with string `body` and `"Name: Value"` `headers` →
 /// [`HttpResponse`]. Same status/transport contract as [`get`].
+/// X1 sandbox: denied with `E-SANDBOX-NETWORK` under `klang run --sandbox`.
 pub fn post(url: &str, body: &str, headers: &[String]) -> Result<HttpResponse, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network("http_post"));
+    }
     let mut req = agent().post(url);
     for h in headers {
         let (k, v) = parse_header("http_post", h)?;
@@ -280,7 +288,12 @@ pub fn post(url: &str, body: &str, headers: &[String]) -> Result<HttpResponse, D
 // ---------------------------------------------------------------------------
 
 /// `GET url` on the pool → [`HttpResponse`]. Same contract as [`get`].
+/// X1 sandbox: denied with `E-SANDBOX-NETWORK` (checked before pooling so
+/// the op name stays `http_get_async`).
 pub fn get_async(url: &str) -> Result<HttpResponse, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network("http_get_async"));
+    }
     let url = url.to_string();
     crate::async_pool::run_on_pool(move || get(&url))
         .map_err(|e| {
@@ -298,11 +311,15 @@ pub fn get_async(url: &str) -> Result<HttpResponse, Diagnostic> {
 }
 
 /// `POST url` on the pool → [`HttpResponse`]. Same contract as [`post`].
+/// X1 sandbox: denied with `E-SANDBOX-NETWORK` (checked before pooling).
 pub fn post_async(
     url: &str,
     body: &str,
     headers: &[String],
 ) -> Result<HttpResponse, Diagnostic> {
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network("http_post_async"));
+    }
     let (url, body, headers) = (url.to_string(), body.to_string(), headers.to_vec());
     crate::async_pool::run_on_pool(move || post(&url, &body, &headers))
         .map_err(|e| {
