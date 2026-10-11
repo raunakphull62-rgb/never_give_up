@@ -3675,6 +3675,10 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         | "sha256" => 1,
         "pow" | "atan2" | "min" | "max" | "random_int" | "hmac_sha256" => 2,
         "random_float" => 0,
+        "regex_find_all" | "sprintf" | "random_seeded_int" => 2,
+        "regex_replace" => 3,
+        "uuid_v4" | "random_seeded_float" => 0,
+        "path_absolute" | "file_mtime" | "random_seed" => 1,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -4108,6 +4112,74 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Array
         }
+        "regex_find_all" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`regex_find_all()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Array
+        }
+        "regex_replace" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`regex_replace()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Str
+        }
+        "uuid_v4" => Ty::Str,
+        "path_absolute" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`path_absolute()` path", "str", &args[0]));
+            }
+            Ty::Str
+        }
+        "file_mtime" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`file_mtime()` path", "str", &args[0]));
+            }
+            Ty::Float
+        }
+        "sprintf" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`sprintf()` fmt", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`sprintf()` args", "array", &args[1]));
+            }
+            Ty::Str
+        }
+        "random_seed" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`random_seed()` seed", "i32", &args[0]));
+            }
+            Ty::Int
+        }
+        "random_seeded_int" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`random_seeded_int()` bound {i}"),
+                        "int",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "random_seeded_float" => Ty::Float,
         _ => Ty::Unknown,
     }
 }
@@ -4124,10 +4196,10 @@ fn check_method_call(
         Ty::Unknown => Ty::Unknown,
         Ty::Str => match method {
             "len" | "upper" | "lower" | "trim" | "chars" | "split" | "contains" | "starts_with"
-            | "ends_with" | "replace" => {
+            | "ends_with" | "replace" | "pad_start" | "pad_end" | "repeat" | "lines" => {
                 let want = match method {
-                    "replace" => 2,
-                    "split" | "contains" | "starts_with" | "ends_with" => 1,
+                    "replace" | "pad_start" | "pad_end" => 2,
+                    "split" | "contains" | "starts_with" | "ends_with" | "repeat" => 1,
                     _ => 0,
                 };
                 if args.len() != want {
@@ -4136,7 +4208,7 @@ fn check_method_call(
                 }
                 match method {
                     "len" => Ty::Int,
-                    "split" | "chars" => Ty::Array,
+                    "split" | "chars" | "lines" => Ty::Array,
                     "contains" | "starts_with" | "ends_with" => Ty::Bool,
                     _ => Ty::Str,
                 }
@@ -4276,6 +4348,15 @@ pub fn is_builtin(name: &str) -> bool {
             | "random_float"
             | "sha256"
             | "hmac_sha256"
+            | "regex_find_all"
+            | "regex_replace"
+            | "uuid_v4"
+            | "path_absolute"
+            | "file_mtime"
+            | "sprintf"
+            | "random_seed"
+            | "random_seeded_int"
+            | "random_seeded_float"
             | "spawn"
             | "run"
             | "now_ms"

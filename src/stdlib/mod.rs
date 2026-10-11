@@ -53,6 +53,14 @@ pub mod io;
 /// `ord(s)` / `chr(n)` / `slice(v, lo, hi)` / `sort(list)`.
 pub mod seq;
 
+/// B1 stdlib gap fill: regex complements, uuid, path absolute, file
+/// mtime, sprintf, seeded RNG, char-based string method helpers.
+/// Wired as the flat builtins `regex_find_all` / `regex_replace` /
+/// `uuid_v4` / `path_absolute` / `file_mtime` / `sprintf` /
+/// `random_seed` / `random_seeded_int` / `random_seeded_float` plus the
+/// string methods `pad_start` / `pad_end` / `repeat` / `lines`.
+pub mod b1;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {
