@@ -678,10 +678,19 @@ pub fn lex_with_comments(
     file: &str,
 ) -> (Vec<Token>, Vec<Comment>, Option<Diagnostic>) {
     let (tokens, lex_errs, comments) = tokenize(source);
-    let lex_error = lex_errs
-        .into_iter()
-        .next()
-        .map(|(s, e, msg)| Diagnostic::parse_error(file, s, e, &msg));
+    let lex_error = lex_errs.into_iter().next().map(|(s, e, msg)| {
+        Diagnostic::error_with_location(
+            "E-PARSE",
+            &msg,
+            file,
+            source,
+            s,
+            e,
+            "input does not match the v0.1 grammar",
+            &[],
+            "syntax/grammar",
+        )
+    });
     (tokens, comments, lex_error)
 }
 
@@ -703,6 +712,7 @@ pub struct Parser {
     pos: usize,
     scopes: Vec<Scope>,
     file: String,
+    source: String,
     lex_error: Option<Diagnostic>,
 }
 
@@ -721,6 +731,7 @@ impl Parser {
                 next: 0,
             }],
             file: file.to_string(),
+            source: source.to_string(),
             lex_error,
         }
     }
@@ -738,7 +749,18 @@ impl Parser {
     }
 
     fn err(&self, start: usize, end: usize, message: &str) -> Diagnostic {
-        Diagnostic::parse_error(&self.file, start, end, message)
+        // S2: parse errors carry the real file/span plus 1-based line/column.
+        Diagnostic::error_with_location(
+            "E-PARSE",
+            message,
+            &self.file,
+            &self.source,
+            start,
+            end,
+            "input does not match the v0.1 grammar",
+            &[],
+            "syntax/grammar",
+        )
     }
 
     fn next_id(&mut self) -> NodeId {
@@ -1154,6 +1176,7 @@ impl Parser {
             structs,
             enums,
             functions,
+            file: self.file.clone(),
         })
     }
 
@@ -1189,6 +1212,7 @@ impl Parser {
             is_pub,
             type_params,
             fields,
+            file: self.file.clone(),
         })
     }
 
@@ -1275,6 +1299,7 @@ impl Parser {
             is_pub,
             type_params,
             variants,
+            file: self.file.clone(),
         })
     }
 
@@ -1348,6 +1373,7 @@ impl Parser {
             return_ty_omitted,
             effects,
             body: Block { id: blk_id, stmts },
+            file: self.file.clone(),
         })
     }
 

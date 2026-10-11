@@ -54,11 +54,100 @@ pub struct ImportError {
     /// `E-IO-NOT-FOUND`, `E-IMPORT`, `E-DUPLICATE`, or `E-PARSE`.
     pub code: &'static str,
     pub message: String,
+    /// Real location of the offending import (importer's string literal)
+    /// or definition (duplicate). `line == 0` is the explicit no-location
+    /// form (e.g. entry file itself missing: no source to point at).
+    pub file: String,
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+/// Byte span of `"raw"` (quoted string literal) inside `text`, if present.
+fn find_quoted_span(text: &str, raw: &str) -> Option<(usize, usize)> {
+    let quoted = format!("\"{raw}\"");
+    text.find(&quoted).map(|s| (s, s + quoted.len()))
+}
+
+/// Real span for an import statement in `importer` naming `raw`:
+/// the import string literal in the importing file. Falls back to the
+/// explicit no-location form (`line 0`) when the importer cannot be read
+/// or the literal is not found (e.g. entry missing).
+fn import_span(importer: &str, raw: &str) -> (String, usize, usize, usize, usize) {
+    if let Ok(text) = std::fs::read_to_string(importer) {
+        if let Some((s, e)) = find_quoted_span(&text, raw) {
+            let (line, column) = diagnostics::line_col_for(&text, s);
+            return (importer.to_string(), s, e, line, column);
+        }
+        if let Some(s) = text.find(raw) {
+            let e = s + raw.len();
+            let (line, column) = diagnostics::line_col_for(&text, s);
+            return (importer.to_string(), s, e, line, column);
+        }
+    }
+    (importer.to_string(), 0, 0, 0, 0)
+}
+
+/// Real span for a definition at `span` (byte offsets from parsing) in
+/// `path`: line/column are derived from the file's current text.
+fn def_span(path: &str, span: (usize, usize)) -> (String, usize, usize, usize, usize) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let (line, column) = diagnostics::line_col_for(&text, span.0);
+        return (path.to_string(), span.0, span.1, line, column);
+    }
+    (path.to_string(), span.0, span.1, 0, 0)
 }
 
 impl ImportError {
     fn new(code: &'static str, message: String) -> Self {
-        Self { code, message }
+        Self {
+            code,
+            message,
+            file: "import".to_string(),
+            start: 0,
+            end: 0,
+            line: 0,
+            column: 0,
+        }
+    }
+
+    /// Import failure pointing at the import string literal in `importer`.
+    fn with_import_span(
+        code: &'static str,
+        message: String,
+        importer: &str,
+        raw: &str,
+    ) -> Self {
+        let (file, start, end, line, column) = import_span(importer, raw);
+        Self {
+            code,
+            message,
+            file,
+            start,
+            end,
+            line,
+            column,
+        }
+    }
+
+    /// Duplicate-definition failure pointing at the redefinition site.
+    fn with_def_span(
+        code: &'static str,
+        message: String,
+        path: &str,
+        span: (usize, usize),
+    ) -> Self {
+        let (file, start, end, line, column) = def_span(path, span);
+        Self {
+            code,
+            message,
+            file,
+            start,
+            end,
+            line,
+            column,
+        }
     }
 
     /// Render as a structured diagnostic. For `E-PARSE` the message
@@ -68,17 +157,19 @@ impl ImportError {
         if self.code == "E-PARSE" {
             return self.message.clone();
         }
-        Diagnostic::error(
+        let mut d = Diagnostic::error(
             self.code,
             &self.message,
-            "import",
-            0,
-            0,
+            &self.file,
+            self.start,
+            self.end,
             "multi-file import failed",
             &[],
             "modules/import",
-        )
-        .to_json()
+        );
+        d.primary_span.line = self.line;
+        d.primary_span.column = self.column;
+        d.to_json()
     }
 }
 
@@ -263,8 +354,15 @@ fn load_from(
                 if whole_done.contains(&canon) {
                     continue;
                 }
-                let real_path =
-                    ensure_parsed(&path, &raw, &vendor, &mut parsed, &mut path_of_idx, &mut files)?;
+                let real_path = ensure_parsed(
+                    &path,
+                    &raw,
+                    &importer,
+                    &vendor,
+                    &mut parsed,
+                    &mut path_of_idx,
+                    &mut files,
+                )?;
                 // `ensure_parsed` canonicalizes the real path; recompute
                 // to stay in sync (same value as `canon` above).
                 let canon = canonical(&real_path);
@@ -293,6 +391,7 @@ fn load_from(
                         &canon,
                         f,
                         &importer,
+                        &real_path,
                     )?;
                 }
             }
@@ -302,8 +401,15 @@ fn load_from(
                 importer,
                 raw,
             } => {
-                let real_path =
-                    ensure_parsed(&path, &raw, &vendor, &mut parsed, &mut path_of_idx, &mut files)?;
+                let real_path = ensure_parsed(
+                    &path,
+                    &raw,
+                    &importer,
+                    &vendor,
+                    &mut parsed,
+                    &mut path_of_idx,
+                    &mut files,
+                )?;
                 let canon = canonical(&real_path);
                 let prog = parsed.get(&canon).expect("just parsed").clone();
                 // The target's own imports still apply transitively (a
@@ -321,6 +427,8 @@ fn load_from(
                         &mut fn_names,
                         &mut merged_items,
                         &importer,
+                        &raw,
+                        &real_path,
                     )?;
                 }
             }
@@ -334,8 +442,15 @@ fn load_from(
                 // imports resolve against the target's own directory,
                 // vendor fallback included), but merge nothing flat:
                 // Phase B renames and rewrites instead.
-                let real_path =
-                    ensure_parsed(&path, &raw, &vendor, &mut parsed, &mut path_of_idx, &mut files)?;
+                let real_path = ensure_parsed(
+                    &path,
+                    &raw,
+                    &importer,
+                    &vendor,
+                    &mut parsed,
+                    &mut path_of_idx,
+                    &mut files,
+                )?;
                 let target = canonical(&real_path);
                 let importer_canon = canonical(&importer);
                 if expanded.insert(target.clone()) {
@@ -505,19 +620,26 @@ fn bare_root_and_deps(
 
 /// Clear `E-IO-NOT-FOUND` for a bare name, naming both places searched and
 /// suggesting the fix. Distinguishes "not a dependency" (`klang add`) from
-/// "listed but not locked" (`klang.lock` missing the pin).
+/// "listed but not locked" (`klang.lock` missing the pin). Points at the
+/// import string literal in `importer` (`None` when the importer itself is
+/// unknown — then the explicit no-location form).
 fn bare_resolve_error(
     root_opt: Option<(&std::path::Path, &[(String, String)])>,
     importer_dir: &std::path::Path,
     name: &str,
+    importer: Option<(&str, &str)>,
 ) -> ImportError {
     let local_a = importer_dir.join(name).to_string_lossy().to_string();
     let local_b = importer_dir
         .join(format!("{name}.klang"))
         .to_string_lossy()
         .to_string();
+    let mk = |code: &'static str, msg: String| match importer {
+        Some((path, raw)) => ImportError::with_import_span(code, msg, path, raw),
+        None => ImportError::new(code, msg),
+    };
     match root_opt {
-        None => ImportError::new(
+        None => mk(
             "E-IO-NOT-FOUND",
             format!(
                 "cannot resolve package \"{name}\": searched local \"{local_a}\" (and \"{local_b}\") with no project klang.toml found (run: klang add {name})"
@@ -551,7 +673,7 @@ fn bare_resolve_error(
                 .iter()
                 .any(|l| l.name == name);
             if manifest_lists && !has_lock_pin {
-                return ImportError::new(
+                return mk(
                     "E-IO-NOT-FOUND",
                     format!(
                         "cannot resolve package \"{name}\": listed in klang.toml but missing pinned version in klang.lock (searched local \"{local_a}\", \"{local_b}\" and vendor \".klang_pkgs/{name}/<version>/\"; run klang fetch to pin it)"
@@ -561,14 +683,14 @@ fn bare_resolve_error(
             if has_lock_pin {
                 // Pinned but the entry file is absent (vendor dir missing or
                 // no lib entry).
-                return ImportError::new(
+                return mk(
                     "E-IO-NOT-FOUND",
                     format!(
                         "cannot resolve package \"{name}\": pinned in klang.lock but entry file missing (searched local \"{local_a}\", \"{local_b}\" and vendor \".klang_pkgs/{name}/<version>/lib.klang\"; run klang fetch to restore it)"
                     ),
                 );
             }
-            ImportError::new(
+            mk(
                 "E-IO-NOT-FOUND",
                 format!(
                     "cannot resolve package \"{name}\": searched local \"{local_a}\" (and \"{local_b}\") and vendor \".klang_pkgs/{name}/<version>/\" (run: klang add {name})"
@@ -612,9 +734,13 @@ fn resolve_real(path: &str, raw: &str, vendor: &Option<VendorCtx>) -> Option<Str
     vendor_fallback(raw, vendor)
 }
 
+/// `importer` is the importing file's display path (for error spans);
+/// empty when the entry itself is being loaded (then read failures keep
+/// the explicit no-location form naming the entry path).
 fn ensure_parsed(
     path: &str,
     raw: &str,
+    importer: &str,
     vendor: &Option<VendorCtx>,
     parsed: &mut HashMap<String, Program>,
     path_of_idx: &mut Vec<String>,
@@ -639,12 +765,14 @@ fn ensure_parsed(
             }
             let local_str = local.to_string_lossy().to_string();
             let src = std::fs::read_to_string(&local).map_err(|e| {
-                ImportError::new(
+                ImportError::with_import_span(
                     "E-IO-NOT-FOUND",
                     format!(
                         "cannot read {}: {e}",
                         diagnostics::sanitize_for_terminal(&local_str)
                     ),
+                    importer,
+                    raw,
                 )
             })?;
             let real_path = local_str;
@@ -670,12 +798,14 @@ fn ensure_parsed(
             if let Some((entry, _)) = try_bare_vendor_entry(&root, &deps, raw) {
                 let entry_str = entry.to_string_lossy().to_string();
                 let src = std::fs::read_to_string(&entry).map_err(|e| {
-                    ImportError::new(
+                    ImportError::with_import_span(
                         "E-IO-NOT-FOUND",
                         format!(
                             "cannot read {}: {e}",
                             diagnostics::sanitize_for_terminal(&entry_str)
                         ),
+                        importer,
+                        raw,
                     )
                 })?;
                 let real_path = entry_str;
@@ -700,34 +830,70 @@ fn ensure_parsed(
                 Some((&root, &deps)),
                 &importer_dir,
                 raw,
+                Some((importer, raw)),
             ));
         }
-        return Err(bare_resolve_error(None, &importer_dir, raw));
+        return Err(bare_resolve_error(None, &importer_dir, raw, Some((importer, raw))));
     }
     // Resolve the real file first so the canonical key is stable
     // across different logical importers of the same vendored file.
+    // Read failures point at the import literal in `importer` (or the
+    // explicit no-location form when `importer` is empty, i.e. the entry
+    // itself is missing).
     let (real_path, src) = match std::fs::read_to_string(path) {
         Ok(src) => (path.to_string(), src),
         Err(first) => match vendor_fallback(raw, vendor) {
             Some(vpath) => match std::fs::read_to_string(&vpath) {
                 Ok(src) => (vpath, src),
                 Err(_) => {
-                    return Err(ImportError::new(
+                    if importer.is_empty() {
+                        return Err(ImportError {
+                            code: "E-IO-NOT-FOUND",
+                            message: format!(
+                                "cannot read {}: {first}",
+                                diagnostics::sanitize_for_terminal(path)
+                            ),
+                            file: path.to_string(),
+                            start: 0,
+                            end: 0,
+                            line: 0,
+                            column: 0,
+                        });
+                    }
+                    return Err(ImportError::with_import_span(
                         "E-IO-NOT-FOUND",
                         format!(
                             "cannot read {}: {first}",
                             diagnostics::sanitize_for_terminal(path)
                         ),
+                        importer,
+                        raw,
                     ));
                 }
             },
             None => {
-                return Err(ImportError::new(
+                if importer.is_empty() {
+                    return Err(ImportError {
+                        code: "E-IO-NOT-FOUND",
+                        message: format!(
+                            "cannot read {}: {first}",
+                            diagnostics::sanitize_for_terminal(path)
+                        ),
+                        file: path.to_string(),
+                        start: 0,
+                        end: 0,
+                        line: 0,
+                        column: 0,
+                    });
+                }
+                return Err(ImportError::with_import_span(
                     "E-IO-NOT-FOUND",
                     format!(
                         "cannot read {}: {first}",
                         diagnostics::sanitize_for_terminal(path)
                     ),
+                    importer,
+                    raw,
                 ));
             }
         },
@@ -761,6 +927,7 @@ fn vendor_fallback(raw: &str, vendor: &Option<VendorCtx>) -> Option<String> {
 /// Queue a file's own imports, resolved against its directory. Unsafe
 /// paths are rejected here (same predicate as the repair model-output
 /// screen), so untrusted files cannot pull in `../../…` or absolutes.
+/// Unsafe-path errors point at the import string literal in `from_path`.
 fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) -> Result<(), ImportError> {
     let dir = std::path::Path::new(from_path)
         .parent()
@@ -768,12 +935,14 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     for imp in &prog.imports {
         if crate::repair::is_unsafe_import_path(imp) {
-            return Err(ImportError::new(
+            return Err(ImportError::with_import_span(
                 "E-IMPORT",
                 format!(
                     "unsafe import `{}` from `{from_path}`",
                     diagnostics::sanitize_for_terminal(imp)
                 ),
+                from_path,
+                imp,
             ));
         }
         queue.push_back(Work::Whole {
@@ -784,12 +953,14 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
     }
     for sel in &prog.selective_imports {
         if crate::repair::is_unsafe_import_path(&sel.path) {
-            return Err(ImportError::new(
+            return Err(ImportError::with_import_span(
                 "E-IMPORT",
                 format!(
                     "unsafe import `{}` from `{from_path}`",
                     diagnostics::sanitize_for_terminal(&sel.path)
                 ),
+                from_path,
+                &sel.path,
             ));
         }
         queue.push_back(Work::Selective {
@@ -801,12 +972,14 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
     }
     for aliased in &prog.aliased_imports {
         if crate::repair::is_unsafe_import_path(&aliased.path) {
-            return Err(ImportError::new(
+            return Err(ImportError::with_import_span(
                 "E-IMPORT",
                 format!(
                     "unsafe import `{}` from `{from_path}`",
                     diagnostics::sanitize_for_terminal(&aliased.path)
                 ),
+                from_path,
+                &aliased.path,
             ));
         }
         queue.push_back(Work::Alias {
@@ -821,7 +994,9 @@ fn enqueue_imports(prog: &Program, from_path: &str, queue: &mut VecDeque<Work>) 
 
 /// Merge one function, enforcing whole-program uniqueness. Re-merging the
 /// same (file, name) is idempotent; a DIFFERENT file's same-named function
-/// is a loud duplicate, never a silent overwrite.
+/// is a loud duplicate, never a silent overwrite. The duplicate error
+/// points at the redefinition's name span in its own file (`display_path`
+/// parallels `canon`).
 fn insert_fn(
     merged: &mut Vec<crate::ast::FunctionDecl>,
     origins: &mut Vec<String>,
@@ -830,14 +1005,17 @@ fn insert_fn(
     canon: &str,
     f: crate::ast::FunctionDecl,
     _importer: &str,
+    display_path: &str,
 ) -> Result<(), ImportError> {
     if !fn_names.insert(f.name.clone()) {
         if merged_items.contains(&(canon.to_string(), "fn".to_string(), f.name.clone())) {
             return Ok(());
         }
-        return Err(ImportError::new(
+        return Err(ImportError::with_def_span(
             "E-DUPLICATE",
             format!("duplicate function `{}`", f.name),
+            display_path,
+            f.name_span,
         ));
     }
     merged_items.insert((canon.to_string(), "fn".to_string(), f.name.clone()));
@@ -847,7 +1025,9 @@ fn insert_fn(
 }
 
 /// Merge one selectively-imported name (every top-level item with that
-/// name, across functions/structs/enums).
+/// name, across functions/structs/enums). Missing-name errors point at the
+/// selective import's string literal in `importer` (`raw` is the path as
+/// written); `display_path` parallels `canon` for duplicate attribution.
 fn import_named(
     target: &Program,
     canon: &str,
@@ -857,6 +1037,8 @@ fn import_named(
     fn_names: &mut HashSet<String>,
     merged_items: &mut HashSet<(String, String, String)>,
     importer: &str,
+    raw: &str,
+    display_path: &str,
 ) -> Result<(), ImportError> {
     let mut hits = 0;
     for f in &target.functions {
@@ -870,6 +1052,7 @@ fn import_named(
                 canon,
                 f.clone(),
                 importer,
+                display_path,
             )?;
         }
     }
@@ -897,19 +1080,23 @@ fn import_named(
         return Ok(());
     }
     if target.mods.iter().any(|m| m.name == name) {
-        return Err(ImportError::new(
+        return Err(ImportError::with_import_span(
             "E-IMPORT",
             format!(
                 "undefined import `{name}` from `{importer}`: `{name}` is a module — import the whole file with `import \"...\"` instead"
             ),
+            importer,
+            raw,
         ));
     }
-    Err(ImportError::new(
+    Err(ImportError::with_import_span(
         "E-IMPORT",
         format!(
             "undefined import `{name}` from `{importer}`: no top-level function, struct, or enum named `{name}` (available: {})",
             available_names(target)
         ),
+        importer,
+        raw,
     ))
 }
 
@@ -953,6 +1140,8 @@ struct AliasFile {
     target: String,
     raw: String,
     own_fns: Vec<String>,
+    /// Importing file's canonical path (for error spans).
+    importer: String,
 }
 
 /// Package dir for a bare alias target (entry file at the package root).
@@ -1005,11 +1194,13 @@ fn resolve_aliases(
         // Same alias bound to two different files in one importer.
         for (importer2, alias2, target2, _) in alias_edges {
             if importer == importer2 && alias == alias2 && target != target2 {
-                return Err(ImportError::new(
+                return Err(ImportError::with_import_span(
                     "E-DUPLICATE",
                     format!(
                         "duplicate alias `{alias}` (already imports one file; cannot also import another)"
                     ),
+                    importer,
+                    raw,
                 ));
             }
         }
@@ -1053,11 +1244,13 @@ fn resolve_aliases(
             target: target.clone(),
             raw: raw.clone(),
             own_fns,
+            importer: importer.clone(),
         };
         // Alias names share the binding scope with `let` names (D1 §4):
         // any `let`/parameter/loop variable with the alias name in the
         // importing file is a loud duplicate, never a silent pick-one.
-        check_alias_collisions(merged, fn_origins, mod_origins, importer, alias)?;
+        // Points at the alias import literal in the importer.
+        check_alias_collisions(merged, fn_origins, mod_origins, importer, alias, raw)?;
         // Merge the target unit once per canonical file (two aliases for
         // one file share the copy): renamed functions plus flat
         // structs/enums/mods, exactly as a whole import would merge them.
@@ -1167,37 +1360,34 @@ fn insert_renamed(
 
 /// Reject an alias that shares its name with a `let` binding, parameter,
 /// or loop variable anywhere in the importing file (D1 §4: aliases live
-/// in the same binding scope as `let` names).
+/// in the same binding scope as `let` names). Points at the alias import
+/// literal (`raw` as written) in `importer`.
 fn check_alias_collisions(
     merged: &Program,
     fn_origins: &[String],
     mod_origins: &[String],
     importer: &str,
     alias: &str,
+    raw: &str,
 ) -> Result<(), ImportError> {
+    let dup = |msg: String| ImportError::with_import_span("E-DUPLICATE", msg, importer, raw);
     for (f, origin) in merged.functions.iter().zip(fn_origins.iter()) {
         if origin != importer {
             continue;
         }
         for p in &f.params {
             if p.name == alias {
-                return Err(ImportError::new(
-                    "E-DUPLICATE",
-                    format!(
-                        "alias `{alias}` collides with parameter `{alias}` of function `{}` (aliases share the binding scope with `let` names; rename one)",
-                        f.name
-                    ),
-                ));
+                return Err(dup(format!(
+                    "alias `{alias}` collides with parameter `{alias}` of function `{}` (aliases share the binding scope with `let` names; rename one)",
+                    f.name
+                )));
             }
         }
         if let Some(binding) = find_let_binding(&f.body, alias) {
-            return Err(ImportError::new(
-                "E-DUPLICATE",
-                format!(
-                    "alias `{alias}` collides with {binding} in function `{}` (aliases share the binding scope with `let` names; rename one)",
-                    f.name
-                ),
-            ));
+            return Err(dup(format!(
+                "alias `{alias}` collides with {binding} in function `{}` (aliases share the binding scope with `let` names; rename one)",
+                f.name
+            )));
         }
     }
     for (m, origin) in merged.mods.iter().zip(mod_origins.iter()) {
@@ -1207,23 +1397,17 @@ fn check_alias_collisions(
         for f in &m.functions {
             for p in &f.params {
                 if p.name == alias {
-                    return Err(ImportError::new(
-                        "E-DUPLICATE",
-                        format!(
-                            "alias `{alias}` collides with parameter `{alias}` of function `{}::{}` (aliases share the binding scope with `let` names; rename one)",
-                            m.name, f.name
-                        ),
-                    ));
+                    return Err(dup(format!(
+                        "alias `{alias}` collides with parameter `{alias}` of function `{}::{}` (aliases share the binding scope with `let` names; rename one)",
+                        m.name, f.name
+                    )));
                 }
             }
             if let Some(binding) = find_let_binding(&f.body, alias) {
-                return Err(ImportError::new(
-                    "E-DUPLICATE",
-                    format!(
-                        "alias `{alias}` collides with {binding} in function `{}::{}` (aliases share the binding scope with `let` names; rename one)",
-                        m.name, f.name
-                    ),
-                ));
+                return Err(dup(format!(
+                    "alias `{alias}` collides with {binding} in function `{}::{}` (aliases share the binding scope with `let` names; rename one)",
+                    m.name, f.name
+                )));
             }
         }
     }
@@ -1564,7 +1748,7 @@ fn rewrite_expr_alias(
                 if !af.own_fns.iter().any(|f| f == method) {
                     let mut avail = af.own_fns.clone();
                     avail.sort();
-                    return Err(ImportError::new(
+                    return Err(ImportError::with_import_span(
                         "E-UNDEFINED",
                         format!(
                             "`{}.{}` is not defined in `{}` (available: {})",
@@ -1577,6 +1761,8 @@ fn rewrite_expr_alias(
                                 avail.join(", ")
                             }
                         ),
+                        &af.importer,
+                        &af.raw,
                     ));
                 }
                 let internal = internal_name(&af.target, method);

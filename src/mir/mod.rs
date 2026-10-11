@@ -243,6 +243,10 @@ pub struct MirFunction {
     /// Raw declared return annotation (D3: enforced at `return`).
     pub return_ty: String,
     pub instrs: Vec<MirInstr>,
+    /// Defining source file (S2: D3 boundary errors name the real file).
+    /// Empty when unknown (synthetic/closure helpers fall back to the
+    /// enclosing function's file).
+    pub file: String,
 }
 
 /// Whole lowered module.
@@ -1090,6 +1094,7 @@ pub fn lower(program: &Program) -> MirModule {
             param_tys: f.params.iter().map(|p| p.ty.clone()).collect(),
             return_ty: f.return_ty.clone(),
             instrs,
+            file: f.file.clone(),
         });
         // Lambda-lifted closure bodies: one synthetic function per
         // literal (including nested ones — `collect_closures` recurses),
@@ -1121,6 +1126,7 @@ pub fn lower(program: &Program) -> MirModule {
                 param_tys: cparam_tys,
                 return_ty: lit.return_ty.clone(),
                 instrs: cinstrs,
+                file: f.file.clone(),
             });
         }
     }
