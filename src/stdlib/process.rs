@@ -127,20 +127,20 @@ pub fn chdir(path: &str) -> Result<(), Diagnostic> {
 }
 
 /// Set the environment variable `name` to `value` for this process
-/// (and its future children). Names containing `=` or NUL are
-/// `E-ENV-INVALID` (`std::env::set_var` would panic on them); empty
-/// names follow the platform (allowed on Unix). Always succeeds
-/// otherwise — `set_var` itself is infallible.
+/// (and its future children). Empty names and names containing `=` or
+/// NUL (and NUL in the value) are `E-ENV-INVALID` naming the bad name —
+/// `std::env::set_var` would panic on them, so they never reach it.
+/// Always succeeds otherwise — `set_var` itself is infallible.
 pub fn set_env(name: &str, value: &str) -> Result<(), Diagnostic> {
-    if name.contains('=') || name.contains('\0') || value.contains('\0') {
+    if name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0') {
         return Err(crate::diagnostics::Diagnostic::error(
             "E-ENV-INVALID",
-            &format!("set_env({name:?}) failed: names cannot contain `=` or NUL"),
+            &format!("set_env({name:?}) failed: names must be non-empty without `=` or NUL"),
             "runtime",
             0,
             0,
-            "environment variable names cannot contain `=` or NUL bytes",
-            &["pass a plain NAME without `=`"],
+            "environment variable names cannot be empty or contain `=` or NUL bytes",
+            &["pass a plain non-empty NAME without `=`"],
             "env/invalid",
         ));
     }

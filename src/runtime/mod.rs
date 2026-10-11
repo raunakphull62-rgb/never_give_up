@@ -2644,66 +2644,57 @@ fn exec_sort_by(
     Ok(Value::Array(keyed.into_iter().map(|(v, _)| v).collect()))
 }
 
-/// S9 file-guard mode: false (default) keeps the strict sandbox guard
-/// for sandboxed execution (`klang run --sandbox`) and every library
-/// caller; true relaxes plain `klang run` to allow normal relative paths
-/// (including `..`, resolved against the current directory by the OS,
-/// so `chdir` + relative reads work). Absolute paths outside the temp
-/// dir stay rejected in both modes (the minimal relaxation in S9 item
-/// 6); see docs/reference.md.
+/// F1 file-guard mode: the strict temp-dir-only guard applies ONLY under
+/// `klang run --sandbox` (see [`crate::sandbox::is_sandbox`]). Plain
+/// `klang run` (and `klang test`, library callers) allow ALL relative and
+/// absolute paths, subject only to OS permissions with `E-IO-*` errors.
+/// The flag below is retained for compatibility with existing callers and
+/// is otherwise a no-op; see docs/reference.md.
 static FILE_GUARD_RELAXED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Enable (`true`) or disable (`false`) the S9 relaxed file guard for
-/// plain `klang run`. The CLI sets this before executing; sandboxed
-/// runs (`--sandbox`) and library tests leave the strict default.
+/// Retained for compatibility: historically enabled the S9 relaxed file
+/// guard for plain `klang run`. Since F1 the guard is decided solely by
+/// [`crate::sandbox::is_sandbox`] (strict only in sandbox), so this is a
+/// no-op store. The CLI still calls it; library tests may too.
 pub fn set_file_guard_relaxed(relaxed: bool) {
     FILE_GUARD_RELAXED.store(relaxed, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// True when plain-`klang run` relaxation is active (relative paths,
-/// including `..`, allowed). Library/sandbox callers see false.
+/// Retained for compatibility (see [`set_file_guard_relaxed`]).
 pub fn is_file_guard_relaxed() -> bool {
     FILE_GUARD_RELAXED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Capability guard for file builtins: untrusted `.klang` files must not
-/// escape via `../../…` or absolute paths. Trusted scripts (tests, stdlib)
-/// use temp-dir or relative paths and are unaffected. `env` is left
-/// unrestricted (reads process env, returns empty when unset).
+/// Capability guard for file builtins.
 ///
-/// S9: the strict form stays for sandboxed execution and library calls;
-/// plain `klang run` (see [`set_file_guard_relaxed`]) additionally
-/// allows relative paths containing `..` (resolved against the current
-/// directory, which `chdir` may have changed). Absolute paths outside
-/// the temp dir stay rejected in both modes. X1: sandboxed rejections
-/// use `E-SANDBOX-FILE`; non-sandbox strict rejections stay `E-RUNTIME`
-/// (pinned by existing gates).
+/// F1: plain mode (`klang run`, `klang test`, library callers — anything
+/// without [`crate::sandbox::is_sandbox`]) allows every relative and
+/// absolute path; the OS decides (missing -> `E-IO-NOT-FOUND`, permission
+/// -> `E-IO-PERMISSION`, else `E-IO-FAILED`). Only `klang run --sandbox`
+/// keeps the strict form: absolute paths only under the system temp dir,
+/// relative paths with no `..`, denied with `E-SANDBOX-FILE`. `env` stays
+/// unrestricted (reads process env, returns empty when unset).
+/// It does not protect against symlinks.
 fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
     if path.is_empty() {
         return Err(runtime_err("empty path"));
     }
+    if !crate::sandbox::is_sandbox() {
+        return Ok(());
+    }
     let p = std::path::Path::new(path);
-    // Absolute paths are allowed only inside the system temp dir (tests use
-    // `std::env::temp_dir()`); everything else must be relative without
-    // parent components. This blocks `../../etc/passwd` and `/etc/passwd`
-    // while keeping `mylib.klang`, `./a.klang`, `/tmp/...` working.
+    // Sandbox strict: absolute only inside the system temp dir; relative
+    // without parent components. This blocks `../../etc/passwd` and
+    // `/etc/passwd` while keeping `mylib.klang`, `./a.klang`, `/tmp/...`.
     if p.is_absolute() {
         let tmp = std::env::temp_dir();
         if !p.starts_with(&tmp) {
-            if crate::sandbox::is_sandbox() {
-                return Err(crate::sandbox::deny_file(
-                    path,
-                    "absolute paths outside the temp dir are not allowed",
-                ));
-            }
-            return Err(runtime_err(&format!("unsafe absolute path `{path}`")));
+            return Err(crate::sandbox::deny_file(
+                path,
+                "absolute paths outside the temp dir are not allowed",
+            ));
         }
-        return Ok(());
-    }
-    // S9 relaxed mode (plain `klang run` only): relative paths — even
-    // with `..` — resolve against the process working directory.
-    if is_file_guard_relaxed() {
         return Ok(());
     }
     for comp in p.components() {
@@ -2711,13 +2702,10 @@ fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
             comp,
             std::path::Component::ParentDir | std::path::Component::RootDir
         ) {
-            if crate::sandbox::is_sandbox() {
-                return Err(crate::sandbox::deny_file(
-                    path,
-                    "parent (`..`) components are not allowed",
-                ));
-            }
-            return Err(runtime_err(&format!("unsafe path `{path}`")));
+            return Err(crate::sandbox::deny_file(
+                path,
+                "parent (`..`) components are not allowed",
+            ));
         }
     }
     Ok(())
