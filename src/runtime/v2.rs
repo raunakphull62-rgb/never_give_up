@@ -129,6 +129,13 @@ fn value_to_data(v: &Value) -> Result<DataValue, Diagnostic> {
         Value::Closure { .. } => Err(rt_err(
             "tune() value must be a record struct; closures are not schema values",
         )),
+        // A1 handles and null never validate as schema records.
+        Value::Null
+        | Value::Listener(_)
+        | Value::Conn(_)
+        | Value::UdpSock(_) => Err(rt_err(
+            "tune() value must be a record struct; handles and null are not schema values",
+        )),
     }
 }
 

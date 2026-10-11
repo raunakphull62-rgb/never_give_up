@@ -54,7 +54,7 @@ impl CancelToken {
 }
 
 /// Runtime value. All variants are `Send` so tasks can run on threads.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -73,6 +73,39 @@ pub enum Value {
         func: String,
         captures: Vec<(String, Value)>,
     },
+    /// A1 null: no literal; only `tcp_accept_timeout` (timeout) and
+    /// `conn_read_line` (peer close) produce it. Test with `is_null(x)`.
+    Null,
+    /// A1 opaque handles: shared `Arc` state, identity equality, closed
+    /// on drop (program exit closes whatever the program forgot).
+    Listener(crate::stdlib::a1_net::ListenerHandle),
+    Conn(crate::stdlib::a1_net::ConnHandle),
+    UdpSock(crate::stdlib::a1_net::UdpHandle),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Str(a), Self::Str(b)) => a == b,
+            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Map(a), Self::Map(b)) => a == b,
+            (
+                Self::Struct { name: n1, fields: f1 },
+                Self::Struct { name: n2, fields: f2 },
+            ) => n1 == n2 && f1 == f2,
+            (
+                Self::Closure { func: f1, captures: c1 },
+                Self::Closure { func: f2, captures: c2 },
+            ) => f1 == f2 && c1 == c2,
+            (Self::Null, Self::Null) => true,
+            (Self::Listener(a), Self::Listener(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::Conn(a), Self::Conn(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::UdpSock(a), Self::UdpSock(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 }
 
 impl Value {
@@ -88,6 +121,10 @@ impl Value {
             // through unchecked MIR — checked programs reject closure
             // arithmetic with `E-TYPE`.
             Self::Closure { captures, .. } => captures.len() as i64,
+            // A1 handles and null flow as 0 through unchecked dynamic
+            // arithmetic (checked programs never do math on them).
+            Self::Null => 0,
+            Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => 0,
         }
     }
 
@@ -100,6 +137,8 @@ impl Value {
             Self::Map(m) => m.len() as f64,
             Self::Struct { fields, .. } => fields.len() as f64,
             Self::Closure { captures, .. } => captures.len() as f64,
+            Self::Null => 0.0,
+            Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => 0.0,
         }
     }
 
@@ -118,6 +157,10 @@ impl Value {
             // A closure value is always truthy (like a struct): checked
             // programs reject non-bool conditions with `E-TYPE` anyway.
             Self::Closure { .. } => true,
+            // A1: null is falsy; handles are always truthy (like structs),
+            // even when closed (closed is still a handle value).
+            Self::Null => false,
+            Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => true,
         }
     }
 
@@ -154,6 +197,11 @@ impl Value {
             // Opaque by design: captures are an implementation detail,
             // so `print`/`str`/`format` show a stable placeholder.
             Self::Closure { .. } => "<closure>".to_string(),
+            // A1: null prints as `null`; handles are opaque placeholders.
+            Self::Null => "null".to_string(),
+            Self::Listener(_) => "<listener>".to_string(),
+            Self::Conn(_) => "<conn>".to_string(),
+            Self::UdpSock(_) => "<udpsock>".to_string(),
         }
     }
 
@@ -206,6 +254,10 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::Map(_) => "map",
         Value::Struct { .. } => "struct",
         Value::Closure { .. } => "closure",
+        Value::Null => "null",
+        Value::Listener(_) => "listener",
+        Value::Conn(_) => "conn",
+        Value::UdpSock(_) => "udpsock",
     }
 }
 
@@ -1607,6 +1659,24 @@ fn is_builtin(name: &str) -> bool {
             | "now_iso"
             | "sleep_ms"
             | "get_env"
+            | "tcp_listen"
+            | "listener_port"
+            | "tcp_accept"
+            | "tcp_accept_timeout"
+            | "tcp_connect"
+            | "conn_read"
+            | "conn_read_line"
+            | "conn_read_hex"
+            | "conn_write"
+            | "conn_write_hex"
+            | "conn_close"
+            | "conn_set_timeout"
+            | "conn_peer"
+            | "udp_bind"
+            | "udp_send_to"
+            | "udp_recv_from"
+            | "dns_lookup"
+            | "is_null"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -2488,6 +2558,183 @@ fn exec_builtin(
                 return Err(runtime_err("random_seeded_float() takes 0 arguments"));
             }
             Ok(Value::Float(crate::stdlib::b1::seeded_float()))
+        }
+        // A1 sockets (see src/stdlib/a1_net.rs). Arity is re-checked here
+        // for unchecked MIR; typed operand checks live in the stdlib
+        // (wrong-handle kinds are `E-TYPE` with a clear type name).
+        "tcp_listen" => {
+            if args.len() != 2 {
+                return Err(runtime_err("tcp_listen() takes 2 arguments"));
+            }
+            let host = get(&args[0]).render();
+            let port = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("tcp_listen", "an int port", &other)),
+            };
+            crate::stdlib::a1_net::tcp_listen(&host, port)
+        }
+        "listener_port" => {
+            if args.len() != 1 {
+                return Err(runtime_err("listener_port() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a1_net::listener_port(&v).map(Value::Int)
+        }
+        "tcp_accept" => {
+            if args.len() != 1 {
+                return Err(runtime_err("tcp_accept() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a1_net::tcp_accept(&v)
+        }
+        "tcp_accept_timeout" => {
+            if args.len() != 2 {
+                return Err(runtime_err("tcp_accept_timeout() takes 2 arguments"));
+            }
+            let v = get(&args[0]);
+            let ms = match get(&args[1]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("tcp_accept_timeout", "an int timeout", &other)),
+            };
+            crate::stdlib::a1_net::tcp_accept_timeout(&v, ms)
+        }
+        "tcp_connect" => {
+            if args.len() != 3 {
+                return Err(runtime_err("tcp_connect() takes 3 arguments"));
+            }
+            let host = get(&args[0]).render();
+            let port = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("tcp_connect", "an int port", &other)),
+            };
+            let ms = match get(&args[2]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("tcp_connect", "an int timeout", &other)),
+            };
+            crate::stdlib::a1_net::tcp_connect(&host, port, ms)
+        }
+        "conn_read" => {
+            if args.len() != 2 {
+                return Err(runtime_err("conn_read() takes 2 arguments"));
+            }
+            let v = get(&args[0]);
+            let max = match get(&args[1]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("conn_read", "an int max_bytes", &other)),
+            };
+            crate::stdlib::a1_net::conn_read(&v, max).map(Value::Str)
+        }
+        "conn_read_line" => {
+            if args.len() != 1 {
+                return Err(runtime_err("conn_read_line() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a1_net::conn_read_line(&v)
+        }
+        "conn_read_hex" => {
+            if args.len() != 2 {
+                return Err(runtime_err("conn_read_hex() takes 2 arguments"));
+            }
+            let v = get(&args[0]);
+            let max = match get(&args[1]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("conn_read_hex", "an int max_bytes", &other)),
+            };
+            crate::stdlib::a1_net::conn_read_hex(&v, max).map(Value::Str)
+        }
+        "conn_write" => {
+            if args.len() != 2 {
+                return Err(runtime_err("conn_write() takes 2 arguments"));
+            }
+            let v = get(&args[0]);
+            let s = get(&args[1]).render();
+            crate::stdlib::a1_net::conn_write(&v, &s).map(Value::Int)
+        }
+        "conn_write_hex" => {
+            if args.len() != 2 {
+                return Err(runtime_err("conn_write_hex() takes 2 arguments"));
+            }
+            let v = get(&args[0]);
+            let hex = get(&args[1]).render();
+            crate::stdlib::a1_net::conn_write_hex(&v, &hex).map(Value::Int)
+        }
+        "conn_close" => {
+            if args.len() != 1 {
+                return Err(runtime_err("conn_close() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a1_net::conn_close(&v).map(|()| Value::Int(1))
+        }
+        "conn_set_timeout" => {
+            if args.len() != 2 {
+                return Err(runtime_err("conn_set_timeout() takes 2 arguments"));
+            }
+            let v = get(&args[0]);
+            let ms = match get(&args[1]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("conn_set_timeout", "an int timeout", &other)),
+            };
+            crate::stdlib::a1_net::conn_set_timeout(&v, ms).map(|()| Value::Int(1))
+        }
+        "conn_peer" => {
+            if args.len() != 1 {
+                return Err(runtime_err("conn_peer() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a1_net::conn_peer(&v).map(Value::Str)
+        }
+        "udp_bind" => {
+            if args.len() != 2 {
+                return Err(runtime_err("udp_bind() takes 2 arguments"));
+            }
+            let host = get(&args[0]).render();
+            let port = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("udp_bind", "an int port", &other)),
+            };
+            crate::stdlib::a1_net::udp_bind(&host, port)
+        }
+        "udp_send_to" => {
+            if args.len() != 4 {
+                return Err(runtime_err("udp_send_to() takes 4 arguments"));
+            }
+            let sock = get(&args[0]);
+            let host = get(&args[1]).render();
+            let port = match get(&args[2]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("udp_send_to", "an int port", &other)),
+            };
+            let s = get(&args[3]).render();
+            crate::stdlib::a1_net::udp_send_to(&sock, &host, port, &s).map(Value::Int)
+        }
+        "udp_recv_from" => {
+            if args.len() != 3 {
+                return Err(runtime_err("udp_recv_from() takes 3 arguments"));
+            }
+            let sock = get(&args[0]);
+            let max = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("udp_recv_from", "an int max_bytes", &other)),
+            };
+            let ms = match get(&args[2]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("udp_recv_from", "an int timeout", &other)),
+            };
+            crate::stdlib::a1_net::udp_recv_from(&sock, max, ms)
+        }
+        "dns_lookup" => {
+            if args.len() != 1 {
+                return Err(runtime_err("dns_lookup() takes 1 argument"));
+            }
+            let host = get(&args[0]).render();
+            crate::stdlib::a1_net::dns_lookup(&host)
+                .map(|ips| Value::Array(ips.into_iter().map(Value::Str).collect()))
+        }
+        "is_null" => {
+            if args.len() != 1 {
+                return Err(runtime_err("is_null() takes 1 argument"));
+            }
+            Ok(Value::Int(i64::from(matches!(get(&args[0]), Value::Null))))
         }
         "__echo_create" => {
             if args.len() != 1 {

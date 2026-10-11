@@ -61,6 +61,14 @@ pub mod seq;
 /// string methods `pad_start` / `pad_end` / `repeat` / `lines`.
 pub mod b1;
 
+/// A1 sockets: TCP, UDP, DNS with opaque handle values.
+/// Wired as the flat builtins `tcp_listen` / `listener_port` /
+/// `tcp_accept` / `tcp_accept_timeout` / `tcp_connect` / `conn_read` /
+/// `conn_read_line` / `conn_read_hex` / `conn_write` / `conn_write_hex` /
+/// `conn_close` / `conn_set_timeout` / `conn_peer` / `udp_bind` /
+/// `udp_send_to` / `udp_recv_from` / `dns_lookup` / `is_null`.
+pub mod a1_net;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {

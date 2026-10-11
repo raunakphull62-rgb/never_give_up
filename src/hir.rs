@@ -3681,6 +3681,14 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "regex_replace" => 3,
         "uuid_v4" | "random_seeded_float" => 0,
         "path_absolute" | "file_mtime" | "random_seed" => 1,
+        "tcp_listen" => 2,
+        "listener_port" | "tcp_accept" | "conn_read_line" | "conn_close" | "conn_peer" | "is_null" => 1,
+        "tcp_accept_timeout" | "conn_read" | "conn_read_hex" | "conn_write" | "conn_write_hex"
+        | "conn_set_timeout" => 2,
+        "tcp_connect" | "udp_recv_from" => 3,
+        "udp_bind" => 2,
+        "udp_send_to" => 4,
+        "dns_lookup" => 1,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -4229,6 +4237,152 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             Ty::Int
         }
         "random_seeded_float" => Ty::Float,
+        // A1 sockets: handles have no nominal `Ty` yet, so handle-typed
+        // positions accept `Unknown` (what `tcp_listen` returns) and
+        // reject statically-known scalar types with `E-TYPE`. Dynamic
+        // (`Unknown`) values that arrive misshapen fail at runtime with
+        // the same code and a clear `listener`/`conn`/`udpsock` name.
+        "tcp_listen" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tcp_listen()` host", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tcp_listen()` port", "i32", &args[1]));
+            }
+            Ty::Unknown
+        }
+        "listener_port" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`listener_port()` listener", "listener", &args[0]));
+            }
+            Ty::Int
+        }
+        "tcp_accept" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tcp_accept()` listener", "listener", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "tcp_accept_timeout" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tcp_accept_timeout()` listener", "listener", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tcp_accept_timeout()` timeout", "i32", &args[1]));
+            }
+            Ty::Unknown
+        }
+        "tcp_connect" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tcp_connect()` host", "str", &args[0]));
+            }
+            for (i, a) in args.iter().enumerate().skip(1) {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`tcp_connect()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            Ty::Unknown
+        }
+        "conn_read" | "conn_read_hex" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` conn"), "conn", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` max_bytes"), "i32", &args[1]));
+            }
+            Ty::Str
+        }
+        "conn_read_line" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_read_line()` conn", "conn", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "conn_write" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_write()` conn", "conn", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_write()` data", "str", &args[1]));
+            }
+            Ty::Int
+        }
+        "conn_write_hex" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_write_hex()` conn", "conn", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_write_hex()` hex", "str", &args[1]));
+            }
+            Ty::Int
+        }
+        "conn_close" | "conn_set_timeout" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` handle"), "handle", &args[0]));
+            }
+            if func == "conn_set_timeout" && !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_set_timeout()` timeout", "i32", &args[1]));
+            }
+            Ty::Int
+        }
+        "conn_peer" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`conn_peer()` conn", "conn", &args[0]));
+            }
+            Ty::Str
+        }
+        "udp_bind" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_bind()` host", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_bind()` port", "i32", &args[1]));
+            }
+            Ty::Unknown
+        }
+        "udp_send_to" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_send_to()` sock", "udpsock", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_send_to()` host", "str", &args[1]));
+            }
+            if !matches!(&args[2], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_send_to()` port", "i32", &args[2]));
+            }
+            if !matches!(&args[3], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_send_to()` data", "str", &args[3]));
+            }
+            Ty::Int
+        }
+        "udp_recv_from" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`udp_recv_from()` sock", "udpsock", &args[0]));
+            }
+            for (i, a) in args.iter().enumerate().skip(1) {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`udp_recv_from()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            Ty::Map
+        }
+        "dns_lookup" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dns_lookup()` host", "str", &args[0]));
+            }
+            Ty::Array
+        }
+        "is_null" => Ty::Bool,
         _ => Ty::Unknown,
     }
 }
@@ -4416,6 +4570,24 @@ pub fn is_builtin(name: &str) -> bool {
             | "now_iso"
             | "sleep_ms"
             | "get_env"
+            | "tcp_listen"
+            | "listener_port"
+            | "tcp_accept"
+            | "tcp_accept_timeout"
+            | "tcp_connect"
+            | "conn_read"
+            | "conn_read_line"
+            | "conn_read_hex"
+            | "conn_write"
+            | "conn_write_hex"
+            | "conn_close"
+            | "conn_set_timeout"
+            | "conn_peer"
+            | "udp_bind"
+            | "udp_send_to"
+            | "udp_recv_from"
+            | "dns_lookup"
+            | "is_null"
     )
 }
 
