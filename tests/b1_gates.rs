@@ -209,8 +209,9 @@ fn b1_file_mtime_errors() {
     ));
     assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
     assert!(err.message.contains(&missing), "names the path: {}", err.message);
+    // F1: plain mode allows `..`; missing target is E-IO-NOT-FOUND.
     let err = run_err("fn main() -> f64 { return file_mtime(\"../evil\") }");
-    assert_eq!(err.code, "E-RUNTIME");
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
 
 // ---- sprintf ----
