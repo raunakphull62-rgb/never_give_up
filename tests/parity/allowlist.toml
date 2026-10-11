@@ -36,85 +36,21 @@
 #   - stdlib-packages/*/*_test.klang except http_live_test.klang (needs
 #     outbound internet): must print "<pkg>: OK" and exit 0 on v1.
 #
-# Severity ranking of the Divergent classes below (worst first):
+# Severity ranking of divergence classes (worst first; S1/S2 were
+# eliminated Wave1 S5 — only S3 remains below):
 #   S1 crash           — the process dies by signal (no diagnostic at all).
 #   S2 silent wrong    — exit 0 with a computed value where v1 errors.
 #   S3 loud reject     — exit 1 with JIT-FAIL / E-PARSE-V2 / E-UNDEFINED.
 #      (rejection IS parity for out-of-subset code; listed so the gate
 #       notices if a backend ever goes quiet or starts agreeing.)
 
-# --- S1: JIT crashes (raw arithmetic traps, no diagnostic) ----------------
-
-[[entry]]
-programs = ["tests/parity/div_zero.klang"]
-backend = "jit"
-outcome = "crash"
-stdout = ""
-stderr_contains = ""
-reason = "S1: JIT lowers Div to raw sdiv, which traps (SIGILL) on zero instead of reporting E-RUNTIME like v1/v2. Fix = D6 fallible JIT (out of scope for the harness phase)."
-
-[[entry]]
-programs = ["tests/parity/mod_zero.klang"]
-backend = "jit"
-outcome = "crash"
-stdout = ""
-stderr_contains = ""
-reason = "S1: JIT lowers Mod to raw srem, which traps (SIGFPE) on zero instead of reporting E-RUNTIME like v1/v2. Same fix as div_zero."
-
-# --- S2: JIT silent wrong answers (i64-wide math where v1 errors) ---------
-
-[[entry]]
-programs = ["tests/parity/ovf_add.klang"]
-backend = "jit"
-outcome = "exit"
-exit = 0
-stdout = "-9223372036854775808\n"
-stderr_contains = ""
-reason = "S2: JIT adds wrapping-i64 with no overflow check, printing -9223372036854775808 and exiting 0 where v1/v2 fail E-OVERFLOW at the i64 boundary (D3 moved the corpus here from the old i32 case). Silent wrong answer, not a crash."
-
-[[entry]]
-programs = ["tests/parity/ovf_sub.klang"]
-backend = "jit"
-outcome = "exit"
-exit = 0
-stdout = "9223372036854775807\n"
-stderr_contains = ""
-reason = "S2: same wrapping-i64 class as ovf_add (MIN - 1 wraps to MAX, where v1/v2 fail E-OVERFLOW at the i64 boundary)."
-
-[[entry]]
-programs = ["tests/parity/ovf_mul.klang"]
-backend = "jit"
-outcome = "exit"
-exit = 0
-stdout = "-2\n"
-stderr_contains = ""
-reason = "S2: same wrapping-i64 class as ovf_add (MAX * 2 wraps to -2; v1/v2 fail E-OVERFLOW at the i64 boundary)."
-
-[[entry]]
-programs = ["tests/parity/ovf_neg.klang"]
-backend = "jit"
-outcome = "exit"
-exit = 0
-stdout = ""
-stderr_contains = ""
-reason = "S2: negating i64::MIN wraps (exit code is the low byte, 0) where v1/v2 fail E-OVERFLOW in `sub`. No output makes this the quietest wrong answer in the corpus."
-
-[[entry]]
-programs = ["tests/parity/ovf_mindiv.klang"]
-backend = "jit"
-outcome = "crash"
-stdout = ""
-stderr_contains = ""
-reason = "S1: i64::MIN / -1 traps the JIT's raw sdiv (SIGFPE) where v1/v2 fail loud E-OVERFLOW in `div`. Same trap class as div_zero/mod_zero; D3 moved the corpus here from the old i32 case (which the JIT computed exactly)."
-
-[[entry]]
-programs = ["tests/parity/recursion_deep.klang"]
-backend = "jit"
-outcome = "exit"
-exit = 208
-stdout = ""
-stderr_contains = ""
-reason = "S2: the JIT has no call-depth guard, so countdown(2000) returns 2000 (exit 208 = 2000 mod 256) where v1/v2 fail loud E-RUNTIME at 1024 frames. Very deep JIT recursion aborts natively instead of reporting."
+# Wave1 S5: the S1 (trap) and S2 (silent wrap) classes are gone — the
+# fallible JIT reports E-RUNTIME/E-OVERFLOW exactly like the
+# interpreter, and enforces the same 1024-frame depth guard. The eight
+# entries that pinned them (div_zero, mod_zero, ovf_add, ovf_sub,
+# ovf_mul, ovf_neg, ovf_mindiv, recursion_deep on the JIT) were removed;
+# those programs now assert agreement with no entry (the default rule).
+# What remains below is all S3 (loud rejection = parity by rejection).
 
 # --- S3: JIT loud rejects (parity by rejection for non-int code) ----------
 

@@ -1,6 +1,6 @@
 // Parity corpus: modulo by zero.
-// v1 + v2 fail loud E-RUNTIME. The JIT emits a raw srem trap and the
-// process dies by signal instead of reporting (allowlisted JIT crash).
+// v1 + v2 fail loud E-RUNTIME. The JIT reports the same E-RUNTIME
+// (checked remainder; Wave1 S5 — all three backends agree, no allowlist).
 
 fn main() -> i32 {
     return 1 % 0
