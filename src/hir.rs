@@ -88,6 +88,29 @@ fn fixup_no_location_spans(diags: &mut Vec<Diagnostic>) {
             // until callers pass a real path; gate tests use temp files.)
             continue;
         }
+        let file = d.primary_span.file.clone();
+        // Real byte span already present (e.g. `return`/`let` statement
+        // spans from the parser): keep it, fill line/column only. This
+        // preserves LSP dirty-buffer positions (statement offsets are
+        // identical between buffer and disk for the keyword) instead of
+        // overwriting with a token search.
+        if (d.primary_span.start, d.primary_span.end) != (0, 0) {
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                // Clamp defensive: parser offsets come from the buffer,
+                // which may differ from disk after edits; only fill when
+                // the offset is in range.
+                if d.primary_span.start <= text.len() {
+                    let (line, column) =
+                        crate::diagnostics::line_col_for(&text, d.primary_span.start);
+                    d.primary_span.line = line;
+                    d.primary_span.column = column;
+                }
+            }
+            if !d.related.is_empty() {
+                fixup_no_location_spans(&mut d.related);
+            }
+            continue;
+        }
         let token = backticked(&d.message)
             .or_else(|| {
                 d.message
@@ -99,7 +122,6 @@ fn fixup_no_location_spans(diags: &mut Vec<Diagnostic>) {
         if token.is_empty() {
             continue;
         }
-        let file = d.primary_span.file.clone();
         if let Some((s, e, line, column)) = span_for_token(&file, &token) {
             d.primary_span.start = s;
             d.primary_span.end = e;
@@ -276,10 +298,30 @@ fn type_mismatch(file: &str, what: &str, want: &str, got: &Ty) -> Diagnostic {
         &["convert the value first", "check the operand types"],
         "types/mismatch",
     );
+    // Return errors (e.g. "`main` return") live on the `return` line, not
+    // the definition line: prefer the `return` keyword span so LSP and
+    // repair attribution land on the offending statement.
+    if what.trim_end().ends_with("return") {
+        if span_for_token(file, "return").is_some() {
+            return with_token_span(d, file, "return");
+        }
+    }
     // The offending token is the backticked name inside `what`
     // (e.g. "`add` arg 0", "`-` operands") or its first word
     // (e.g. "if condition", "while condition" for D2 strict).
+    // For call-argument errors, prefer the call site (`name(`) over the
+    // definition.
     if let Some(tok) = backticked(what) {
+        if what.contains("arg") {
+            if let Some((s, _e, line, column)) = span_for_token(file, &format!("{tok}(")) {
+                let mut d = d;
+                d.primary_span.start = s;
+                d.primary_span.end = s + tok.len();
+                d.primary_span.line = line;
+                d.primary_span.column = column;
+                return d;
+            }
+        }
         return with_token_span(d, file, &tok);
     }
     if let Some(first) = what.split_whitespace().next() {

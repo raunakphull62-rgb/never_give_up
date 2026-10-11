@@ -265,7 +265,8 @@ fn boundary_span(file: &str, ctx: &str) -> Option<(usize, usize, usize, usize)> 
     }
     let text = std::fs::read_to_string(file).ok()?;
     // `ctx` carries a backticked token (e.g. "`foo` arg 0",
-    // "field `x` of struct `P`"): prefer its first token.
+    // "field `x` of struct `P`"): prefer its first token. For call-argument
+    // boundaries, prefer the call site (`name(`) over the definition.
     let tok = {
         let mut tok: Option<String> = None;
         let mut rest = ctx;
@@ -286,6 +287,12 @@ fn boundary_span(file: &str, ctx: &str) -> Option<(usize, usize, usize, usize)> 
     })?;
     if tok.is_empty() {
         return None;
+    }
+    if ctx.contains("arg") {
+        if let Some(s) = text.find(&format!("{tok}(")) {
+            let (line, column) = crate::diagnostics::line_col_for(&text, s);
+            return Some((s, s + tok.len(), line, column));
+        }
     }
     let s = text.find(&tok)?;
     let e = s + tok.len();
