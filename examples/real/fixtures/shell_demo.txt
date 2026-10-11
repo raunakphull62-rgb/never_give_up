@@ -1,0 +1,7 @@
+echo hello shell
+false
+echo "quoted arg test"
+FOO_SHELL_DEMO=hello123
+env FOO_SHELL_DEMO
+no_such_cmd_xyz_12345
+exit

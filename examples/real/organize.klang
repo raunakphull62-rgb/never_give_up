@@ -1,0 +1,156 @@
+// examples/real/organize.klang — group files by extension (S7 dogfood).
+//
+// Takes a directory and moves files into subfolders named by extension,
+// with a dry-run flag. Prints a summary.
+//
+// Usage:
+//   klang run examples/real/organize.klang -- /tmp/mydir
+//   klang run examples/real/organize.klang -- /tmp/mydir --dry-run
+//
+// Notes (see docs/FINDINGS.md):
+// - Paths must be inside the temp dir or relative: absolute paths outside
+//   the temp dir fail with E-RUNTIME (capability guard).
+// - No recursive walk: only top-level files move; subdirs are skipped.
+fn is_dry_flag(s: str) -> i32 {
+    if (s == "--dry-run") {
+        return 1
+    }
+    if (s == "--dry") {
+        return 1
+    }
+    if (s == "-n") {
+        return 1
+    }
+    if (s == "dry-run") {
+        return 1
+    }
+    return 0
+}
+
+fn strip_trailing_slash(s: str) -> str {
+    let out = s
+    while (len(out) > 1) {
+        if out.ends_with("/") {
+            let n = len(out.chars())
+            out = slice(out, 0, (n - 1))
+        } else {
+            break
+        }
+    }
+    return out
+}
+
+fn join_path(a: str, b: str) -> str {
+    if (a == "") {
+        return b
+    }
+    if a.ends_with("/") {
+        return (a + b)
+    }
+    return ((a + "/") + b)
+}
+
+fn ext_of(name: str) -> str {
+    if !name.contains(".") {
+        return "noext"
+    }
+    let parts = name.split(".")
+    if (len(parts) == 2) {
+        if (parts[0] == "") {
+            return "noext"
+        }
+    }
+    let last = parts[(len(parts) - 1)]
+    if (last == "") {
+        return "noext"
+    }
+    return last.lower()
+}
+
+fn main() -> i32 {
+    let a = args()
+    let dir = ""
+    let dry = 0
+    for arg in a {
+        if (is_dry_flag(arg) == 1) {
+            dry = 1
+        } else if (dir == "") {
+            dir = arg
+        } else {
+            print("usage: organize <dir> [--dry-run]")
+            return 1
+        }
+    }
+    if (dir == "") {
+        print("usage: organize <dir> [--dry-run]")
+        return 1
+    }
+    dir = strip_trailing_slash(dir)
+    try {
+        if is_dir(dir) {
+        } else {
+            print(("not a directory: " + dir))
+            return 1
+        }
+    } catch e {
+        print(("not a directory: " + dir))
+        return 1
+    }
+    let entries = []
+    try {
+        entries = list_dir(dir)
+    } catch e {
+        print(("cannot list: " + dir))
+        print(e["code"])
+        return 1
+    }
+    let counts = {}
+    let total = 0
+    for name in entries {
+        let src = join_path(dir, name)
+        if is_file(src) {
+        } else {
+            continue
+        }
+        let ext = ext_of(name)
+        let dst_dir = join_path(dir, ext)
+        let dst = join_path(dst_dir, name)
+        if (dry == 1) {
+            print(((("would move " + src) + " -> ") + dst))
+            total = (total + 1)
+            if counts.contains(ext) {
+                counts[ext] = (counts[ext] + 1)
+            } else {
+                counts[ext] = 1
+            }
+            continue
+        }
+        let ok = 1
+        try {
+            make_dirs(dst_dir)
+            rename_file(src, dst)
+        } catch e {
+            print(((("failed: " + src) + ": ") + e["code"]))
+            ok = 0
+        }
+        if (ok == 0) {
+            continue
+        }
+        print(((("moved " + src) + " -> ") + dst))
+        total = (total + 1)
+        if counts.contains(ext) {
+            counts[ext] = (counts[ext] + 1)
+        } else {
+            counts[ext] = 1
+        }
+    }
+    if (dry == 1) {
+        print((("would move " + str(total)) + " files"))
+    } else {
+        print((("moved " + str(total)) + " files"))
+    }
+    for k in counts {
+        print(((k + ": ") + str(counts[k])))
+    }
+    return 0
+}
