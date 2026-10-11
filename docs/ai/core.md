@@ -1056,7 +1056,7 @@ fn main() -> i32 {
 1
 ```
 
-Realistic: argv-array spawn, no shell; plain `run` allows relative `..`, sandbox denies with `E-SANDBOX-*`.
+Realistic: argv-array spawn, no shell; plain `run` allows all paths, sandbox denies with `E-SANDBOX-*`.
 
 ```klang run
 fn main() -> i32 {
