@@ -401,12 +401,28 @@ fn d1_stdlib_covers_every_builtin() {
         missing.is_empty(),
         "stdlib.md missing builtins: {missing:?}"
     );
-    // Methods must be documented too.
+    // Methods must be documented too (all 23: 14 str + 6 array + 3 map).
     for m in [
         "pad_start", "pad_end", "repeat", "lines", "upper", "lower", "trim", "chars",
-        "split", "contains", "starts_with", "ends_with", "join", "keys",
+        "split", "contains", "starts_with", "ends_with", "join", "keys", "len",
+        "replace", "push", "pop", "insert",
     ] {
         assert!(stdlib.contains(m), "stdlib.md missing method {m}");
+    }
+    // S9 + B1 must be present with verified examples (table alone is not
+    // enough: the gate also requires example usage strings).
+    for b in [
+        "print_raw", "is_eof", "chdir", "sort_by", "regex_find_all", "regex_replace",
+        "uuid_v4", "path_absolute", "file_mtime", "sprintf", "random_seed",
+        "random_seeded_int", "random_seeded_float",
+    ] {
+        assert!(stdlib.contains(b), "stdlib.md missing S9/B1 builtin {b}");
+    }
+    for ex in ["print(print_raw", "sort_by(words", "pad_end", "random_seeded_float"] {
+        assert!(
+            stdlib.contains(ex),
+            "stdlib.md missing verified example for {ex}"
+        );
     }
     let _ = HashMap::<String, String>::new();
 }

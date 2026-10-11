@@ -5,11 +5,15 @@
 
 Example-first. Every snippet was executed with the real compiler.
 Run `klang check <file>` (human lines plus JSON diagnostics) or
-`klang check --json <file>` (one `{"diagnostics":[...]}` object, X1) and
-`klang run <file>` (only program output on stdout, diagnostics on stderr).
-There is no `--sandbox` flag: plain `klang run` relaxes relative `..`
-paths automatically; library callers stay strict.
-`klang fmt --check <file>` reports canonical form. No MCP server exists.
+`klang check --json <file>` (one `{"diagnostics":[...]}` object) and
+`klang run [--sandbox] <file>` (only program output on stdout, diagnostics on stderr).
+`klang run --sandbox` limits files to the temp dir (`E-SANDBOX-FILE`) and denies
+spawn/run (`E-SANDBOX-SPAWN`) and network (`E-SANDBOX-NETWORK`); plain `klang run`
+allows relative `..` and spawn/network, but absolute paths outside the temp dir
+stay rejected (`E-RUNTIME`). `klang fmt --check <file>` / `--write` reports/rewrites
+canonical form. `klang mcp` was removed (`E-CLI-REMOVED`); use the CLI above.
+Loop: write file, run `klang check --json`, fix first diagnostic by its `code`
+(see errors.md), re-check until clean, then `klang run`. Keep `fmt --check` clean.
 
 ## Toolchain
 
@@ -43,7 +47,7 @@ fn main() -> i32 {
 42
 ```
 
-Rules: `klang check <file>` prints `check: OK` or `check: FAIL` plus JSON lines; `klang check --json <file>` prints one `{"diagnostics":[...]}` object; `klang run <file>` prints program output only, exit code is return value.
+Rules: `klang check <file>` prints `check: OK` or `check: FAIL` plus JSON lines; `klang check --json <file>` prints one single-line `{"diagnostics":[...]}` object (same `Diagnostic::to_json()` objects: `code`, `message`, `primary_span{file,start,end,line,column}`, `cause`, `fixes`, `rule`, `related`); clean is `{"diagnostics":[]}` exit 0, any diagnostic is exit 1; follows imports (diagnostic names the defining file), respects `--strict`/manifest, flag order flexible (`check --json f` == `check f --json`). Loop: write file, `check --json`, fix first diagnostic by `code` (see errors.md), re-check, then `klang run <file>` (program output only, exit code is return value). `klang run --sandbox` limits files to temp dir and denies spawn/network (see file section); `klang fmt [--write|--check] <file|dir>` prints/rewrites/checks canonical form (4-space indent, one statement per line, fully parenthesized ops, one trailing newline; `--check` exits 1 with `fmt: would change <path>` unless `fmt: clean`).
 
 ## Variables and assignment
 
@@ -1055,7 +1059,7 @@ fn main() -> i32 {
 1
 ```
 
-Realistic: argv-array spawn, no shell; file guard blocks absolute escapes.
+Realistic: argv-array spawn, no shell; plain `run` allows relative `..`, sandbox denies with `E-SANDBOX-*`.
 
 ```klang run
 fn main() -> i32 {
@@ -1073,7 +1077,7 @@ fn main() -> i32 {
 hi
 ```
 
-Rules: `read_file`/`write_file`/`append_file`/`exists`/`remove_file` guard paths (`E-RUNTIME` on escape, `E-IO-NOT-FOUND` when missing); `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
+Rules: file guard is strict for `klang run --sandbox` and library calls (absolute only under temp dir, relative with no `..`; sandbox denials are `E-SANDBOX-FILE`, library strict is `E-RUNTIME`); plain `klang run` additionally allows relative `..` resolved against CWD (so `chdir` + relative reads work) while absolute outside temp stays rejected (`E-RUNTIME`). Temp-dir files work in both modes. `run --sandbox` also denies `spawn`/`run`/`run_process` (`E-SANDBOX-SPAWN`) and `http_*` (`E-SANDBOX-NETWORK`); `task_group`/`spawn f()` (structured concurrency) still runs under sandbox. Missing file is `E-IO-NOT-FOUND`. `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
 
 ## Stdin, args, exit codes, formatting, comments
 
@@ -1141,6 +1145,9 @@ first. All others fail loudly with the recorded code + message.
 | S15 | `return 256` expecting exit 256 | wraps 8-bit to 0 (`-1` to 255) | keep codes 0..125 |
 | S16 | `format("a", 1)` expecting Python format | joins with spaces (`"a 1"`) | use `sprintf("{}..", [...])` for templates |
 | S17 | `run("ls -l", [])` expecting shell | argv-only, no shell/glob/pipe | pass `("ls", ["-l"])`, no metachars |
+| S18 | `len(s)` as char count for `slice`/`s[i]` | `len("é")` is `2` bytes but `slice("é", 0, 1)` is 1 char; `slice(s, 0, len(s))` OOB for non-ASCII | use `len(s.chars())` for char counts |
+| S19 | `==` on arrays/structs/maps expecting JS reference or Python order-insensitive | value equality; maps order-sensitive (`{"x":1,"y":2}=={"y":2,"x":1}` is `0`, Python `True`) | compare explicitly, do not rely on order |
+| S20 | `if ""`/`if []` expecting Python falsy | literal empty is loud `E-TYPE`; same value via `unknown` (`m["k"]`) runs silent falsy | use `== ""` / `len() == 0` explicitly |
 
 Details with verified runs follow; then the loud (caught) pitfalls.
 
@@ -1607,6 +1614,118 @@ fn main() -> i32 {
 0
 hi
 
+```
+
+### S18 `len()` is bytes, `s[i]`/`slice()` are chars
+
+Wrong (silent `2` vs 1 char; `slice(s, 0, len(s))` is OOB for non-ASCII):
+
+```klang silent
+fn main() -> i32 {
+    print(len("é"))
+    print(slice("é", 0, 1))
+    return 0
+}
+```
+
+Correct (char counts via `chars()`):
+
+```klang run
+fn main() -> i32 {
+    print(len("héllo"))
+    print(len("héllo".chars()))
+    print(slice("héllo", 1, 3))
+    print("héllo"[1])
+    return 0
+}
+```
+
+```output
+6
+5
+él
+é
+```
+
+### S19 `==` on arrays/structs/maps is value equality, maps order-sensitive
+
+Wrong (silent `1`/`0`; JS would be reference-false, Python map order-insensitive true):
+
+```klang silent
+fn main() -> i32 {
+    print([1, 2] == [1, 2])
+    print([1, 2] == [1, 3])
+    return 0
+}
+```
+
+Correct (same-struct value equality; map order matters):
+
+```klang run
+struct P {
+    x: i32
+}
+
+fn main() -> i32 {
+    let a = P {
+        x: 1
+    }
+    let b = P {
+        x: 1
+    }
+    print(a == b)
+    let m1 = {"x": 1, "y": 2}
+    let m2 = {"y": 2, "x": 1}
+    print(m1 == m2)
+    return 0
+}
+```
+
+```output
+1
+0
+```
+
+### S20 truthiness: literal empty is loud, dynamic empty is silent falsy
+
+Wrong (silent `0`/`1` via `unknown`; `if ""` literally is `E-TYPE`):
+
+```klang silent
+fn main() -> i32 {
+    let m = {"s": "", "a": [1]}
+    let s = m["s"]
+    if s {
+        print(1)
+    } else {
+        print(0)
+    }
+    let v = m["a"]
+    if v {
+        print(1)
+    } else {
+        print(0)
+    }
+    return 0
+}
+```
+
+Correct (explicit comparisons):
+
+```klang run
+fn main() -> i32 {
+    if len("") == 0 {
+        print(1)
+    }
+    print(!0)
+    print(!5)
+    return 0
+}
+```
+
+```output
+1
+1
+0
 ```
 
 ## Loud pitfalls (caught with a diagnostic)
@@ -3138,6 +3257,7 @@ fn main() -> i32 {
     print("  hi  ".trim())
     print("aaa".replace("a", "b"))
     print("hi".pad_start(5, "0"))
+    print("hi".pad_end(5, "0"))
     print("hi".repeat(2))
     print("a\nb".lines())
     return 0
@@ -3149,6 +3269,7 @@ HI
 hi
 bbb
 000hi
+hi000
 hihi
 [a, b]
 ```
@@ -3190,6 +3311,8 @@ fn main() -> i32 {
     print(len(uuid_v4()) == 36)
     random_seed(7)
     print(random_seeded_int(1, 10) >= 1)
+    print(random_seeded_float() >= 0.0)
+    print(random_seeded_float() < 1.0)
     print(ord("A"))
     print(chr(65))
     return 0
@@ -3203,11 +3326,13 @@ fn main() -> i32 {
 bonono
 1
 1
+1
+1
 65
 A
 ```
 
-Misc (args, cwd, chdir, format, sprintf, assert, sort_by, dirs):
+Misc (args, cwd, chdir, format, sprintf, assert, print_raw, sort_by, dirs):
 
 ```klang run
 fn main() -> i32 {
@@ -3232,6 +3357,27 @@ hi!
 1
 1
 1
+```
+
+S9 print_raw (no newline, returns 1) and sort_by (stable copy by key, input unchanged):
+
+```klang run
+fn main() -> i32 {
+    print(print_raw("hi"))
+    let words = ["pear", "fig", "apple"]
+    let bylen = fn(s: str) -> i32 {
+    return len(s)
+}
+    print(sort_by(words, bylen))
+    print(words)
+    return 0
+}
+```
+
+```output
+hi1
+[fig, pear, apple]
+[pear, fig, apple]
 ```
 
 ```klang run
@@ -3541,6 +3687,21 @@ fn main() -> i32 {
 | `E-ENV-INVALID` | `set_env` name with `=`/NUL | plain NAME |
 | `E-TASK-GROUP` | several spawns failed (each under `related`) | fix children |
 | `E-TYPE` | run-time type mismatch (dynamic `unknown` misused) | check types |
+| `E-SANDBOX-FILE` | file outside temp dir (or `..`) under `klang run --sandbox` only | run without `--sandbox` or use temp-dir paths |
+| `E-SANDBOX-SPAWN` | `spawn`/`run`/`run_process` under `--sandbox` only | run without `--sandbox` |
+| `E-SANDBOX-NETWORK` | `http_get`/`http_post` (sync/async) under `--sandbox` only | run without `--sandbox` |
+
+Sandbox codes only trigger under `klang run --sandbox` (plain `run` uses
+`E-RUNTIME`/`E-PROCESS-*`/`E-NET-*` for the same operations). Examples (shell,
+not gated — the gate runs plain `run` only):
+
+```sh
+klang run --sandbox prog.klang
+# read_file("../x") or read_file("/etc/hostname") -> E-SANDBOX-FILE
+# spawn("echo", ["hi"]) -> E-SANDBOX-SPAWN
+# http_get("http://127.0.0.1:1/") -> E-SANDBOX-NETWORK
+# temp-dir absolute paths and task_group/spawn f() still run
+```
 
 ```klang error E-RUNTIME
 fn main() -> i32 {
@@ -3655,4 +3816,5 @@ fn main() -> i32 {
 - `E-PARSE-V2`, `E-PARSE-ECHO`, `E-PARSE-FLOW`, `E-SCHEMA-INVALID`, `E-SCHEMA-NOT-FOUND`, `E-ECHO-FAILURE-LOST`, `E-ECHO-INVALID-LISTEN`, `E-ECHO-OUTLIVES-SCOPE`, `E-ECHO-UNLISTENED`, `E-FLOW-DUPLICATE-DEPENDENCY`, `E-FLOW-MUTABLE-CAPTURE`, `E-RESONANCE-MISMATCH`, `E-RESONANCE-UNPROVEN`: v2-track only (`.v2` files, `check --lang v2`); v1 `klang check` never emits them.
 - `E-NET-INVALID-HEADER`, `E-NET-UNREACHABLE`, `E-IO-PERMISSION`, `E-IO-FAILED`, `E-PROCESS-FAILED`, `E-REGEX-TOO-MANY`, `E-REGEX-TOO-LARGE`, `E-STR-TOO-LARGE`: same family as above; trigger with oversized inputs, bad headers, or OS faults (no network needed for the invalid cases shown).
 - `W-TYPE-NARROW`: retired since D3 (empty); `W-DUPLICATE-DEPENDENCY`, `W-MUTABLE-CAPTURE`: flow lints (v2).
+- `E-CLI-REMOVED`: `klang mcp` was removed (exit 2); use `klang check --json`, `klang run --sandbox`, or `klang fmt` instead. No MCP server exists.
 - `JIT-FAIL`: not a diagnostic code; CLI prints `run: JIT-FAIL` on stderr when `--backend-jit` rejects out-of-subset code (floats, strings, closures, builtins, `try`, etc.).
