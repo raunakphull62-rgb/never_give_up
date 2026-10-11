@@ -1,0 +1,13 @@
+fn main() -> i32 {
+    print("hi".upper())
+    print("HI".lower())
+    print("  hi  ".trim())
+    print("hi".len())
+    print(len("é"))
+    print("héllo"[1])
+    print("a,b,c".split(","))
+    print("aaa".replace("a", "b"))
+    print("hi".pad_start(5, "0"))
+    print("hi".repeat(3))
+    return 0
+}

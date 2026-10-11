@@ -1,0 +1,15 @@
+fn risky(s: str) -> i32 throws {
+    return parse_int(s)
+}
+
+fn main() -> i32 {
+    let n = 0
+    try {
+        n = parse_int("abc")
+    } catch e {
+        print(e["code"])
+        n = 99
+    }
+    print(n)
+    return 0
+}

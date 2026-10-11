@@ -1,0 +1,11 @@
+// UUID and paths: uuid_v4 is 36 chars; path_absolute joins CWD.
+// cwd() is non-empty; len checks keep output deterministic.
+fn main() -> i32 {
+    let id = uuid_v4()
+    print(len(id))
+    print((len(id) == 36))
+    print((len(cwd()) > 0))
+    print((path_absolute("a/b") != ""))
+    print((id != ""))
+    return 0
+}

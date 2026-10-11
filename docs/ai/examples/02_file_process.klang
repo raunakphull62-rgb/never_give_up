@@ -1,0 +1,12 @@
+fn main() -> i32 {
+    let path = "02_out.txt"
+    write_file(path, "a\nb\nc\n")
+    let text = read_file(path)
+    print(text)
+    append_file(path, "d\n")
+    print(read_file(path))
+    print(exists(path))
+    remove_file(path)
+    print(exists(path))
+    return 0
+}

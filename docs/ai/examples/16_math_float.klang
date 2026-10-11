@@ -1,0 +1,11 @@
+fn main() -> i32 {
+    print(sqrt(9.0))
+    print(pow(2.0, 3.0))
+    print(abs((0 - 5)))
+    print(abs((0.0 - 2.5)))
+    print(min(3, 7))
+    print(max(3, 7))
+    print(floor(2.7))
+    print(ceil(2.2))
+    return 0
+}

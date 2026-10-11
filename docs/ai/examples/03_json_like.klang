@@ -1,0 +1,16 @@
+fn total(users: array) -> i32 {
+    let sum = 0
+    for u in users {
+        sum = (sum + u["age"])
+    }
+    return sum
+}
+
+fn main() -> i32 {
+    let users = [{"name": "amy", "age": 30}, {"name": "bo", "age": 12}]
+    print(len(users))
+    print(total(users))
+    print(users[0]["name"])
+    print(keys(users[0]))
+    return 0
+}

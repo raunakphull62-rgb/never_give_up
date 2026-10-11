@@ -1,0 +1,12 @@
+fn main() -> i32 {
+    let a = [1, 2]
+    print(push(a, 3))
+    print(a)
+    print(pop(a))
+    print(a)
+    print(insert(a, 0, 9))
+    print(a)
+    print(slice(a, 0, 2))
+    print(range(0, 3))
+    return 0
+}

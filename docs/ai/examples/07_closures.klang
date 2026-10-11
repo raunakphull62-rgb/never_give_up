@@ -1,0 +1,14 @@
+fn apply(f: fn(i32)->i32, x: i32) -> i32 {
+    return f(x)
+}
+
+fn main() -> i32 {
+    let n = 20
+    let addn = fn(x: i32) -> i32 {
+    return (x + n)
+}
+    print(apply(addn, 22))
+    n = 999
+    print(addn(2))
+    return 0
+}

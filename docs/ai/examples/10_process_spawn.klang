@@ -1,0 +1,11 @@
+// Process spawning: argv arrays, no shell.
+// Missing binaries are E-PROCESS-NOT-FOUND.
+fn main() -> i32 {
+    let r = spawn("echo", ["hi"])
+    print(r["status"])
+    print(r["stdout"])
+    let code = run("true", [])
+    print(code)
+    print((r["status"] == 0))
+    return 0
+}

@@ -1,0 +1,10 @@
+fn main() -> i32 {
+    print(regex_is_match("a+", "aaa"))
+    print(regex_is_match("z+", "aaa"))
+    let f = regex_find("([a-z]+)@([a-z]+)", "bo@x")
+    print(f["matched"])
+    print(f["match"])
+    print(regex_find_all("a", "banana"))
+    print(regex_replace("a", "banana", "o"))
+    return 0
+}

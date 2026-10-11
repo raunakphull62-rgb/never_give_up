@@ -1,0 +1,12 @@
+// CLI args: args() excludes the program name.
+// With no extra args the count is 0.
+fn main() -> i32 {
+    let argv = args()
+    print(len(argv))
+    print(format("count:", len(argv)))
+    for a in argv {
+        print(a)
+    }
+    print((len(argv) == 0))
+    return 0
+}

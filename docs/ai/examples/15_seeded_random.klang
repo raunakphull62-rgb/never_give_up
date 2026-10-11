@@ -1,0 +1,10 @@
+fn main() -> i32 {
+    random_seed(42)
+    let a = random_seeded_int(1, 100)
+    random_seed(42)
+    let b = random_seeded_int(1, 100)
+    print((a == b))
+    print(((a >= 1) && (a <= 100)))
+    print((random_seeded_float() >= 0.0))
+    return 0
+}

@@ -1,0 +1,11 @@
+// String building: + concats, format joins with spaces.
+// sprintf takes (fmt, args_array); join is an array method.
+fn main() -> i32 {
+    let name = "klang"
+    print(("hello " + name))
+    print(format("age:", 42, "pi:", 3.5))
+    print(sprintf("{} + {} = {}", [1, 2, 3]))
+    print(["a", "b", "c"].join(", "))
+    print(len(("hello " + name)))
+    return 0
+}
