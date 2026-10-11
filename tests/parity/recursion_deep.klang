@@ -1,6 +1,6 @@
 // Parity corpus: deep recursion trips the 1024-frame depth cap.
-// v1 + v2 fail loud E-RUNTIME. The JIT has no depth guard and returns
-// 2000 (exit 208) instead — allowlisted JIT divergence.
+// v1 + v2 fail loud E-RUNTIME. The JIT enforces the same 1024-frame
+// guard and reports the same E-RUNTIME (Wave1 S5 — agree, no allowlist).
 
 fn countdown(n: i32) -> i32 {
     if n <= 0 {

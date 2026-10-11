@@ -1,7 +1,7 @@
 // Parity corpus: MIN / -1 overflow.
 // Spelled via a variable (no negative literal) so v2 parses it too:
-// v1 + v2 fail loud E-OVERFLOW in `div`. The JIT computes wrapping i64
-// with exit 0 and no error — a silent wrong answer (allowlisted).
+// v1 + v2 fail loud E-OVERFLOW in `div`. The JIT reports the same
+// E-OVERFLOW (checked div; Wave1 S5 — all three agree, no allowlist).
 
 fn mymin() -> i64 {
     return 0 - 9223372036854775807 - 1

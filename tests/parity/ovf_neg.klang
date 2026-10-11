@@ -1,7 +1,6 @@
 // Parity corpus: negation overflow (0 - MIN).
-// v1 + v2 fail loud E-OVERFLOW. The JIT computes wrapping i64 (result
-// MIN, exit code low byte 0) with no error — a silent wrong answer
-// (allowlisted).
+// v1 + v2 fail loud E-OVERFLOW. The JIT reports the same E-OVERFLOW
+// (checked neg; Wave1 S5 — all three backends agree, no allowlist).
 
 fn mymin() -> i64 {
     return 0 - 9223372036854775807 - 1

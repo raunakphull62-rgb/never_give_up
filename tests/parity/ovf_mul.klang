@@ -1,6 +1,6 @@
 // Parity corpus: i64 mul overflow (MAX * 2 wraps to -2).
-// v1 + v2 fail loud E-OVERFLOW. The JIT computes wrapping i64 and prints
-// -2 with exit 0 — a silent wrong answer (allowlisted).
+// v1 + v2 fail loud E-OVERFLOW. The JIT reports the same E-OVERFLOW
+// (checked mul; Wave1 S5 — all three backends agree, no allowlist).
 
 fn main() -> i32 {
     print(9223372036854775807 * 2)
