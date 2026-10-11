@@ -401,12 +401,37 @@ fn stub_call(func: &str) -> Option<i64> {
     }
 }
 
+/// One ordered stdout fragment: `print(x)` is a newline-terminated line,
+/// `print_raw(x)` is raw text with no trailing newline (S9). The
+/// interpreter buffers both in order; the CLI flushes lines with
+/// `println!` and raw fragments with `print!` + an explicit flush so a
+/// prompt is visible before a blocking `read_line`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputChunk {
+    /// Rendered text (no trailing newline in either case).
+    pub text: String,
+    /// True for `print_raw` (no newline), false for `print` (newline).
+    pub raw: bool,
+}
+
+impl OutputChunk {
+    /// A `print` line (newline added by the CLI).
+    pub fn line(text: String) -> Self {
+        Self { text, raw: false }
+    }
+
+    /// A `print_raw` fragment (no newline, flushed immediately by the CLI).
+    pub fn raw(text: String) -> Self {
+        Self { text, raw: true }
+    }
+}
+
 /// Shared execution context (cloned into spawned threads).
 #[derive(Debug, Clone)]
 struct ExecCtx {
     module: Arc<MirModule>,
     stubs: HashMap<String, i64>,
-    output: Arc<Mutex<Vec<String>>>,
+    output: Arc<Mutex<Vec<OutputChunk>>>,
     /// Program arguments after the `.klang` file (CLI `run` supplies
     /// them; tests and MCP pass none). Read by the `args()` builtin.
     argv: Vec<String>,
@@ -464,6 +489,10 @@ pub fn run_with_output_value_partial(
 /// binds entry params); `argv` is a separate channel read only by
 /// `args()`, so `main()` with no params plus CLI args is not an
 /// arity error.
+///
+/// The `Vec<String>` is the ordered chunk texts (`print` lines and
+/// `print_raw` fragments alike); use [`run_with_argv_chunks`] when the
+/// raw-vs-line distinction matters (the CLI does).
 pub fn run_with_argv(
     module: &MirModule,
     entry: &str,
@@ -471,6 +500,21 @@ pub fn run_with_argv(
     argv: &[String],
     stubs: &HashMap<String, i32>,
 ) -> (Result<Value, Diagnostic>, Vec<String>) {
+    let (r, chunks) = run_with_argv_chunks(module, entry, args, argv, stubs);
+    (r, chunks.into_iter().map(|c| c.text).collect())
+}
+
+/// Same as [`run_with_argv`] but preserves the raw-vs-line flag per
+/// chunk (S9 `print_raw`). Existing callers keep the `Vec<String>`
+/// view; the CLI and S9 gates use this to emit raw fragments without
+/// a trailing newline (and flush).
+pub fn run_with_argv_chunks(
+    module: &MirModule,
+    entry: &str,
+    args: &[Value],
+    argv: &[String],
+    stubs: &HashMap<String, i32>,
+) -> (Result<Value, Diagnostic>, Vec<OutputChunk>) {
     // Entry arity must match exactly (calling-convention safety), mirroring
     // the JIT backend. The CLI always passes zero args, so missing params
     // are an arity error, not silent zeros. No program output can exist
@@ -508,6 +552,18 @@ pub fn run_with_argv(
     let r = exec_function(&ctx, entry, args, 0, &CancelToken::default());
     let out = ctx.output.lock().unwrap().clone();
     (r, out)
+}
+
+/// Ordered chunks (raw-aware) for callers that already use
+/// [`run_with_output_value_partial`]; the `Vec<String>` form stays for
+/// every existing gate.
+pub fn run_with_output_value_partial_chunks(
+    module: &MirModule,
+    entry: &str,
+    args: &[Value],
+    stubs: &HashMap<String, i32>,
+) -> (Result<Value, Diagnostic>, Vec<OutputChunk>) {
+    run_with_argv_chunks(module, entry, args, &[], stubs)
 }
 
 /// Run with explicit args + captured `print` output, preserving the
@@ -861,6 +917,42 @@ fn run_instrs(
                 }
             }
             MirOp::Call { into, func, args } => {
+                // S9 `print_raw(x)`: ordered raw fragment (no newline) plus
+                // an immediate flush at the CLI. Buffered like `print` so
+                // prompts and child output stay ordered (cf. FINDINGS B2);
+                // returns 1 like `assert`.
+                if func == "print_raw" {
+                    if args.len() != 1 {
+                        return Err(runtime_err("print_raw() takes 1 argument"));
+                    }
+                    let v = lookup(&values, &ctx.stubs, &args[0]).unwrap_or(Value::Int(0));
+                    ctx.output
+                        .lock()
+                        .unwrap()
+                        .push(OutputChunk::raw(v.render()));
+                    let out = Value::Int(1);
+                    values.insert(into.clone(), out.clone());
+                    last = out;
+                    pc += 1;
+                    continue;
+                }
+                // S9 `sort_by(array, key_fn)`: stable ascending by key.
+                // Needs the interpreter (closure calls), so it lives here
+                // rather than in `exec_builtin` (which sees only values).
+                if func == "sort_by" {
+                    let v = exec_sort_by(
+                        ctx,
+                        args,
+                        &values,
+                        &ctx.stubs,
+                        depth,
+                        &current(&groups, parent),
+                    )?;
+                    values.insert(into.clone(), v.clone());
+                    last = v;
+                    pc += 1;
+                    continue;
+                }
                 // Builtins run inline so `push` can mutate the caller's array.
                 if is_builtin(func) {
                     let v = exec_builtin(func, args, &mut values, &ctx.stubs, &ctx.argv)?;
@@ -1253,7 +1345,7 @@ fn run_instrs(
             }
             MirOp::Print { value } => {
                 let v = lookup(&values, &ctx.stubs, value).unwrap_or(Value::Int(0));
-                ctx.output.lock().unwrap().push(v.render());
+                ctx.output.lock().unwrap().push(OutputChunk::line(v.render()));
                 last = v;
                 pc += 1;
             }
@@ -1459,6 +1551,10 @@ fn is_builtin(name: &str) -> bool {
             | "http_get_async"
             | "http_post_async"
             | "read_line"
+            | "is_eof"
+            | "print_raw"
+            | "chdir"
+            | "sort_by"
             | "parse_int"
             | "parse_float"
             | "format"
@@ -1634,6 +1730,19 @@ fn exec_builtin(
                 return Err(runtime_err("read_line() takes 0 arguments"));
             }
             Ok(Value::Str(crate::stdlib::io::read_line()))
+        }
+        "is_eof" => {
+            if !args.is_empty() {
+                return Err(runtime_err("is_eof() takes 0 arguments"));
+            }
+            Ok(Value::Int(i64::from(crate::stdlib::io::is_eof())))
+        }
+        "chdir" => {
+            if args.len() != 1 {
+                return Err(runtime_err("chdir() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            crate::stdlib::process::chdir(&path).map(|()| Value::Int(1))
         }
         "parse_int" => {
             if args.len() != 1 {
@@ -2360,11 +2469,126 @@ fn exec_builtin(
     }
 }
 
+/// S9 `sort_by(array, key_fn)`: stable ascending sort by key.
+///
+/// `array` must be an array; `key_fn` must be a one-argument closure
+/// value (a variable holding `fn(x) -> ...` or a literal). Each element
+/// is mapped through the closure; the resulting keys must be all `Int`
+/// or all `Str`, otherwise a clear `E-TYPE`. Empty input returns empty.
+/// The original array is never mutated (a sorted copy is returned, like
+/// `sort`). Sorting is stable (Rust `sort_by`, so equal keys keep input
+/// order).
+fn exec_sort_by(
+    ctx: &ExecCtx,
+    args: &[String],
+    values: &HashMap<String, Value>,
+    stubs: &HashMap<String, i64>,
+    depth: usize,
+    token: &CancelToken,
+) -> Result<Value, Diagnostic> {
+    if args.len() != 2 {
+        return Err(runtime_err("sort_by() takes 2 arguments"));
+    }
+    let arr = match lookup(values, stubs, &args[0]).unwrap_or(Value::Int(0)) {
+        Value::Array(items) => items,
+        other => return Err(type_err("sort_by", "an array", &other)),
+    };
+    let (target, captures) = match lookup(values, stubs, &args[1]).unwrap_or(Value::Int(0)) {
+        Value::Closure { func, captures } => (func, captures),
+        other => {
+            return Err(Diagnostic::error(
+                "E-TYPE",
+                &format!(
+                    "`sort_by()` key function: want a one-argument function, got {}",
+                    value_type_name(&other)
+                ),
+                "runtime",
+                0,
+                0,
+                "sort_by needs a one-argument key function (a closure value)",
+                &["pass fn(x) -> ... with one parameter"],
+                "calls/sort_by",
+            ));
+        }
+    };
+    // Map every element through the key closure (captures + element).
+    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+    for elem in &arr {
+        let mut call_args: Vec<Value> =
+            captures.iter().map(|(_, v)| v.clone()).collect();
+        call_args.push(elem.clone());
+        let key = call_value(ctx, &target, &call_args, depth, token)?;
+        keyed.push((elem.clone(), key));
+    }
+    if keyed.is_empty() {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let all_int = keyed.iter().all(|(_, k)| matches!(k, Value::Int(_)));
+    let all_str = keyed.iter().all(|(_, k)| matches!(k, Value::Str(_)));
+    if !all_int && !all_str {
+        return Err(Diagnostic::error(
+            "E-TYPE",
+            "sort_by() keys must be all ints or all strs (mixed or other key types have no total order)",
+            "runtime",
+            0,
+            0,
+            "key function must return consistently-typed keys",
+            &["return int keys or str keys, not a mix"],
+            "calls/sort_by",
+        ));
+    }
+    // Stable: equal keys keep input order.
+    if all_int {
+        keyed.sort_by(|a, b| match (&a.1, &b.1) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        });
+    } else {
+        keyed.sort_by(|a, b| match (&a.1, &b.1) {
+            (Value::Str(x), Value::Str(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        });
+    }
+    Ok(Value::Array(keyed.into_iter().map(|(v, _)| v).collect()))
+}
+
+/// S9 file-guard mode: false (default) keeps the strict sandbox guard
+/// for MCP/agent execution (`klang_run` tool) and every library caller;
+/// true relaxes plain `klang run` to allow normal relative paths
+/// (including `..`, resolved against the current directory by the OS,
+/// so `chdir` + relative reads work). Absolute paths outside the temp
+/// dir stay rejected in both modes (the minimal relaxation in S9 item
+/// 6); see docs/reference.md.
+static FILE_GUARD_RELAXED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Enable (`true`) or disable (`false`) the S9 relaxed file guard for
+/// plain `klang run`. The CLI sets this before executing; MCP
+/// `tool_run` and library tests leave the strict default.
+pub fn set_file_guard_relaxed(relaxed: bool) {
+    FILE_GUARD_RELAXED.store(relaxed, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// True when plain-`klang run` relaxation is active (relative paths,
+/// including `..`, allowed). Library/MCP callers see false.
+pub fn is_file_guard_relaxed() -> bool {
+    FILE_GUARD_RELAXED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Capability guard for file builtins: untrusted `.klang` files must not
 /// escape via `../../…` or absolute paths. Trusted scripts (tests, stdlib)
 /// use temp-dir or relative paths and are unaffected. `env` is left
 /// unrestricted (reads process env, returns empty when unset).
+///
+/// S9: the strict form stays for MCP/agent execution and library calls;
+/// plain `klang run` (see [`set_file_guard_relaxed`]) additionally
+/// allows relative paths containing `..` (resolved against the current
+/// directory, which `chdir` may have changed). Absolute paths outside
+/// the temp dir stay `E-RUNTIME` in both modes.
 fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
+    if path.is_empty() {
+        return Err(runtime_err("empty path"));
+    }
     let p = std::path::Path::new(path);
     // Absolute paths are allowed only inside the system temp dir (tests use
     // `std::env::temp_dir()`); everything else must be relative without
@@ -2377,6 +2601,11 @@ fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
         }
         return Ok(());
     }
+    // S9 relaxed mode (plain `klang run` only): relative paths — even
+    // with `..` — resolve against the process working directory.
+    if is_file_guard_relaxed() {
+        return Ok(());
+    }
     for comp in p.components() {
         if matches!(
             comp,
@@ -2384,9 +2613,6 @@ fn reject_unsafe_path(path: &str) -> Result<(), Diagnostic> {
         ) {
             return Err(runtime_err(&format!("unsafe path `{path}`")));
         }
-    }
-    if path.is_empty() {
-        return Err(runtime_err("empty path"));
     }
     Ok(())
 }

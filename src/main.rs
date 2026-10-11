@@ -578,6 +578,26 @@ fn collect_klang_files(dir: &std::path::Path, out: &mut Vec<String>, depth: usiz
 }
 
 /// File CLI with `import` support: check / fmt / run / build.
+fn emit_program_output(out: &[klang::runtime::OutputChunk], verbose: bool) {
+    use std::io::Write;
+    for c in out {
+        if verbose {
+            if c.raw {
+                println!("print_raw: {}", c.text);
+            } else {
+                println!("print: {}", c.text);
+            }
+        } else if c.raw {
+            // S9 `print_raw`: no trailing newline, flushed immediately so
+            // a prompt is visible before a blocking `read_line`.
+            print!("{}", c.text);
+            let _ = std::io::stdout().flush();
+        } else {
+            println!("{}", c.text);
+        }
+    }
+}
+
 fn run_file_mode(args: &[String]) {
     use std::collections::HashMap;
     // Split leading subcommand from file args. Backcompat: a bare `<file>`
@@ -957,15 +977,13 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    match klang::runtime::run_with_argv(&mir, &run_entry, &[], &prog_argv, &HashMap::new()) {
+    // S9 item 6: plain `klang run` allows normal relative paths
+    // (including `..`, resolved against the current directory).
+    // MCP `tool_run` and library callers keep the strict sandbox guard.
+    klang::runtime::set_file_guard_relaxed(true);
+    match klang::runtime::run_with_argv_chunks(&mir, &run_entry, &[], &prog_argv, &HashMap::new()) {
         (Ok(v), out) => {
-            for line in &out {
-                if verbose {
-                    println!("print: {line}");
-                } else {
-                    println!("{line}");
-                }
-            }
+            emit_program_output(&out, verbose);
             // D3: return boundaries are enforced inside the runtime
             // (`exec_function` checks the declared annotation, and
             // arithmetic overflow is `E-OVERFLOW`); a wide `Int` return
@@ -983,13 +1001,7 @@ fn run_file_mode(args: &[String]) {
             // Program lines go to stdout (`print:`-prefixed in verbose,
             // raw by default); the diagnostic goes to stderr so
             // `2>/dev/null` shows only program output.
-            for line in &out {
-                if verbose {
-                    println!("print: {line}");
-                } else {
-                    println!("{line}");
-                }
-            }
+            emit_program_output(&out, verbose);
             // Whole-program `exit(code)`: the low 8 bits, like normal
             // returns (256 -> 0, -1 -> 255). Uncatchable in the program,
             // so reaching here with E-EXIT is always a real request.

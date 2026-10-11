@@ -115,6 +115,17 @@ pub fn cwd() -> Result<String, Diagnostic> {
         .map_err(|e| crate::stdlib::file::map_io_error("cwd", ".", &e))
 }
 
+/// Change the process working directory (S9 `chdir(path)`). Later
+/// `spawn`/`run` children inherit the new directory and relative file
+/// paths resolve against it. Missing targets are `E-IO-NOT-FOUND`,
+/// permission failures `E-IO-PERMISSION`, other OS refusals
+/// `E-IO-FAILED` — via the shared [`crate::stdlib::file::map_io_error`]
+/// helper, never a bare `E-RUNTIME`. Returns `()` on success (the
+/// interpreter renders `1`).
+pub fn chdir(path: &str) -> Result<(), Diagnostic> {
+    std::env::set_current_dir(path).map_err(|e| crate::stdlib::file::map_io_error("chdir", path, &e))
+}
+
 /// Set the environment variable `name` to `value` for this process
 /// (and its future children). Names containing `=` or NUL are
 /// `E-ENV-INVALID` (`std::env::set_var` would panic on them); empty

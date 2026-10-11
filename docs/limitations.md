@@ -85,8 +85,24 @@ it now agrees with the interpreter exactly: division/modulo by zero
 (`E-RUNTIME`), and the `i32`/`u32`/`u64`/`u8` argument/return/
 assignment boundaries (`E-RUNTIME`, rule `types/range`). Out-of-subset
 code — floats, strings, lists, maps, structs, enums, closures,
-builtins (including all six S6 builtins), `Spawn`/`Await`, `try`/`catch`,
+builtins (including all six S6 builtins plus the four S9 builtins
+`print_raw`/`is_eof`/`chdir`/`sort_by`), `Spawn`/`Await`, `try`/`catch`,
 and entry arity above 4 — is refused loudly at compile time.
+
+## S9 output and file-guard notes
+
+- `print(x)` ends with a newline; `print_raw(x)` writes the same
+  rendering with no trailing newline and flushes (both buffered in
+  order, so prompts and captured child output stay ordered — the
+  `run()` inherit-vs-`print` tradeoff in FINDINGS B2 still applies to
+  `run` only).
+- `slice(x, a, b)` with an `unknown` static type returns `Unknown`
+  (array at runtime stays array, strings stay strings), so
+  `spawn(cmd, slice(toks, 1, len(toks)))` checks clean (FINDINGS B1).
+- File guard is strict for MCP/agent execution and library calls
+  (absolute only under the temp dir, relative with no `..`); plain
+  `klang run` additionally allows relative `..` resolved against the
+  current directory. Absolute outside temp stays `E-RUNTIME` in both.
 
 ## `run` exit codes wrap at 8 bits (Linux)
 
