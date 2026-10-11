@@ -409,15 +409,111 @@ fn diagnostic_from_json(v: &Json) -> Result<Diagnostic, String> {
 // Tools: pure functions over source strings (transport lives in main).
 // ---------------------------------------------------------------------
 
+/// D2 strict via manifest (mirrors `klang check`): `strict = true` under
+/// `[project]` in the entry file's `klang.toml`. Missing/unreadable file
+/// or absent key means default mode.
+fn project_strict(entry_path: &str) -> bool {
+    let start = std::path::Path::new(entry_path);
+    let Some(root) = crate::registry::find_project_root(start) else {
+        return false;
+    };
+    let text = match std::fs::read_to_string(root.join("klang.toml")) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_string();
+            continue;
+        }
+        if section != "project" {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() != "strict" {
+                continue;
+            }
+            let mut val = v.trim();
+            if let Some(hash) = val.find('#') {
+                val = val[..hash].trim();
+            }
+            let val = val.trim_matches('"').trim_matches('\'').trim();
+            if val.eq_ignore_ascii_case("true") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Parse + check, returning the diagnostics (empty = clean).
 pub fn check_source(source: &str) -> Vec<Diagnostic> {
-    let mut p = Parser::new(source);
-    match p.parse_program() {
-        Err(d) => vec![d],
-        Ok(prog) => match TypedHIR::check(prog) {
-            Ok(_) => vec![],
-            Err(ds) => ds,
-        },
+    check_source_with_file(source, None)
+}
+
+/// Parse + check with optional entry-file context for imports (S2).
+///
+/// - `None`: single-file check exactly as before (no imports followed).
+/// - `Some(path)`: the `source` buffer is checked as the entry file at
+///   `path` (loader with entry-source override, so local/alias/package
+///   imports resolve from disk via `klang.toml`/`klang.lock`/vendor dirs).
+///   Diagnostics carry the correct file for each (entry vs imported);
+///   an unresolvable import becomes one diagnostic pointing at the
+///   import string literal in the importing file. Never runs program code.
+pub fn check_source_with_file(source: &str, file: Option<&str>) -> Vec<Diagnostic> {
+    let Some(path) = file else {
+        let mut p = Parser::new(source);
+        return match p.parse_program() {
+            Err(d) => vec![d],
+            Ok(prog) => match TypedHIR::check(prog) {
+                Ok(_) => vec![],
+                Err(ds) => ds,
+            },
+        };
+    };
+    // Entry-source override: buffer text for the entry, disk for imports.
+    // When the entry has no imports, this still attributes correctly.
+    match crate::imports::load_program_with_entry_source(path, source) {
+        Ok(loaded) => {
+            // Strict mode follows the entry's project manifest when present
+            // (same `[project] strict = true` rule as `klang check`).
+            let strict = project_strict(path);
+            match TypedHIR::check_with_file_strict(loaded.program, path, strict) {
+                Ok(_) => vec![],
+                Err(ds) => ds,
+            }
+        }
+        Err(e) => {
+            if e.code == "E-PARSE" {
+                // Inner diagnostic JSON already carries the real file/span
+                // (imported file's parse error): rehydrate it.
+                if let Ok(v) = parse_json(&e.message) {
+                    if let Ok(d) = diagnostic_from_json(&v) {
+                        return vec![d];
+                    }
+                }
+            }
+            // Import/load failure as one diagnostic with the real import
+            // span (file/start/end/line/column from the loader).
+            let mut d = Diagnostic::error(
+                e.code,
+                &e.message,
+                &e.file,
+                e.start,
+                e.end,
+                "multi-file import failed",
+                &[],
+                "modules/import",
+            );
+            d.primary_span.line = e.line;
+            d.primary_span.column = e.column;
+            vec![d]
+        }
     }
 }
 
@@ -433,9 +529,15 @@ fn diags_json(diags: &[Diagnostic]) -> Json {
 
 /// `klang_check`: source in, diagnostics out (empty array = clean).
 pub fn tool_check(source: &str) -> Json {
+    tool_check_with_file(source, None)
+}
+
+/// `klang_check` with optional entry-file context (S2: follows imports).
+/// `file` is the entry file's display path; `None` means single-file.
+pub fn tool_check_with_file(source: &str, file: Option<&str>) -> Json {
     Json::Obj(vec![(
         "diagnostics".to_string(),
-        diags_json(&check_source(source)),
+        diags_json(&check_source_with_file(source, file)),
     )])
 }
 
@@ -745,8 +847,14 @@ fn tool_list() -> Json {
         Json::Arr(vec![
             tool(
                 "klang_check",
-                "Type-check Klang source. Returns the compiler diagnostics as JSON (empty array means clean).",
-                vec![("source".to_string(), str_prop("Klang source text to check"))],
+                "Type-check Klang source. Returns the compiler diagnostics as JSON (empty array means clean). Follows imports when `file` names the entry file (local/alias/package imports via klang.toml/klang.lock); without `file` checks the single buffer only. Never runs program code.",
+                vec![
+                    ("source".to_string(), str_prop("Klang source text to check")),
+                    (
+                        "file".to_string(),
+                        str_prop("Entry file path for import resolution (optional; when present, imports resolve from disk)"),
+                    ),
+                ],
                 &["source"],
             ),
             tool(
@@ -802,7 +910,11 @@ fn call_tool(name: &str, args: &Json) -> Result<(bool, Json), String> {
             .ok_or("missing required string argument: source".to_string())
     };
     match name {
-        "klang_check" => Ok((false, tool_check(&source(obj)?))),
+        "klang_check" => {
+            let src = source(obj)?;
+            let file = obj.get("file").and_then(Json::as_str);
+            Ok((false, tool_check_with_file(&src, file)))
+        }
         "klang_v2_check" => Ok((false, tool_v2_check(&source(obj)?))),
         "klang_run" => {
             let entry = obj
