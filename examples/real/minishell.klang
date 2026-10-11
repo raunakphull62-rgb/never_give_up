@@ -1,4 +1,4 @@
-// examples/real/minishell.klang — small interactive shell (S7 dogfood).
+// examples/real/minishell.klang — small interactive shell (S7 dogfood, S9 gaps closed).
 //
 // Reads lines from stdin, runs commands with spawn(), supports cd, exit,
 // env, and NAME=value. Prints the exit status of failed commands.
@@ -7,10 +7,11 @@
 //   printf 'echo hi\nfalse\nexit\n' | klang run examples/real/minishell.klang
 //   klang run examples/real/minishell.klang (interactive, Ctrl-D to quit)
 //
-// Notes (see docs/FINDINGS.md):
-// - No chdir builtin: cd only updates a logical directory printed by pwd.
-// - read_line() cannot tell empty line from EOF: "" quits the shell.
-// - print() always adds a newline: the prompt lives on its own line.
+// Notes (see docs/FINDINGS.md, S9):
+// - S9 chdir: cd really changes the process directory (children + relative paths follow).
+// - S9 is_eof: empty lines continue, EOF quits.
+// - S9 print_raw: the prompt has no trailing newline.
+// - S9 slice: spawn args use slice(toks, 1, len(toks)).
 fn is_digit_char(c: str) -> i32 {
     if (c >= "0") {
         if (c <= "9") {
@@ -179,11 +180,11 @@ fn normalize_path(p: str) -> str {
 fn main() -> i32 {
     let cur = cwd()
     while true {
-        print(("$ " + cur))
-        let line = read_line()
-        if (line == "") {
+        print_raw(("$ " + cur))
+        if is_eof() {
             return 0
         }
+        let line = read_line()
         let t = line.trim()
         if (t == "") {
             continue
@@ -207,12 +208,9 @@ fn main() -> i32 {
                 } else {
                     let norm = normalize_path(home)
                     try {
-                        if is_dir(norm) {
-                            cur = norm
-                            print(cur)
-                        } else {
-                            print(("cd: no such directory: " + home))
-                        }
+                        chdir(norm)
+                        cur = cwd()
+                        print(cur)
                     } catch e {
                         print(("cd: no such directory: " + home))
                     }
@@ -234,12 +232,9 @@ fn main() -> i32 {
             }
             let norm = normalize_path(raw)
             try {
-                if is_dir(norm) {
-                    cur = norm
-                    print(cur)
-                } else {
-                    print(("cd: no such directory: " + dest))
-                }
+                chdir(norm)
+                cur = cwd()
+                print(cur)
             } catch e {
                 print(("cd: no such directory: " + dest))
             }
@@ -299,12 +294,7 @@ fn main() -> i32 {
             }
             continue
         }
-        let cargs = []
-        let k = 1
-        while (k < len(toks)) {
-            push(cargs, toks[k])
-            k = (k + 1)
-        }
+        let cargs = slice(toks, 1, len(toks))
         try {
             let r = spawn(cmd, cargs)
             let so = r["stdout"]
