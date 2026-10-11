@@ -21,10 +21,12 @@ Key rules:
 - `fn main()` (no arrow) always exits 0; `-> i32` return wraps 8-bit.
 
 SILENT traps (run but differ from Python — avoid):
-`1+"a"`→`"1a"`; `len("é")`→`2`; `7/2`→`3`; `-7%3`→`-1`;
+`1+"a"`→`"1a"`; `len("é")`→`2` (bytes); `7/2`→`3`; `-7%3`→`-1`;
 `1&&2`→`1`; `true` prints `1`; `sort` copies; `push` returns length;
 `m[0]`→first key; `args()` no prog name; `read_line()==""` at EOF and empty
-line; env missing→`""`; struct args pass-by-value; exit codes wrap 8-bit.
+line; env missing→`""`; struct args pass-by-value; exit codes wrap 8-bit;
+`format` joins with spaces; `spawn` no shell; `len` bytes vs `slice` chars;
+`==` value (maps order-sensitive); literal empty `if` is `E-TYPE`, dynamic empty falsy.
 
 6 idioms:
 1. `let n = parse_int(s)` in `try`/`catch e { n = 0 }`.
@@ -36,6 +38,8 @@ line; env missing→`""`; struct args pass-by-value; exit codes wrap 8-bit.
 
 Workflow: write file, run `klang check --json <file>` (one
 `{"diagnostics":[...]}` object), fix first diagnostic by its `code` (see
-`docs/ai/errors.md`), then `klang run <file>` (stdout only).
-Keep `klang fmt --check` clean. Never use `--sandbox` (no such flag;
-`run` relaxes `..` automatically). No MCP server exists.
+`docs/ai/errors.md`), re-check until clean, then `klang run [--sandbox] <file>`
+(stdout only). Use `--sandbox` to limit files to temp dir (`E-SANDBOX-FILE`)
+and deny spawn/network (`E-SANDBOX-SPAWN`/`E-SANDBOX-NETWORK`); plain `run`
+allows relative `..` and spawn/network. Keep `klang fmt --check` clean.
+`klang mcp` was removed; use the CLI above.

@@ -249,6 +249,21 @@ fn main() -> i32 {
 | `E-ENV-INVALID` | `set_env` name with `=`/NUL | plain NAME |
 | `E-TASK-GROUP` | several spawns failed (each under `related`) | fix children |
 | `E-TYPE` | run-time type mismatch (dynamic `unknown` misused) | check types |
+| `E-SANDBOX-FILE` | file outside temp dir (or `..`) under `klang run --sandbox` only | run without `--sandbox` or use temp-dir paths |
+| `E-SANDBOX-SPAWN` | `spawn`/`run`/`run_process` under `--sandbox` only | run without `--sandbox` |
+| `E-SANDBOX-NETWORK` | `http_get`/`http_post` (sync/async) under `--sandbox` only | run without `--sandbox` |
+
+Sandbox codes only trigger under `klang run --sandbox` (plain `run` uses
+`E-RUNTIME`/`E-PROCESS-*`/`E-NET-*` for the same operations). Examples (shell,
+not gated — the gate runs plain `run` only):
+
+```sh
+klang run --sandbox prog.klang
+# read_file("../x") or read_file("/etc/hostname") -> E-SANDBOX-FILE
+# spawn("echo", ["hi"]) -> E-SANDBOX-SPAWN
+# http_get("http://127.0.0.1:1/") -> E-SANDBOX-NETWORK
+# temp-dir absolute paths and task_group/spawn f() still run
+```
 
 ```klang error E-RUNTIME
 fn main() -> i32 {
@@ -363,4 +378,5 @@ fn main() -> i32 {
 - `E-PARSE-V2`, `E-PARSE-ECHO`, `E-PARSE-FLOW`, `E-SCHEMA-INVALID`, `E-SCHEMA-NOT-FOUND`, `E-ECHO-FAILURE-LOST`, `E-ECHO-INVALID-LISTEN`, `E-ECHO-OUTLIVES-SCOPE`, `E-ECHO-UNLISTENED`, `E-FLOW-DUPLICATE-DEPENDENCY`, `E-FLOW-MUTABLE-CAPTURE`, `E-RESONANCE-MISMATCH`, `E-RESONANCE-UNPROVEN`: v2-track only (`.v2` files, `check --lang v2`); v1 `klang check` never emits them.
 - `E-NET-INVALID-HEADER`, `E-NET-UNREACHABLE`, `E-IO-PERMISSION`, `E-IO-FAILED`, `E-PROCESS-FAILED`, `E-REGEX-TOO-MANY`, `E-REGEX-TOO-LARGE`, `E-STR-TOO-LARGE`: same family as above; trigger with oversized inputs, bad headers, or OS faults (no network needed for the invalid cases shown).
 - `W-TYPE-NARROW`: retired since D3 (empty); `W-DUPLICATE-DEPENDENCY`, `W-MUTABLE-CAPTURE`: flow lints (v2).
+- `E-CLI-REMOVED`: `klang mcp` was removed (exit 2); use `klang check --json`, `klang run --sandbox`, or `klang fmt` instead. No MCP server exists.
 - `JIT-FAIL`: not a diagnostic code; CLI prints `run: JIT-FAIL` on stderr when `--backend-jit` rejects out-of-subset code (floats, strings, closures, builtins, `try`, etc.).
