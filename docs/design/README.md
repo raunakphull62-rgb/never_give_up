@@ -111,3 +111,24 @@ semantics, so they go after the harness that proves they did not break
 the 26 packages; D5 changes the security posture, so it goes last when
 the machinery that audits it (corpus gates, `klang caps` listing) is
 real.
+
+## Decision log (Wave 1, S8)
+
+- **D1 (file aliases) — decided and implemented.** `import "p" as m`
+  with `m.f(...)` call sites, resolved at load time to plain calls;
+  bare-package aliases expose the whole package closure.
+- **D2 (strict mode) — decided and implemented as the opt-in slice.**
+  Default truthiness is unchanged (`Bool`/`Int`); `--strict` /
+  `[project] strict = true` rejects statically-known non-`Bool`
+  conditions. Full `Value::Bool`/`Null` remains future work.
+- **D3 (64-bit Int) — decided and implemented.** `Int` is 64-bit
+  checked; `i32`/`u32`/`u64`/`u8` enforce their ranges at value
+  boundaries; `W-TYPE-NARROW` is retired.
+- **D5 (FFI) — open.** No `extern` mechanism ships; the process
+  boundary (`run_process`/`spawn`/`run`) remains the only escape.
+- **D6 (backend parity) — option A implemented for the JIT.** The
+  fallible JIT reports the interpreter's diagnostics on its int-only
+  subset and refuses out-of-subset code loudly (`JIT-FAIL`).
+- **D7 (sockets/async/threads/signals) — open.** See
+  `D7-io-and-concurrency.md` (Wave 1 S6 sketch, no code); `spawn`/`run`
+  stay argv-only with no timeout, and `sleep_ms` stays blocking.

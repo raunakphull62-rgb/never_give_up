@@ -1,3 +1,5 @@
+> merged into shared docs in S8.
+
 # Wave1 S2 notes (not shared docs — staged text for reference.md)
 
 ## Diagnostic classes fixed (real file + byte start/end + 1-based line/column)

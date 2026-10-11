@@ -1,3 +1,5 @@
+> merged into shared docs in S8.
+
 # Wave1 S4 notes (not a shared doc — staging area)
 
 Text that belongs in shared docs (SPEC.md, docs/reference.md,

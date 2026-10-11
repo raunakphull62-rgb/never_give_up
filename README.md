@@ -75,8 +75,7 @@ A successful run prints only the program output (`42`). The entry function's int
 | `klang run --verbose\|-v <file.klang> [entry]` | Full dump (MIR listing, `print:` lines, `run entry() = value`); `--quiet\|-q` is a no-op alias. |
 | `klang run <file.klang> [entry] --backend-jit` | Execute with the optional JIT backend; its supported surface is integer-only. |
 | `klang build <file.klang>` | Check and print MIR; this command does not emit a native executable. |
-| `klang fmt <file.klang>` | Print canonical formatting. |
-| `klang fmt <file.klang> --write` | Rewrite the file with canonical formatting. **Comments are not preserved by the formatter.** |
+| `klang fmt [--write \| --check] <file\|dir> [paths...]` | Print canonical formatting; `--write` rewrites files in place, `--check` exits 1 when any file would change. Comments are preserved. |
 | `klang repair <file.klang> --dry-run` | Show the diagnostics and planned repair prompt without calling a model. |
 | `klang mcp` | Start the MCP server over standard input and output. |
 | `klang check-v2 <file.v2>` | Check a v2 program. `klang check --lang v2 <file.v2>` is an equivalent explicit form. |
@@ -120,7 +119,7 @@ fn main() -> i32 {
 }
 ```
 
-The checker enforces function argument and return types, enum exhaustiveness, generic inference at call sites, and module visibility. Arrays and maps are dynamically typed. The language also provides built-ins for common collection operations, conversions, assertions, file access, and environment-variable access. Consult the [reference][2] for exact rules and diagnostics.
+The checker enforces function argument and return types, enum exhaustiveness, generic inference at call sites, and module visibility. Arrays and maps are dynamically typed. The language also provides built-ins for common collection operations, conversions, assertions, file access, process spawning, time, and environment-variable access. Consult the [reference][2] for exact rules and diagnostics.
 
 ## Structured concurrency and effects
 
@@ -183,12 +182,12 @@ The test suite covers the parser, type checker, runtime, task groups, enums, gen
 
 Klang is actively developed, and some features are intentionally narrower than in mature general-purpose languages:
 
-- `&&` and `||` evaluate both operands; they do not short-circuit.
+- `&&` and `||` short-circuit: the right side runs only when the left side does not decide the result.
 - The interpreter is the reference backend. The optional JIT supports integer code only, and `build` stops after printing MIR.
-- `fmt` formats the parsed syntax tree and drops comments from its output.
+- `fmt` renders the canonical form with comments preserved (comment placement is heuristic).
 - There are no trait bounds or `throw` statement. Closures (`fn(params) -> type { ... }` values with by-value capture), match guards (`Pattern if cond => body`), and multi-statement match arms are supported (SPEC §2b/§2c). `cancel` is accepted as an effect annotation but is not propagation-checked.
-- Package helpers provide manifest and content-hash lockfile support, not a package registry or network dependency fetching.
-- The LSP module converts diagnostics to LSP-shaped data; the CLI does not run a language-server process.
+- Package support covers manifests, lockfiles, and registry packages (`klang publish`/`add`/`fetch` with pinned versions); there are no private packages, yanking, or version ranges.
+- `klang lsp` runs a stdio language server with diagnostics-as-you-type; hover and go-to-definition are planned v2.
 - The newer v2 language is selected explicitly and has its own syntax and commands.
 
 See [known limitations][4] for additional detail and current caveats.

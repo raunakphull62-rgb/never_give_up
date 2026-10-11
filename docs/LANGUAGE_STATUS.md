@@ -52,6 +52,57 @@ a record of what Phase 0 found.
   `scripts/verify_docs.py` (which executes every `klang` block in
   `docs/`) stays green.
 
+## Wave 1 update (S1–S6; behavior changes, see `docs/progress/`)
+
+This section amends the audit above — the per-item evidence stays valid as
+a record of what Phase 0 found. Staged detail lives in
+`docs/progress/S1-notes.md` through `docs/progress/S6-notes.md`.
+
+- Bare package imports (S1): `import "math"` resolves through
+  `klang.toml` + `klang.lock` + `.klang_pkgs/<name>/<version>/`
+  (entry `lib.klang`, then `<name>.klang`, then `main.klang`; a local
+  `D/<name>[.klang|/lib.klang]` wins with a stderr shadowing note).
+  `import "math" as m` exposes the whole package closure, and failures
+  are `E-IO-NOT-FOUND` with the fix named. `klang --version` prints the
+  real release version (`env!("CARGO_PKG_VERSION")`, stamped from the
+  release tag).
+- Item 4 extended (S1/D1): file aliases from Phase 1 still apply;
+  bare-package aliases share one copy per package (entry-hash identity).
+- Items 3/2 (S4, D3): `Int` is now 64-bit checked
+  (`tests/int_boundary_gates.rs`); bare literals to `i64`
+  (`-9223372036854775808` valid, bare `9223372036854775808` is `E-TYPE`,
+  larger magnitudes are `E-PARSE` at lex); arithmetic past ±2^63 is
+  `E-OVERFLOW`. `i32`/`u32`/`u64`/`u8` enforce their ranges at
+  argument/return/assignment boundaries (`E-RUNTIME`, rule
+  `types/range`); `u64` is effectively `0..i64::MAX` since values are
+  `i64`. `W-TYPE-NARROW` is retired (emits nothing).
+- Item 2 (S4, D2): default truthiness unchanged (`Bool`/`Int`);
+  opt-in `--strict` (`klang run`/`check`) or `strict = true` under
+  `[project]` in `klang.toml` rejects statically-known non-`Bool`
+  conditions in `if`/`while`/`&&`/`||`/`!` with `E-TYPE`
+  (`tests/strict_mode_gates.rs`).
+- Formatter and LSP (S3): `klang fmt [--write | --check] <file|dir>
+  [paths...]` renders the canonical form (4-space indent, one statement
+  per line, parenthesized operators, comments preserved) and
+  `klang lsp` serves diagnostics-as-you-type over stdio
+  (`tests/s3_gates.rs`).
+- Spans and `klang_check` (S2): check-time diagnostics carry the
+  defining file, byte `start`/`end`, and 1-based `line`/`column`
+  (`line 0, column 0` is the explicit no-location form);
+  `klang_check` with `file` follows imports and reports per-file
+  diagnostics (`tests/s2_span_gates.rs`, `tests/s2_mcp_gates.rs`).
+- Item 6 (S5, D6): the int-only JIT is now exact on its subset —
+  checked arithmetic, div/mod-by-zero and `MIN/-1` (`E-RUNTIME` /
+  `E-OVERFLOW`), the 1024-frame depth guard, and D3 narrow boundaries
+  all report the interpreter's diagnostics (`tests/jit_s5_gates.rs`,
+  `tests/jit_parity_diff_gates.rs`). Rejection (`JIT-FAIL`) remains
+  the contract for out-of-subset code; `--backend-jit` stays opt-in.
+- Process/time/env builtins (S6): `spawn`/`run` (argv-array, no shell),
+  `now_ms`/`now_iso` (wall-clock), `sleep_ms` (blocking, `E-TIME-INVALID`
+  on negative/NaN/infinite), `get_env` (`""` when unset, never an error)
+  — all interpreter-only (`tests/process_builtin_gates.rs`,
+  `tests/time_builtin_gates.rs`).
+
 ## Summary table
 
 | # | Item | Status | One-line verdict | Effort to change |

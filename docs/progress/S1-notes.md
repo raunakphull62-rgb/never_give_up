@@ -1,3 +1,5 @@
+> merged into shared docs in S8.
+
 # S1 notes (Wave1 S1) — package imports by name + version string
 
 This file holds S1 design notes. Shared docs (`docs/LANGUAGE_STATUS.md`,
