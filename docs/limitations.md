@@ -28,18 +28,17 @@ fn main() -> i32 {
 }
 ```
 
-## F7 — most diagnostics carry `0,0` spans (file threading fixed by F12 second series)
+## F7 — most diagnostics carry `0,0` spans (fixed in Wave 1 S2)
 
-`primary_span` is `0,0` for nearly every HIR diagnostic (offsets still
-unthreaded), but the `file` field now carries the real input path
-(`TypedHIR::check_with_file` / `modules::resolve_with_file`; parser
-`E-PARSE` always did). So repair-scope attribution is heuristic
-(name/use-site based) rather than span-derived. Real spans exist only for `E-PARSE`, `E-TASK-CANCEL`,
-`E-SPAWN-OUTSIDE-GROUP`, and `E-EFFECT-MISMATCH` (the caller's name
-span). Mitigations in place: full-program re-check after every splice,
-loud refusal instead of silent drops, and declaration-level escalation
-to file scope. Threading real token spans through HIR checks is the
-largest known debt in the repair path.
+Spans are real: check-time diagnostics (parse, import, type,
+strict, match, duplicate, D3 boundaries via MIR files, and MCP
+`klang_check` with `file`) carry the defining file, byte offsets, and
+1-based line/column verified against the file text. Explicit
+no-location (`line 0, column 0`) remains for: in-memory checks without a
+real path, a missing command-line file, most runtime failures where the
+position was lost in lowering, `E-CANCELLED`/`E-EXIT`, library-only
+codes, v2 paths, and registry-fetch failures. See
+`docs/progress/S2-notes.md` for the per-code list.
 
 ## F6 — `MAX_FUNCTION_SCOPE = 2` has no recorded rationale
 
@@ -76,11 +75,18 @@ demand — 32 concurrent shallow spawns measured ~5.5 MB RSS vs ~4.9 MB
 for 1 spawn (+0.6 MB for 31 extra threads); 256-task cap bounds virtual
 to 2 GiB.
 
-JIT (`--backend-jit`, integer-only) has no depth guard: recursion
-compiles to native calls. `countdown(2000)` returns 2000 under JIT
-while the interpreter reports `E-RUNTIME` — a known divergence.
-Very deep JIT recursion will abort on native overflow, not report
-`E-RUNTIME`.
+## JIT parity (D6, Wave 1 S5)
+
+`--backend-jit` is opt-in and int-only; programs outside its subset
+still fail loudly with `JIT-FAIL` (never silently). Inside the subset
+it now agrees with the interpreter exactly: division/modulo by zero
+(`E-RUNTIME`), 64-bit overflow in `+ - * / %` and unary `-`
+(`E-OVERFLOW`, never wraps), the 1024-frame call-depth guard
+(`E-RUNTIME`), and the `i32`/`u32`/`u64`/`u8` argument/return/
+assignment boundaries (`E-RUNTIME`, rule `types/range`). Out-of-subset
+code — floats, strings, lists, maps, structs, enums, closures,
+builtins (including all six S6 builtins), `Spawn`/`Await`, `try`/`catch`,
+and entry arity above 4 — is refused loudly at compile time.
 
 ## `run` exit codes wrap at 8 bits (Linux)
 
@@ -89,8 +95,10 @@ value becomes the process exit code and is never printed. A `main`
 with no integer return exits 0. A `main` with no declared return type
 (omitted `->`, Phase 3b decision) always exits 0: its last expression
 value is discarded for exit purposes, so `fn main() { print(7) }`
-prints `7` and exits 0. A declared return type (`-> T`, including an
-explicit `-> void`) keeps the value mapping. Compile/runtime failures print the
+prints `7` and exits 0. A declared return type (`-> T`) keeps the
+value mapping — including an explicit `-> void`, whose last expression
+value still maps (`Int` to the exit code, else 0); only the omitted
+form discards. Compile/runtime failures print the
 structured JSON diagnostic on stderr and exit 1. Exit codes are OS
 8-bit values and wrap without clamping: `return 256` exits 0,
 `return -1` exits 255. Pinned by `exit_code_wraps_at_256_and_negatives`
@@ -104,9 +112,10 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   syntax for modes, and `klang check` never emits this code.
 - **Contracts**: only the `non-empty` precondition is executable, via
   the library API (`E-CONTRACT`); nothing in surface syntax triggers it.
-- **JIT**: integer-only behind `--backend-jit` (never the default; see
-  below); the interpreter is the reference backend. `build` always stops
-  at the MIR listing.
+- **JIT**: integer-only behind `--backend-jit` (never the default;
+  warns on stderr every run; see above); the interpreter is the reference
+  backend. Out-of-subset programs fail loudly with `JIT-FAIL`, never
+  silently. `build` always stops at the MIR listing.
 - **v2 tree-walker (`run-v2`)**: an experimental subset vehicle for the
   separate v2 language track (schemas, `echo fn`/`listen`, `flow` with
   `dep=`, `tune`/`verify` — see `docs/roadmap.md`), explicitly selected
@@ -128,10 +137,32 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   no struct-style variants; no `throw`
   statement (`throws` is propagation-checked only); no const items;
   arrays and maps are dynamically typed (`unknown` by design).
-- **Formatter**: `fmt` renders the AST, so comments are dropped from
-  its output. Keep commented sources; treat formatted output as a
+- **Formatter**: `fmt` preserves comments (standalone comments keep
+  their anchor, trailing comments move to end of line with one space),
+  but comment placement is heuristic (segmented token alignment with a
+  file-end fallback) — hand-placed comments can shift lines while
+  staying attached to the same code. Treat formatted output as a
   canonical snapshot.
 - **Salsa DB**: single-file inputs only.
+- **Integer widths (D3, Wave 1 S4)**: `Int` is 64-bit checked
+  (`E-OVERFLOW` past ±2^63, never wraps); `i32`/`u32`/`u64`/`u8`
+  enforce their range at argument/return/assign boundaries (`E-RUNTIME`
+  naming type and value); `W-TYPE-NARROW` is retired. Still
+  unrepresentable: `u64` magnitudes past `i64::MAX` (effectively
+  `0..i64::MAX`, since values are `i64` — cannot be spelled or
+  produced); enum payloads are statically checked only (no runtime
+  boundary there); `parse_int` bounds stay 32-bit.
+- **Process/time/env (S6)**: `spawn`/`run` are argv-only (no shell, no
+  glob, no timeout, no stdin piping); `spawn` buffers all output in
+  memory (no cap — hostile gigabytes OOM like `run_process`); `run`
+  inherits stdio. `spawn` is both a task keyword and a builtin
+  (`spawn (f())` is task-group spawn, `spawn(cmd, args)` is the
+  builtin). `now_ms` exceeds `i32` (flows as Int, `E-OVERFLOW` on
+  arithmetic); `now_iso` is wall-clock UTC. `get_env`/`env` absence is
+  `""` (no null — unset is indistinguishable from empty). All six are
+  interpreter-only (JIT loud-rejects, v2 `E-UNDEFINED`). Missing
+  binaries are `E-PROCESS-NOT-FOUND` (other OS refusals are
+  `E-PROCESS-FAILED`); bad sleep durations are `E-TIME-INVALID`.
 - **Benchmarks**: live-model convergence is measured inside harnesses
   (`bench/run_live.sh` checks the harness signal per task with zero
   model calls); only the offline mock baseline is measured in-tree.

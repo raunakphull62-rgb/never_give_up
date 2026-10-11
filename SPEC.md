@@ -38,6 +38,11 @@ fn main() -> i32 {
    usable side by side. Aliases are file-local; `as` is contextual;
    an unknown item is `E-UNDEFINED`, a re-aliased or shadowed alias
    name is `E-DUPLICATE`, and selective imports cannot take an alias.
+- Bare package imports `import "name"` resolve through the project
+  (`klang.toml` + `klang.lock` + `.klang_pkgs/<name>/<version>/`,
+  entry `lib.klang` / `<name>.klang` / `main.klang`); a local file of
+  the same name wins with a stderr note, and `import "name" as m`
+  exposes the whole package closure. Failures are `E-IO-NOT-FOUND`.
 - `fn name(params) [-> type] [effects] { ... }`. Effects: `throws`,
   `async`, `cancel`. Calling a `throws` function requires `throws`
   on the caller (`E-EFFECT-MISMATCH`). The `-> type` may be omitted on
@@ -169,20 +174,25 @@ fn area(s: Shape) -> i32 {
 
 | Annotation | Type |
 |---|---|
-| `i32`, `int`, `i64`, `u32`, `u64` | Int |
+| `i32`, `int`, `i64`, `u32`, `u64`, `u8` | Int (64-bit, checked) |
 | `f64`, `float`, `f32` | Float |
 | `str`, `string` | Str |
 | `bool` | Bool |
 | `void` | Void (no value; `()` is not an accepted spelling) |
 
-`int` coerces to `float`. `i64`, `u32`, and `u64` are aliases enforced
-as the `i32` range (each use warns `W-TYPE-NARROW`, severity `warning`,
-which never fails `check`; real widths are future work); other integer
-spellings such as `u8` are unchecked (`unknown`). Everything else (map lookups, dynamic
-index, unknown names) is `unknown`, a wildcard that never emits
-`E-TYPE` — this keeps dynamic code working while still catching
-`"hi" - 1`, `1 + true`, `return "hi"` in `-> i32`, `add("hi", 1)`,
-`if "hi"`, `while "x"`, `for i in 0.."x"`, `for x in 42`.
+`int` coerces to `float`. `Int` holds the full `i64` range and
+arithmetic past it is loud `E-OVERFLOW` (never wraps). The narrower
+spellings enforce their range at value boundaries — argument passing,
+`return`, rebinding an annotated parameter, struct construction, and
+struct field assignment: `i32` (−2147483648..2147483647), `u32`
+(0..4294967295), `u64` (effectively 0..`i64::MAX`, since values are
+`i64`), `u8` (0..255). A value outside the range is `E-RUNTIME` naming the
+type and the value. `i64` and `int` accept the full range (no
+narrowing). Everything else (map lookups, dynamic index, unknown
+names) is `unknown`, a wildcard that never emits `E-TYPE` — this keeps
+dynamic code working while still catching `"hi" - 1`, `1 + true`,
+`add("hi", 1)`, `if "hi"`, `while "x"`, `for i in 0.."x"`, `for x in
+42`. (`return "hi"` in `-> i32` is still `E-TYPE` at check time.)
 
 - `+`: Int+Int=Int, Float-involved=Float, Str+anything=Str (concat).
 - `- * /`: numbers only. `%`: integers only.
@@ -243,6 +253,12 @@ Free: `len`, `push`, `pop`, `range`, `str`, `int`, `float`, `keys`,
 | `remove_file(p: str) -> i32` | checked | deletes the file, `E-IO-NOT-FOUND` if missing |
 | `env(name: str) -> str` | checked | env var or `""` |
 | `run_process(cmd: str, args: array) -> map` | checked | argv-array spawn (no shell); map has `stdout: str`, `stderr: str`, `exit_code: i32`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
+| `spawn(cmd: str, args: array) -> map` | checked | argv-array spawn (no shell); map has `status: i32`, `stdout: str`, `stderr: str`; missing binary is `E-PROCESS-NOT-FOUND` |
+| `run(cmd: str, args: array) -> i32` | checked | argv-array spawn with stdio inherited; returns the exit code only; missing binary is `E-PROCESS-NOT-FOUND` |
+| `now_ms() -> i32` | checked | millis since the Unix epoch (exceeds `i32`; flows as `Int`) |
+| `now_iso() -> str` | checked | current UTC time as RFC 3339 (`YYYY-MM-DDTHH:MM:SS.mmmZ`) |
+| `sleep_ms(ms: int) -> i32` | checked | blocking millisecond sleep, returns 1; negative/NaN/infinite is `E-TIME-INVALID` |
+| `get_env(name: str) -> str` | checked | env var or `""` when unset (never an error) |
 | `regex_is_match(pat: str, text: str) -> bool` | checked | true when the pattern matches; bad pattern is `E-REGEX-INVALID-PATTERN` |
 | `regex_find(pat: str, text: str) -> map` | checked | map has `matched: bool`, `match: str`, `groups: array` (indexed 1..n), `named: map`; no match is `matched == 0`, not an error |
 
@@ -264,7 +280,7 @@ offsets (`source.as_bytes()`, `n = bytes.len()`).
 ## 5. Toolchain
 
 ```sh
-cargo run -- --version          # print version (klang 0.4.0) and exit
+cargo run -- --version          # print version (klang 0.7.0) and exit
 cargo run -- check <file>        # parse + type-check (JSON diagnostics)
 cargo run -- fmt <file> [--write]# canonical format (idempotent)
 cargo run -- run <file> [entry]  # parse + check + run (entry default main); prints only program output, exit code is return value
@@ -366,7 +382,9 @@ calc = "registry:calc@1.0.0"         # exact registry pin (X.Y.Z only)
   vendor dir (`.klang_pkgs/<pkg>/<version>/`) when no local file
   matches — local files always win. `import "pkg/file.klang" as m`
   takes the same fallback for the aliased file, whose own relative
-  imports resolve inside the vendor dir.
+  imports resolve inside the vendor dir. `import "pkg"` (bare name)
+  resolves the pinned vendor entry (`lib.klang`, `<name>.klang`,
+  `main.klang`) unless a local file shadows it.
 - Integrity: SHA-256 over the archive, recorded at publish,
   re-verified on every download, pinned in `klang.lock`
   (`package <name> <version> <sha256>`). Drift on either side fails
@@ -433,6 +451,10 @@ bounded thread pool while the caller parks — simulated async, honestly
 labeled, network-only, callable only from `async` fns
 (`E-EFFECT-MISMATCH`); file/stdin/process/sleep stay blocking),
 no hover/go-to-definition yet (LSP v1 is diagnostics-as-you-type only),
-no debugger/profiler.
+no debugger/profiler. The `--backend-jit` backend accepts the int-only
+MIR subset and reports the same diagnostics as the interpreter on it
+(overflow, division/modulo by zero, depth guard, integer boundaries);
+anything else is a loud `JIT-FAIL` at compile time, never a silent
+wrong answer.
 See `roadmap.md` for sequencing and `AUDIT.md` for the Phase 0 evidence
 table.

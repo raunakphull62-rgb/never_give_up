@@ -13,9 +13,9 @@ a minimal program demonstrating the trigger.
 - Integer literals are decimal (`42`), floats need digits on both
   sides of the dot (`4.0`; `0..10` still lexes as a range because the
   dot must be followed by a digit to count as a float). Integer
-  literals must fit `i32` (`-2147483648` is allowed via unary minus);
-  out-of-range literals are `E-TYPE`, and literals beyond `i64`
-  are `E-PARSE`.
+  literals must fit `i64` (`-9223372036854775808` is allowed via unary
+  minus); out-of-range literals are `E-TYPE`, and literals beyond
+  `u64` magnitude are `E-PARSE`.
 - String literals use double quotes with `\n \r \t \" \\` escapes
   (plus `\uXXXX`); an unterminated string is `E-PARSE`. Non-ASCII is
   preserved; token spans are byte offsets.
@@ -27,7 +27,7 @@ a minimal program demonstrating the trigger.
 
 | Annotation | Checked as |
 |---|---|
-| `i32`, `int`, `i64`, `u32`, `u64` | 32-bit integer |
+| `i32`, `int`, `i64`, `u32`, `u64`, `u8` | 64-bit integer (`Int`, checked) |
 | `f64`, `float`, `f32` | 64-bit float |
 | `str`, `string` | string |
 | `bool` | boolean |
@@ -37,15 +37,20 @@ a minimal program demonstrating the trigger.
 | type parameter (e.g. `T` inside `fn f<T>`) | rigid type variable |
 | anything else (`array`, `map`, unknown names) | `unknown` (dynamic) |
 
-`int` coerces to `float` wherever a float is wanted. `i64`, `u32`, and
-`u64` are aliases enforced as the `i32` range (each use warns
-`W-TYPE-NARROW`; real widths are future work); other integer spellings
-such as `u8` are unchecked (`unknown`). `unknown` is the
-documented escape hatch: map lookups, dynamic indexes, unknown names,
-and generic-variable positions never emit `E-TYPE` — dynamic code
-keeps working while concrete mismatches (`"hi" - 1`, `1 + true`,
-`return "hi"` from `-> i32`) are rejected. Generic struct fields and
-generic match bindings are also `unknown` at the use site.
+`int` coerces to `float` wherever a float is wanted. Narrower integer
+spellings enforce their range at value boundaries with `E-RUNTIME`
+(`i32`: −2147483648..2147483647; `u32`: 0..4294967295; `u64`:
+non-negative (effectively `0..i64::MAX`, since values are `i64`);
+`u8`: 0..255); `i64`/`int` accept the full range. Boundaries are
+argument passing, `return` (explicit and fall-off alike), rebinding an
+annotated parameter, struct construction, and struct field assignment
+(rule `types/range`); enum payloads are statically checked only.
+`unknown` is the documented escape hatch: map lookups, dynamic
+indexes, unknown names, and generic-variable positions never emit
+`E-TYPE` — dynamic code keeps working while concrete mismatches
+(`"hi" - 1`, `1 + true`, `return "hi"` from `-> i32`) are rejected.
+Generic struct fields and generic match bindings are also `unknown` at
+the use site.
 
 ## 3. Functions and statements
 
@@ -87,6 +92,11 @@ fn main() -> i32 {
   yields its keys in insertion order (same order as `keys()`), so
   `for k in m { print(m[k]) }` prints each value. The `..` loop
   variable is `i32`, the `in` element is dynamic.
+- Strict mode (`klang run/check --strict`, or `strict = true` under
+  `[project]` in `klang.toml`) narrows conditions to `Bool` (dynamic
+  `unknown` still allowed): a statically-known non-`Bool` condition in
+  `if`/`while` or with `&&`/`||`/`!` is `E-TYPE` naming the type.
+  Default mode is unchanged (`Bool`/`Int`).
 - `try { ... } catch e { ... }` catches a runtime error from the body
   (including nested calls) and continues: `e` binds a
   `{code, message}` map mirroring the diagnostic (`e["code"]` is e.g.
@@ -172,6 +182,10 @@ Free functions and methods:
 | `assert(c)` | 1 | bool/int; failure is `E-RUNTIME` at run |
 | `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND` (paths outside the temp dir are still `E-RUNTIME` via the unsafe-path guard). It rejects `..` and absolute paths, and it does not protect against symlinks. |
 | `run_process(cmd, args)` | 2 | argv-array spawn, no shell; returns map `stdout`/`stderr`/`exit_code`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
+| `spawn(cmd, args)` | 2 | argv-array spawn, no shell; returns map `status`/`stdout`/`stderr` (`status` is Int exit code, `-1` on signal; non-zero is a normal result, missing binary is `E-PROCESS-NOT-FOUND` catchable via try/catch) |
+| `run(cmd, args)` | 2 | argv-array spawn with stdio inherited; returns Int exit code only (`-1` on signal; missing binary is `E-PROCESS-NOT-FOUND`) |
+| `now_ms()` / `now_iso()` / `sleep_ms(n)` | 0 / 0 / 1 | millis since epoch (Int, past-`i32` like `file_size`); UTC RFC 3339 Str (`YYYY-MM-DDTHH:MM:SS.mmmZ`); blocking ms sleep returning 1, negative/NaN/inf is `E-TIME-INVALID` |
+| `get_env(n)` | 1 | env var or `""` when unset (same absence convention as `env`; never an error) |
 | `regex_is_match(pat, text)` / `regex_find(pat, text)` | 2 / 2 | regex search; `find` returns map `matched`/`match`/`groups`/`named`; no match is a normal result, bad pattern is `E-REGEX-INVALID-PATTERN` |
 | `time_sleep(s)` / `time_now()` / `time_elapsed(since)` | 1 / 0 / 1 | blocking sleep (fractional seconds ok, int widens), Unix-epoch clock, same-clock elapsed; returns int/float/float; bad duration is `E-TIME-INVALID` |
 | `http_get(url)` / `http_post(url, body, headers)` | 1 / 3 | sync HTTP via ureq (10s connect / 60s backstop); returns map `status`/`body`/`headers` (lowercased names); error statuses are normal results; transport failures are `E-NET-UNREACHABLE`, bad URLs `E-NET-INVALID-URL`, bad header entries `E-NET-INVALID-HEADER` |
@@ -325,6 +339,18 @@ fn main() -> i32 {
   across the merge are an error). Only plain relative paths are
   accepted — absolute paths, `..` escapes, `~`, and NUL bytes are
   rejected without touching the filesystem.
+- Bare package imports: `import "math"` resolves through the project
+  (`klang.toml` + `klang.lock` + `.klang_pkgs/<name>/<version>/`).
+  Resolution order is local first, then vendor: a local
+  `D/<name>`, `D/<name>.klang`, or `D/<name>/lib.klang` (first
+  existing wins) beats the pinned vendor entry (`lib.klang`, then
+  `<name>.klang`, then `main.klang`; the lock's pinned version, or the
+  max locked version satisfying the manifest constraint). A local file
+  shadowing a package prints a one-line `note:` to stderr.
+  `import "math" as m` exposes the whole package closure (entry plus
+  the files under the package dir), while slash aliases stay
+  single-file. Failures are `E-IO-NOT-FOUND` naming both places
+  searched with the fix (`klang add` / `klang fetch`).
 - File aliases: `import "math/lib.klang" as m` loads the file without
   merging anything flat; its top-level functions become callable as
   `m.max(1, 2)`, resolved at load time to plain calls (arity, types,
@@ -365,12 +391,24 @@ fn main() -> i32 {
   with each failure under `related` (none dropped). The first failure
   cancels siblings (cooperative, at loop back-edges); cancellation is
   excluded from the group report.
+- `spawn` is both a task keyword and a builtin: `spawn(cmd, args)`
+  (0/1/2/3+ parenthesized args) is the process-builtin call; only
+  `spawn (f())` (a single call inside) is task-group spawn. `fn spawn`
+  does not parse (keyword); `fn run` and the other builtin names are
+  loud `W-SHADOW` (the definition could never run, so check fails).
 
 ## 10. Diagnostic catalog
 
 Check-time codes first (all verified by the sample shown), then
-run-time codes. Every HIR diagnostic below carries a `0,0` span except
-where noted — see [limitations](limitations.md).
+run-time codes. Every diagnostic carries `primary_span.file` (the
+defining file; for merged imports, the file that defines the offending
+item — not always the entry file), byte `start`/`end`, and 1-based
+`line`/`column` for the offending token (import errors point at the
+import statement's string literal in the importing file). `line 0,
+column 0` is the explicit no-location form for errors with no source
+position (missing command-line file, runtime position lost,
+library-only codes) — never a fake `0,0` masquerading as position.
+See [limitations](limitations.md) for the remaining no-location list.
 
 ```klang
 // @check-fail E-TYPE
@@ -591,6 +629,11 @@ produces them): `E-CONTRACT` (executable `non-empty` preconditions via
 the `contracts` API) and `E-OWNERSHIP-MODE` (non-`Managed` modes via
 the `ownership` API — only `Managed` ships).
 
+Span contract: `start < end`, `end <= file bytes`, `(line, column)
+== line_col(file_text, start)`, and `file_text[start..end]` contains the
+offending token (function/variable/keyword/literal). `klang_check` with
+`file` follows imports and reports each diagnostic in its own file.
+
 ## 11. What is not in the language
 
 Closures (`fn(params) [-> type] { ... }` values, by-value capture),
@@ -599,12 +642,34 @@ per binding position), and tuple enum variants ARE in the language
 (SPEC §2b/§2c). Registry packages (`klang publish`/`add`/`fetch`,
 `registry:name@version` pins) and the diagnostics-as-you-type LSP
 server (`klang lsp`; hover/go-to-definition are planned v2) ARE
-shipped. Not in the language: no trait bounds; no struct-style
+shipped. `&&`/`||` short-circuit (the right side runs only when the
+left side does not decide the result). Not in the language: no trait bounds; no struct-style
 variants; no recursive struct fields that must be inhabited without a
-dynamic producer; no `throw` statement; no short-circuit `&&`/`||`;
+dynamic producer; no `throw` statement;
 no const items; no string interpolation; no machine-code backend for
 non-integer code (interpreter is the reference; `--backend-jit` is
 integer-only); no private registry packages, yanking, or version
 ranges; no debugger/profiler.
 See [limitations](limitations.md) for the honest subset that matters
 most in practice.
+
+## 12. Formatter and language server
+
+`klang fmt [--write | --check] <file|dir> [paths...]` prints or rewrites
+the canonical form: 4-space indent, one statement per line, binary
+operators fully parenthesized, exactly one trailing newline.
+`fmt(fmt(x)) == fmt(x)`; formatted code re-parses to the same AST
+(ignoring spans) and runs identically. Comments are preserved (standalone
+comments keep their anchor at the deeper neighboring indent, trailing
+comments move to end of line with one space; placement is heuristic).
+`--check` prints `fmt: would change <path>` per file that would change
+and exits 1 when any would (`fmt: clean`, 0, otherwise). Bad syntax prints
+`parse: FAIL` plus the diagnostic JSON and leaves the file untouched.
+
+`klang lsp` is a stdio language server (`Content-Length` framing):
+diagnostics-as-you-type with the exact `klang check` pipeline and real
+line/character positions (UTF-16 units). Full-sync only (`didOpen`,
+`didChange` with full text, `didClose`); `publishDiagnostics` carries the
+check diagnostic JSON in each `data` field. `textDocument/hover` and
+`textDocument/definition` answer `MethodNotFound` (-32601, planned v2);
+unknown methods never hang or crash the server.
