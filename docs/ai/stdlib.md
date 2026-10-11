@@ -207,6 +207,7 @@ fn main() -> i32 {
     print("  hi  ".trim())
     print("aaa".replace("a", "b"))
     print("hi".pad_start(5, "0"))
+    print("hi".pad_end(5, "0"))
     print("hi".repeat(2))
     print("a\nb".lines())
     return 0
@@ -218,6 +219,7 @@ HI
 hi
 bbb
 000hi
+hi000
 hihi
 [a, b]
 ```
@@ -259,6 +261,8 @@ fn main() -> i32 {
     print(len(uuid_v4()) == 36)
     random_seed(7)
     print(random_seeded_int(1, 10) >= 1)
+    print(random_seeded_float() >= 0.0)
+    print(random_seeded_float() < 1.0)
     print(ord("A"))
     print(chr(65))
     return 0
@@ -272,11 +276,13 @@ fn main() -> i32 {
 bonono
 1
 1
+1
+1
 65
 A
 ```
 
-Misc (args, cwd, chdir, format, sprintf, assert, sort_by, dirs):
+Misc (args, cwd, chdir, format, sprintf, assert, print_raw, sort_by, dirs):
 
 ```klang run
 fn main() -> i32 {
@@ -301,6 +307,27 @@ hi!
 1
 1
 1
+```
+
+S9 print_raw (no newline, returns 1) and sort_by (stable copy by key, input unchanged):
+
+```klang run
+fn main() -> i32 {
+    print(print_raw("hi"))
+    let words = ["pear", "fig", "apple"]
+    let bylen = fn(s: str) -> i32 {
+    return len(s)
+}
+    print(sort_by(words, bylen))
+    print(words)
+    return 0
+}
+```
+
+```output
+hi1
+[fig, pear, apple]
+[pear, fig, apple]
 ```
 
 ```klang run

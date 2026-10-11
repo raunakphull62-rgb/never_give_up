@@ -2,11 +2,15 @@
 
 Example-first. Every snippet was executed with the real compiler.
 Run `klang check <file>` (human lines plus JSON diagnostics) or
-`klang check --json <file>` (one `{"diagnostics":[...]}` object, X1) and
-`klang run <file>` (only program output on stdout, diagnostics on stderr).
-There is no `--sandbox` flag: plain `klang run` relaxes relative `..`
-paths automatically; library callers stay strict.
-`klang fmt --check <file>` reports canonical form. No MCP server exists.
+`klang check --json <file>` (one `{"diagnostics":[...]}` object) and
+`klang run [--sandbox] <file>` (only program output on stdout, diagnostics on stderr).
+`klang run --sandbox` limits files to the temp dir (`E-SANDBOX-FILE`) and denies
+spawn/run (`E-SANDBOX-SPAWN`) and network (`E-SANDBOX-NETWORK`); plain `klang run`
+allows relative `..` and spawn/network, but absolute paths outside the temp dir
+stay rejected (`E-RUNTIME`). `klang fmt --check <file>` / `--write` reports/rewrites
+canonical form. `klang mcp` was removed (`E-CLI-REMOVED`); use the CLI above.
+Loop: write file, run `klang check --json`, fix first diagnostic by its `code`
+(see errors.md), re-check until clean, then `klang run`. Keep `fmt --check` clean.
 
 ## Toolchain
 
@@ -40,7 +44,7 @@ fn main() -> i32 {
 42
 ```
 
-Rules: `klang check <file>` prints `check: OK` or `check: FAIL` plus JSON lines; `klang check --json <file>` prints one `{"diagnostics":[...]}` object; `klang run <file>` prints program output only, exit code is return value.
+Rules: `klang check <file>` prints `check: OK` or `check: FAIL` plus JSON lines; `klang check --json <file>` prints one single-line `{"diagnostics":[...]}` object (same `Diagnostic::to_json()` objects: `code`, `message`, `primary_span{file,start,end,line,column}`, `cause`, `fixes`, `rule`, `related`); clean is `{"diagnostics":[]}` exit 0, any diagnostic is exit 1; follows imports (diagnostic names the defining file), respects `--strict`/manifest, flag order flexible (`check --json f` == `check f --json`). Loop: write file, `check --json`, fix first diagnostic by `code` (see errors.md), re-check, then `klang run <file>` (program output only, exit code is return value). `klang run --sandbox` limits files to temp dir and denies spawn/network (see file section); `klang fmt [--write|--check] <file|dir>` prints/rewrites/checks canonical form (4-space indent, one statement per line, fully parenthesized ops, one trailing newline; `--check` exits 1 with `fmt: would change <path>` unless `fmt: clean`).
 
 ## Variables and assignment
 
@@ -1052,7 +1056,7 @@ fn main() -> i32 {
 1
 ```
 
-Realistic: argv-array spawn, no shell; file guard blocks absolute escapes.
+Realistic: argv-array spawn, no shell; plain `run` allows relative `..`, sandbox denies with `E-SANDBOX-*`.
 
 ```klang run
 fn main() -> i32 {
@@ -1070,7 +1074,7 @@ fn main() -> i32 {
 hi
 ```
 
-Rules: `read_file`/`write_file`/`append_file`/`exists`/`remove_file` guard paths (`E-RUNTIME` on escape, `E-IO-NOT-FOUND` when missing); `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
+Rules: file guard is strict for `klang run --sandbox` and library calls (absolute only under temp dir, relative with no `..`; sandbox denials are `E-SANDBOX-FILE`, library strict is `E-RUNTIME`); plain `klang run` additionally allows relative `..` resolved against CWD (so `chdir` + relative reads work) while absolute outside temp stays rejected (`E-RUNTIME`). Temp-dir files work in both modes. `run --sandbox` also denies `spawn`/`run`/`run_process` (`E-SANDBOX-SPAWN`) and `http_*` (`E-SANDBOX-NETWORK`); `task_group`/`spawn f()` (structured concurrency) still runs under sandbox. Missing file is `E-IO-NOT-FOUND`. `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
 
 ## Stdin, args, exit codes, formatting, comments
 
