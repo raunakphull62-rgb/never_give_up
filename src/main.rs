@@ -71,14 +71,18 @@ fn main() {
 
 fn real_main() {
     // CLI: `cargo run -- <cmd> <file.klang> [entry]`
-    //   check <file>        parse + type-check, print diagnostics JSON
+    //   check [--json] <file> parse + type-check; human lines by default,
+    //     one `{"diagnostics":[...]}` object with `--json` (X1: CLI
+    //     equivalent of the removed `klang_check` tool, same imports/strict)
     //   fmt <file> [--write] print canonical source (or rewrite in place)
-    //   run <file> [entry]  parse + check + lower + run (default entry `main`)
+    //   run [--sandbox] <file> [entry]  parse + check + lower + run (default
+    //     entry `main`); `--sandbox` limits files to the temp dir and denies
+    //     spawn/run/network with E-SANDBOX-* (X1: replaces MCP execution)
     //   build <file>        parse + check + print MIR listing
     //   repair <file> [--max-iters N] [--scope function|file] [--dry-run]
     //     repair-mechanism inspector: --dry-run prints the planned prompt.
     //     Live model-calling was removed in Phase 4; harnesses drive the
-    //     loop via `klang mcp` (klang_check, klang_scope_plan).
+    //     loop via `klang check --json` + `klang repair --dry-run`.
     // Backcompat: `cargo run -- <file.klang> [entry]` == `run`.
     // No args = full gate demo below.
     let args: Vec<String> = std::env::args().collect();
@@ -678,15 +682,32 @@ fn run_file_mode(args: &[String]) {
     } else {
         rest
     };
+    // X1: `check --json` prints machine JSON `{"diagnostics":[...]}` (the
+    // same `Diagnostic::to_json()` objects the human output prints, wrapped
+    // as one object). Follows imports, respects `--strict`/manifest, and
+    // accepts the file anywhere (`check --json f.klang` == `check f.klang
+    // --json`). Only `check`/`check-v2` accept it; other commands leave it
+    // alone.
+    let (json_flag, rest_json_owned): (bool, Vec<String>) =
+        if cmd == "check" || cmd == "check-v2" {
+            strip_json_flag(rest)
+        } else {
+            (false, rest.to_vec())
+        };
+    let rest: &[String] = if cmd == "check" || cmd == "check-v2" {
+        &rest_json_owned
+    } else {
+        rest
+    };
     // Explicit v2 mode: `check --lang v2 <file>` or `check-v2 <file>`.
     // v1 files never silently use v2 semantics: the mode is always chosen
     // by the caller, never inferred.
     if cmd == "check-v2" {
         if rest.is_empty() {
-            eprintln!("usage: check-v2 <file.v2>");
+            eprintln!("usage: check-v2 [--json] <file.v2>");
             std::process::exit(2);
         }
-        run_v2_check_mode(&rest[0]);
+        run_v2_check_mode(&rest[0], json_flag);
         return;
     }
     if cmd == "run-v2" {
@@ -744,10 +765,10 @@ fn run_file_mode(args: &[String]) {
         let (is_v2, files) = split_check_lang(rest);
         if is_v2 {
             if files.is_empty() {
-                eprintln!("usage: check --lang v2 <file.v2>");
+                eprintln!("usage: check --lang v2 [--json] <file.v2>");
                 std::process::exit(2);
             }
-            run_v2_check_mode(&files[0]);
+            run_v2_check_mode(&files[0], json_flag);
             return;
         }
         if files.len() != rest.len() {
@@ -857,9 +878,9 @@ fn run_file_mode(args: &[String]) {
         let offline = rest.iter().any(|a| a == "--offline");
         ensure_registry_deps(run_path, offline, &reg_cli_base);
     }
-    let prog = match load_with_imports(run_path, !dump) {
+    let prog = match load_with_imports(run_path, json_flag || !dump) {
         Ok(prog) => {
-            if dump {
+            if dump && !(json_flag && cmd == "check") {
                 println!(
                     "parse: OK ({} functions, {} structs, {} enums)",
                     prog.functions.len(),
@@ -873,6 +894,11 @@ fn run_file_mode(args: &[String]) {
             prog
         }
         Err(d) => {
+            if json_flag && cmd == "check" {
+                // `d` is already one `Diagnostic::to_json()` object.
+                println!("{{\"diagnostics\":[{d}]}}");
+                std::process::exit(1);
+            }
             if loud_stdout {
                 println!("parse: FAIL");
                 println!("{d}");
@@ -890,6 +916,10 @@ fn run_file_mode(args: &[String]) {
     let strict = strict_flag.unwrap_or_else(|| project_strict(run_path));
     match TypedHIR::check_with_file_strict(prog.clone(), run_path, strict) {
         Ok(_) => {
+            if json_flag && cmd == "check" {
+                println!("{{\"diagnostics\":[]}}");
+                return;
+            }
             if dump {
                 println!("check: OK (0 diagnostics)");
             }
@@ -901,6 +931,11 @@ fn run_file_mode(args: &[String]) {
             }
         }
         Err(diags) => {
+            if json_flag && cmd == "check" {
+                let items: Vec<String> = diags.iter().map(|d| d.to_json()).collect();
+                println!("{{\"diagnostics\":[{}]}}", items.join(","));
+                std::process::exit(1);
+            }
             if loud_stdout {
                 println!("check: FAIL ({} diagnostics)", diags.len());
                 for d in &diags {
@@ -1891,6 +1926,23 @@ fn strip_strict_flag(rest: &[String]) -> (Option<bool>, Vec<String>) {
     (flag, out)
 }
 
+/// X1: split `--json` out of `check` args. Returns `(json, remaining)`.
+/// `check` takes no program argv, so every exact `--json` match is a flag
+/// (before or after the file). Other `--flags` are left untouched for the
+/// existing `--lang`/usage paths.
+fn strip_json_flag(rest: &[String]) -> (bool, Vec<String>) {
+    let mut json = false;
+    let mut out = Vec::with_capacity(rest.len());
+    for a in rest {
+        if a == "--json" {
+            json = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    (json, out)
+}
+
 /// D2 strict via manifest (Wave1 S4): `strict = true` under `[project]` in
 /// the entry file's `klang.toml` (walked up via `find_project_root`, like
 /// registry resolution). Missing file, unreadable file, or absent key all
@@ -1981,7 +2033,10 @@ fn entry_omitted_return(prog: &klang::ast::Program, entry: &str) -> bool {
 /// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
 /// shared [`klang::mcp::v2_check_source`] front end and print the same
 /// `Diagnostic::to_json()` objects the MCP tool embeds.
-fn run_v2_check_mode(path: &str) {
+/// With `json` (`--json`), prints one `{"diagnostics":[...]}` object
+/// instead of the human `check: ...` lines (X1 CLI equivalent of
+/// `klang_v2_check`).
+fn run_v2_check_mode(path: &str, json: bool) {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
         std::process::exit(1);
@@ -1989,8 +2044,19 @@ fn run_v2_check_mode(path: &str) {
     // Owned for the 'static deep-stack worker.
     let file = path.to_string();
     match klang::with_deep_stack(move || klang::mcp::v2_check_source_with_file(&src, &file)) {
-        diags if diags.is_empty() => println!("check: OK (0 diagnostics)"),
+        diags if diags.is_empty() => {
+            if json {
+                println!("{{\"diagnostics\":[]}}");
+            } else {
+                println!("check: OK (0 diagnostics)");
+            }
+        }
         diags => {
+            if json {
+                let items: Vec<String> = diags.iter().map(|d| d.to_json()).collect();
+                println!("{{\"diagnostics\":[{}]}}", items.join(","));
+                std::process::exit(1);
+            }
             println!("check: FAIL ({} diagnostics)", diags.len());
             for d in &diags {
                 println!("{}", d.to_json());
