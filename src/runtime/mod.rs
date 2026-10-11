@@ -259,12 +259,55 @@ pub fn int_range_for(ty_raw: &str) -> Option<(i128, i128)> {
     }
 }
 
+fn boundary_span(file: &str, ctx: &str) -> Option<(usize, usize, usize, usize)> {
+    if file.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(file).ok()?;
+    // `ctx` carries a backticked token (e.g. "`foo` arg 0",
+    // "field `x` of struct `P`"): prefer its first token.
+    let tok = {
+        let mut tok: Option<String> = None;
+        let mut rest = ctx;
+        while let Some(a) = rest.find('`') {
+            let after = &rest[a + 1..];
+            if let Some(b) = after.find('`') {
+                tok = Some(after[..b].to_string());
+                break;
+            }
+            rest = after;
+        }
+        tok
+    };
+    let tok = tok.or_else(|| {
+        ctx.split_whitespace()
+            .next()
+            .map(|w| w.trim_matches(|c| c == '`' || c == '\'' || c == '"').to_string())
+    })?;
+    if tok.is_empty() {
+        return None;
+    }
+    let s = text.find(&tok)?;
+    let e = s + tok.len();
+    let (line, column) = crate::diagnostics::line_col_for(&text, s);
+    Some((s, e, line, column))
+}
+
 /// D3: one value-boundary check. An `Int` value outside its annotation's
 /// range is a loud `E-RUNTIME` naming the type and the value; anything
 /// else (wide annotations, non-`Int` values, non-integer annotations)
 /// passes — dynamic code keeps working and the checker owns static
 /// mismatches.
-pub fn check_int_boundary(value: &Value, ty_raw: &str, ctx: &str) -> Result<(), Diagnostic> {
+///
+/// S2: `file` is the current function's defining file (from MIR); when
+/// readable, the error points at the offending token in that file
+/// (else the explicit no-location form).
+pub fn check_int_boundary_in_file(
+    value: &Value,
+    ty_raw: &str,
+    ctx: &str,
+    file: &str,
+) -> Result<(), Diagnostic> {
     let Some((lo, hi)) = int_range_for(ty_raw) else {
         return Ok(());
     };
@@ -277,10 +320,10 @@ pub fn check_int_boundary(value: &Value, ty_raw: &str, ctx: &str) -> Result<(), 
             Some(i) => ty_raw.trim()[..i].trim(),
             None => ty_raw.trim(),
         };
-        return Err(Diagnostic::error(
+        let mut d = Diagnostic::error(
             "E-RUNTIME",
             &format!("{ctx}: value {n} out of `{base}` range {lo}..{hi}"),
-            "runtime",
+            if file.is_empty() { "runtime" } else { file },
             0,
             0,
             "integer annotations enforce their range at value boundaries",
@@ -289,9 +332,20 @@ pub fn check_int_boundary(value: &Value, ty_raw: &str, ctx: &str) -> Result<(), 
                 "use a wider annotation such as `i64`",
             ],
             "types/range",
-        ));
+        );
+        if let Some((s, e, line, column)) = boundary_span(file, ctx) {
+            d.primary_span.start = s;
+            d.primary_span.end = e;
+            d.primary_span.line = line;
+            d.primary_span.column = column;
+        }
+        return Err(d);
     }
     Ok(())
+}
+
+pub fn check_int_boundary(value: &Value, ty_raw: &str, ctx: &str) -> Result<(), Diagnostic> {
+    check_int_boundary_in_file(value, ty_raw, ctx, "")
 }
 
 /// Concurrency-specific runtime failure (task panics, task limits): the
@@ -567,6 +621,7 @@ fn exec_function(
     let params = f.params.clone();
     let param_tys = f.param_tys.clone();
     let return_ty = f.return_ty.clone();
+    let cur_file = f.file.clone();
     let mut values: HashMap<String, Value> = HashMap::new();
     for (param, val) in params.iter().zip(args.iter()) {
         values.insert(param.clone(), val.clone());
@@ -588,8 +643,9 @@ fn exec_function(
     // D3 parameter boundary: each argument must fit the callee's declared
     // annotation (`i32`/`u32`/`u64`/`u8`; wide spellings and non-`Int`
     // values pass). Runs for checked and unchecked callers alike.
+    // S2: real file span from the callee's defining file.
     for (i, (val, ty)) in args.iter().zip(param_tys.iter()).enumerate() {
-        check_int_boundary(val, ty, &format!("`{name}` arg {i}"))?;
+        check_int_boundary_in_file(val, ty, &format!("`{name}` arg {i}"), &cur_file)?;
     }
     // D3 assignment boundary: rebinding an annotated parameter name
     // (`x = ...`, lowered to `Copy`) re-checks that annotation. A `let`
@@ -618,7 +674,8 @@ fn exec_function(
     )?;
     // D3 return boundary: explicit `return` and fall-off values alike
     // must fit the declared return annotation.
-    let check_return = |v: &Value| check_int_boundary(v, &return_ty, &format!("`{name}` return"));
+    let check_return =
+        |v: &Value| check_int_boundary_in_file(v, &return_ty, &format!("`{name}` return"), &cur_file);
     match outcome {
         ExecFlow::Done(v) => {
             // Fall-off-the-end with live tasks means a group was never
@@ -662,6 +719,8 @@ fn run_instrs(
     var_ann: &HashMap<String, String>,
 ) -> Result<ExecFlow, Diagnostic> {
     validate_jumps(instrs)?;
+    // S2: current function's defining file for D3 boundary spans.
+    let cur_file: String = ctx.module.find(name).map(|f| f.file.clone()).unwrap_or_default();
     let mut pc: usize = 0;
     let mut last = Value::Int(0);
     // Innermost group token, else the inherited one: a spawned task runs
@@ -890,7 +949,7 @@ fn run_instrs(
                 let v = lookup(&values, &ctx.stubs, from).unwrap_or(Value::Int(0));
                 // D3 assignment boundary for annotated parameter names.
                 if let Some(ty) = var_ann.get(into) {
-                    check_int_boundary(&v, ty, &format!("assignment to `{into}`"))?;
+                    check_int_boundary_in_file(&v, ty, &format!("assignment to `{into}`"), &cur_file)?;
                 }
                 values.insert(into.clone(), v.clone());
                 last = v;
@@ -1120,10 +1179,11 @@ fn run_instrs(
                         .get(&sname)
                         .and_then(|fs| fs.get(field))
                     {
-                        check_int_boundary(
+                        check_int_boundary_in_file(
                             &v,
                             ty,
                             &format!("field `{field}` of struct `{sname}`"),
+                            &cur_file,
                         )?;
                     }
                 }
@@ -1147,10 +1207,11 @@ fn run_instrs(
                 for (k, v) in fields {
                     let fv = lookup(&values, &ctx.stubs, v).unwrap_or(Value::Int(0));
                     if let Some(ty) = schema.as_ref().and_then(|fs| fs.get(k)) {
-                        check_int_boundary(
+                        check_int_boundary_in_file(
                             &fv,
                             ty,
                             &format!("field `{k}` of struct `{name}`"),
+                            &cur_file,
                         )?;
                     }
                     fvals.push((k.clone(), fv));

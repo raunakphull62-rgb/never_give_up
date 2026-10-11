@@ -108,6 +108,7 @@ impl LowerContext {
             param_tys: vec![String::new(); func.params.len()],
             return_ty: "unknown".to_string(),
             instrs,
+            file: String::new(),
         }
     }
     
@@ -598,6 +599,7 @@ fn lower_echo_fn(echo_fn: &EchoDecl) -> MirFunction {
         param_tys: vec![String::new(); echo_fn.params.len()],
         return_ty: "unknown".to_string(),
         instrs,
+        file: String::new(),
     }
 }
 
@@ -620,5 +622,6 @@ fn lower_flow_decl(flow_decl: &crate::ast::flow::FlowDecl) -> MirFunction {
         param_tys: vec![String::new(); lowered.env.len()],
         return_ty: "unknown".to_string(),
         instrs,
+        file: String::new(),
     }
 }
