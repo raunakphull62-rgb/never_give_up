@@ -134,6 +134,9 @@ pub struct AliasScope {
 /// Members are visible outside only when `pub` and only via a qualified
 /// path (`name::item`); identical private names in different modules never
 /// collide because resolution qualifies them (`a::h` vs `b::h`).
+/// `file` is the display path of the defining source (S2: per-file
+/// diagnostic attribution for merged multi-file programs; empty when
+/// unknown, e.g. synthesized items).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModDecl {
     pub id: NodeId,
@@ -141,6 +144,7 @@ pub struct ModDecl {
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub functions: Vec<FunctionDecl>,
+    pub file: String,
 }
 
 /// A top-level `enum Name<T> { Variant, Other(field: Type, ...), ... }` declaration.
@@ -151,6 +155,7 @@ pub struct EnumDecl {
     pub is_pub: bool,
     pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
+    pub file: String,
 }
 
 /// One enum variant with optional positional payload fields.
@@ -168,6 +173,7 @@ pub struct StructDecl {
     pub is_pub: bool,
     pub type_params: Vec<String>,
     pub fields: Vec<Param>,
+    pub file: String,
 }
 
 impl Program {
@@ -445,6 +451,8 @@ impl MatchBinding {
 }
 
 /// A top-level `fn` declaration, optionally generic (`fn f<T>(...)`).
+/// `file` is the display path of the defining source (S2 per-file
+/// attribution; empty when unknown/synthesized).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDecl {
     pub id: NodeId,
@@ -460,6 +468,7 @@ pub struct FunctionDecl {
     pub return_ty_omitted: bool,
     pub effects: Vec<Effect>,
     pub body: Block,
+    pub file: String,
 }
 
 /// One `name: Type` parameter.

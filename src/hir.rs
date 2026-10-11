@@ -23,6 +23,95 @@ use crate::diagnostics::Diagnostic;
 
 pub const FILE: &str = "input.warden";
 
+/// Effective file for a top-level item (S2 per-file attribution): the
+/// item's own defining file when known (merged multi-file programs),
+/// else the check's fallback file.
+fn eff_file<'a>(item_file: &'a str, fallback: &'a str) -> &'a str {
+    if item_file.is_empty() {
+        fallback
+    } else {
+        item_file
+    }
+}
+
+/// First `` `token` `` inside `s`, if any.
+fn backticked(s: &str) -> Option<String> {
+    let a = s.find('`')?;
+    let b = s[a + 1..].find('`')?;
+    Some(s[a + 1..a + 1 + b].to_string())
+}
+
+/// Real span for `token` inside `file`'s current text (read from disk).
+/// Returns `None` when the file cannot be read or the token is absent
+/// (e.g. in-memory `input.warden` checks) — callers keep the explicit
+/// no-location form then.
+fn span_for_token(file: &str, token: &str) -> Option<(usize, usize, usize, usize)> {
+    if token.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(file).ok()?;
+    let s = text.find(token)?;
+    let e = s + token.len();
+    let (line, column) = crate::diagnostics::line_col_for(&text, s);
+    Some((s, e, line, column))
+}
+
+/// Attach a real span for `token` to `d` when the file text contains it;
+/// otherwise leaves the explicit no-location form untouched.
+fn with_token_span(mut d: Diagnostic, file: &str, token: &str) -> Diagnostic {
+    if let Some((s, e, line, column)) = span_for_token(file, token) {
+        d.primary_span.start = s;
+        d.primary_span.end = e;
+        d.primary_span.line = line;
+        d.primary_span.column = column;
+    }
+    d
+}
+
+/// Safety net for inline diagnostic sites: fill any remaining no-location
+/// span from the message's first `` `token` `` (or its first word) when
+/// the file's text contains it. Related diagnostics are fixed recursively.
+fn fixup_no_location_spans(diags: &mut Vec<Diagnostic>) {
+    for d in diags.iter_mut() {
+        if !d.primary_span.is_no_location() {
+            continue;
+        }
+        // Skip placeholders with no readable file (in-memory checks,
+        // runtime/import no-location): nothing to search.
+        if d.primary_span.file.is_empty()
+            || d.primary_span.file == "runtime"
+            || d.primary_span.file == "import"
+            || d.primary_span.file == FILE
+        {
+            // Still try `input.warden`? No file on disk — keep no-location.
+            // (Single-file in-memory checks intentionally stay locationless
+            // until callers pass a real path; gate tests use temp files.)
+            continue;
+        }
+        let token = backticked(&d.message)
+            .or_else(|| {
+                d.message
+                    .split_whitespace()
+                    .next()
+                    .map(|w| w.trim_matches(|c| c == '`' || c == '\'' || c == '"').to_string())
+            })
+            .unwrap_or_default();
+        if token.is_empty() {
+            continue;
+        }
+        let file = d.primary_span.file.clone();
+        if let Some((s, e, line, column)) = span_for_token(&file, &token) {
+            d.primary_span.start = s;
+            d.primary_span.end = e;
+            d.primary_span.line = line;
+            d.primary_span.column = column;
+        }
+        if !d.related.is_empty() {
+            fixup_no_location_spans(&mut d.related);
+        }
+    }
+}
+
 /// Static type of an expression value.
 ///
 /// `Unknown` is the wildcard: map lookups, dynamic indexes and generic
@@ -177,7 +266,7 @@ fn resolve_generic_ty(
 }
 
 fn type_mismatch(file: &str, what: &str, want: &str, got: &Ty) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-TYPE",
         &format!("{what}: want {want}, got {}", got.name()),
         file,
@@ -186,11 +275,25 @@ fn type_mismatch(file: &str, what: &str, want: &str, got: &Ty) -> Diagnostic {
         "operand types do not match the operator",
         &["convert the value first", "check the operand types"],
         "types/mismatch",
-    )
+    );
+    // The offending token is the backticked name inside `what`
+    // (e.g. "`add` arg 0", "`-` operands") or its first word
+    // (e.g. "if condition", "while condition" for D2 strict).
+    if let Some(tok) = backticked(what) {
+        return with_token_span(d, file, &tok);
+    }
+    if let Some(first) = what.split_whitespace().next() {
+        // Strip stray backticks; keywords like `if`/`while` still match.
+        let tok = first.trim_matches('`');
+        if !tok.is_empty() {
+            return with_token_span(d, file, tok);
+        }
+    }
+    d
 }
 
 fn method_arity(file: &str, recv: &str, method: &str, want: usize, got: usize) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-ARITY",
         &format!("{recv}.{method}() takes {want} arguments, got {got}"),
         file,
@@ -199,7 +302,8 @@ fn method_arity(file: &str, recv: &str, method: &str, want: usize, got: usize) -
         "method arity must match",
         &["pass the right number of arguments"],
         "calls/arity",
-    )
+    );
+    with_token_span(d, file, method)
 }
 
 /// Generic-instantiation conflict: a type parameter was already fixed by a
@@ -214,7 +318,7 @@ fn generic_mismatch(
     origin: &str,
     got: &Ty,
 ) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-TYPE",
         &format!(
             "{what}: {param} was inferred as {} from {origin}, got {}",
@@ -233,7 +337,11 @@ fn generic_mismatch(
             "check the generic instantiation",
         ],
         "types/mismatch",
-    )
+    );
+    if let Some(tok) = backticked(what) {
+        return with_token_span(d, file, &tok);
+    }
+    with_token_span(d, file, param)
 }
 
 /// A fully effect-checked program.
@@ -318,18 +426,19 @@ impl TypedHIR {
         // behavior is unchanged.
         for e in &program.enums {
             enum_names.push(e.name.clone());
-            check_type_params_dup(file, &e.name, &e.type_params, &mut diags);
+            check_type_params_dup(eff_file(&e.file, file), &e.name, &e.type_params, &mut diags);
             enums.entry(e.name.clone()).or_insert_with(HashMap::new);
         }
         // Pass 2: resolve variant payloads (now seeing all enum names,
         // including the enum being built and later-declared ones).
         let mut populated: std::collections::HashSet<String> = std::collections::HashSet::new();
         for e in &program.enums {
+            let efile = eff_file(&e.file, file);
             let mut variants: HashMap<String, Vec<Ty>> = HashMap::new();
             for v in &e.variants {
                 if variants.contains_key(&v.name) {
                     diags.push(duplicate(
-                        file,
+                        efile,
                         &format!("duplicate variant `{}` in enum `{}`", v.name, e.name),
                     ));
                 }
@@ -354,36 +463,50 @@ impl TypedHIR {
                 );
             }
             if !populated.insert(e.name.clone()) {
-                diags.push(duplicate(file, &format!("duplicate enum `{}`", e.name)));
+                diags.push(duplicate(efile, &format!("duplicate enum `{}`", e.name)));
             }
             enums.insert(e.name.clone(), variants);
         }
         enum_names.sort();
         enum_names.dedup();
         if enum_names.len() != program.enums.len() {
-            diags.push(Diagnostic::error(
+            // Second occurrence's file when identifiable; else fallback.
+            let dup_file = program
+                .enums
+                .iter()
+                .find(|e| !e.file.is_empty())
+                .map(|e| e.file.as_str())
+                .unwrap_or(file);
+            let d = Diagnostic::error(
                 "E-DUPLICATE",
                 "duplicate enum name",
-                file,
+                dup_file,
                 0,
                 0,
                 "two enums share one name",
                 &["rename one of them"],
                 "names/duplicate",
-            ));
+            );
+            // Point at the duplicated name when its text is available.
+            if let Some(first) = program.enums.first() {
+                diags.push(with_token_span(d, dup_file, &first.name));
+            } else {
+                diags.push(d);
+            }
         }
         let mut sigs: HashMap<String, Sig> = HashMap::new();
         for f in &program.functions {
+            let ffile = eff_file(&f.file, file);
             if sigs.contains_key(&f.name) {
-                diags.push(duplicate(file, &format!("duplicate function `{}`", f.name)));
+                diags.push(duplicate(ffile, &format!("duplicate function `{}`", f.name)));
             }
             // A user definition sharing a builtin's name could never
             // run (builtins win every call dispatch): fail loudly with
             // W-SHADOW instead of letting it silently shadow.
             if is_builtin(&f.name) {
-                diags.push(shadowed_builtin(file, &f.name));
+                diags.push(shadowed_builtin(ffile, &f.name));
             }
-            check_type_params_dup(file, &f.name, &f.type_params, &mut diags);
+            check_type_params_dup(ffile, &f.name, &f.type_params, &mut diags);
             // Non-generic functions keep the exact historical resolution
             // (`parse_ty` on the return type); generic ones preserve `Param`.
             // Both resolve known structs/enums nominally (F10) so call-site
@@ -449,13 +572,14 @@ impl TypedHIR {
         let mut struct_fields: HashMap<String, HashMap<String, Ty>> = HashMap::new();
         let mut struct_names: Vec<String> = Vec::new();
         for s in &program.structs {
+            let sfile = eff_file(&s.file, file);
             struct_names.push(s.name.clone());
-            check_type_params_dup(file, &s.name, &s.type_params, &mut diags);
+            check_type_params_dup(sfile, &s.name, &s.type_params, &mut diags);
             let mut fields = HashMap::new();
             for fld in &s.fields {
                 if fields.contains_key(&fld.name) {
                     diags.push(duplicate(
-                        file,
+                        sfile,
                         &format!("duplicate field `{}` in struct `{}`", fld.name, s.name),
                     ));
                 }
@@ -468,19 +592,20 @@ impl TypedHIR {
                         && fld.name.starts_with('f')
                         && fld.name[1..].chars().all(|c| c.is_ascii_digit()))
                 {
-                    diags.push(Diagnostic::error(
+                    let d = Diagnostic::error(
                         "E-RESERVED-FIELD",
                         &format!(
                             "field `{}` in struct `{}` uses reserved enum tag name",
                             fld.name, s.name
                         ),
-                        file,
+                        sfile,
                         0,
                         0,
                         "enum tags live in `__variant` / `f0...` fields",
                         &["rename the field"],
                         "types/reserved",
-                    ));
+                    );
+                    diags.push(with_token_span(d, sfile, &fld.name));
                 }
                 // Field types resolve exactly like any other annotation
                 // (F10): type parameters stay rigid, known enums/structs go
@@ -497,22 +622,33 @@ impl TypedHIR {
         struct_names.sort();
         struct_names.dedup();
         if struct_names.len() != program.structs.len() {
-            diags.push(Diagnostic::error(
+            let dup_file = program
+                .structs
+                .iter()
+                .find(|s| !s.file.is_empty())
+                .map(|s| s.file.as_str())
+                .unwrap_or(file);
+            let d = Diagnostic::error(
                 "E-DUPLICATE",
                 "duplicate struct name",
-                file,
+                dup_file,
                 0,
                 0,
                 "two structs share one name",
                 &["rename one of them"],
                 "names/duplicate",
-            ));
+            );
+            if let Some(first) = program.structs.first() {
+                diags.push(with_token_span(d, dup_file, &first.name));
+            } else {
+                diags.push(d);
+            }
         }
         let structs: Vec<String> = struct_names;
         for e in &program.enums {
             if struct_fields.contains_key(&e.name) {
                 diags.push(duplicate(
-                    file,
+                    eff_file(&e.file, file),
                     &format!("type `{}` declared as both enum and struct", e.name),
                 ));
             }
@@ -530,6 +666,11 @@ impl TypedHIR {
                 strict,
             );
         }
+        // S2 safety net: any diagnostic left without a real span (inline
+        // sites not yet threaded) gets one from its message's backticked
+        // token when the file text contains it. In-memory checks
+        // (`input.warden`) keep the explicit no-location form.
+        fixup_no_location_spans(&mut diags);
         if diags.is_empty() {
             Ok(Self { program })
         } else {
@@ -576,7 +717,7 @@ fn resolve_body_ty(s: &str, type_params: &[String], enums: &EnumTable, structs: 
 }
 
 fn check_function(
-    file: &str,
+    fallback_file: &str,
     f: &FunctionDecl,
     sigs: &HashMap<String, Sig>,
     structs: &[String],
@@ -586,6 +727,9 @@ fn check_function(
     alias_scopes: &[crate::ast::AliasScope],
     strict: bool,
 ) {
+    // S2 per-file attribution: diagnostics inside this function name the
+    // defining file (merged imports), not the entry file.
+    let file = eff_file(&f.file, fallback_file);
     let mut defined: HashMap<String, Ty> = HashMap::new();
     for p in &f.params {
         if defined.contains_key(&p.name) {
@@ -1543,7 +1687,7 @@ fn check_assign_target(
 }
 
 fn duplicate(file: &str, message: &str) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-DUPLICATE",
         message,
         file,
@@ -1552,7 +1696,11 @@ fn duplicate(file: &str, message: &str) -> Diagnostic {
         "two items share one name",
         &["rename one of them"],
         "names/duplicate",
-    )
+    );
+    if let Some(tok) = backticked(message) {
+        return with_token_span(d, file, &tok);
+    }
+    d
 }
 
 /// A user-defined function reuses a builtin name. Builtins win every
@@ -1564,7 +1712,7 @@ fn duplicate(file: &str, message: &str) -> Diagnostic {
 /// failure), so an error is the only way to guarantee a builtin never
 /// silently overrides user code.
 fn shadowed_builtin(file: &str, name: &str) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "W-SHADOW",
         &format!(
             "`{name}` shadows a builtin (builtins win every call; this definition would never run)"
@@ -1575,11 +1723,12 @@ fn shadowed_builtin(file: &str, name: &str) -> Diagnostic {
         "user functions cannot reuse builtin names",
         &["rename the function"],
         "names/shadow",
-    )
+    );
+    with_token_span(d, file, name)
 }
 
 fn undefined(file: &str, name: &str) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-UNDEFINED",
         &format!("undefined variable `{name}`"),
         file,
@@ -1588,7 +1737,8 @@ fn undefined(file: &str, name: &str) -> Diagnostic {
         "name is not a parameter or a prior `let` binding",
         &["bind it with `let` first", "check the spelling"],
         "names/scope",
-    )
+    );
+    with_token_span(d, file, name)
 }
 
 /// The file-alias scope enclosing `caller`, if the program uses D1 file
@@ -1614,7 +1764,7 @@ fn alias_scope_for<'a>(
 }
 
 fn arity_mismatch(file: &str, caller: &str, callee: &str, want: usize, got: usize) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-ARITY",
         &format!("`{caller}` calls `{callee}` with {got} args, want {want}"),
         file,
@@ -1623,7 +1773,20 @@ fn arity_mismatch(file: &str, caller: &str, callee: &str, want: usize, got: usiz
         "call arity must match the callee parameter list",
         &["pass the right number of arguments"],
         "calls/arity",
-    )
+    );
+    // Prefer the callee at its call site (`callee(`); fall back to the
+    // bare name (definition) when no call spelling is found.
+    if let Some((s, _e, line, column)) = span_for_token(file, &format!("{callee}(")) {
+        // Span the callee name itself (without the paren) so extraction
+        // contains exactly the function name.
+        let mut d = d;
+        d.primary_span.start = s;
+        d.primary_span.end = s + callee.len();
+        d.primary_span.line = line;
+        d.primary_span.column = column;
+        return d;
+    }
+    with_token_span(d, file, callee)
 }
 
 /// Non-exhaustive `match`: a real diagnostic naming every missing variant.
@@ -1632,7 +1795,7 @@ fn match_exhaustive(file: &str, enum_name: &str, missing: &[String]) -> Diagnost
         .iter()
         .map(|m| format!("{enum_name}::{m}"))
         .collect();
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-MATCH-EXHAUSTIVE",
         &format!(
             "non-exhaustive match on `{enum_name}`: missing {}",
@@ -1647,7 +1810,12 @@ fn match_exhaustive(file: &str, enum_name: &str, missing: &[String]) -> Diagnost
             "add a wildcard `_` arm",
         ],
         "match/exhaustiveness",
-    )
+    );
+    // Point at the `match` keyword (the scrutinee's match site).
+    if span_for_token(file, "match").is_some() {
+        return with_token_span(d, file, "match");
+    }
+    with_token_span(d, file, enum_name)
 }
 
 fn enum_payload_arity(
@@ -1657,7 +1825,7 @@ fn enum_payload_arity(
     want: usize,
     got: usize,
 ) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-ARITY",
         &format!("`{enum_name}::{variant}` carries {want} payloads, got {got}"),
         file,
@@ -1666,7 +1834,8 @@ fn enum_payload_arity(
         "enum constructor arity must match the variant declaration",
         &["pass the right number of payload values"],
         "calls/arity",
-    )
+    );
+    with_token_span(d, file, variant)
 }
 
 /// Struct literal omitting declared fields (F9): every declared field must
@@ -1683,7 +1852,7 @@ fn struct_literal_missing(file: &str, struct_name: &str, missing: &[String]) -> 
     } else {
         "fields"
     };
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-ARITY",
         &format!(
             "`{struct_name}` literal is missing {noun} {}",
@@ -1695,7 +1864,8 @@ fn struct_literal_missing(file: &str, struct_name: &str, missing: &[String]) -> 
         "struct literals must provide every declared field",
         &["add the missing fields"],
         "calls/arity",
-    )
+    );
+    with_token_span(d, file, struct_name)
 }
 
 fn match_binding_arity(
@@ -1705,7 +1875,7 @@ fn match_binding_arity(
     want: usize,
     got: usize,
 ) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-ARITY",
         &format!(
             "pattern `{enum_name}::{variant}` binds {got} names but the variant carries {want}"
@@ -1716,7 +1886,8 @@ fn match_binding_arity(
         "match bindings must match the variant payload",
         &["bind exactly the payload fields"],
         "match/bindings",
-    )
+    );
+    with_token_span(d, file, variant)
 }
 
 /// Unify one formal (possibly containing `Ty::Param`) against an actual
@@ -2933,6 +3104,7 @@ fn check_expr(
                 return_ty_omitted: false,
                 effects: Vec::new(),
                 body: body.clone(),
+                file: caller.file.clone(),
             };
             let mut fresh_groups: Vec<Vec<PendingSpawn>> = Vec::new();
             let mut fresh_cx = Ctx::default();

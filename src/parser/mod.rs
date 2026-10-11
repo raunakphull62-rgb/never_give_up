@@ -1154,6 +1154,7 @@ impl Parser {
             structs,
             enums,
             functions,
+            file: self.file.clone(),
         })
     }
 
@@ -1189,6 +1190,7 @@ impl Parser {
             is_pub,
             type_params,
             fields,
+            file: self.file.clone(),
         })
     }
 
@@ -1275,6 +1277,7 @@ impl Parser {
             is_pub,
             type_params,
             variants,
+            file: self.file.clone(),
         })
     }
 
@@ -1348,6 +1351,7 @@ impl Parser {
             return_ty_omitted,
             effects,
             body: Block { id: blk_id, stmts },
+            file: self.file.clone(),
         })
     }
 

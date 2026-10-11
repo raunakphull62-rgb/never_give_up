@@ -41,8 +41,35 @@ enum MemberKind {
     Enum,
 }
 
+fn span_for(file: &str, token: &str) -> Option<(usize, usize, usize, usize)> {
+    if token.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(file).ok()?;
+    let s = text.find(token)?;
+    let e = s + token.len();
+    let (line, column) = crate::diagnostics::line_col_for(&text, s);
+    Some((s, e, line, column))
+}
+
+fn with_span(mut d: Diagnostic, file: &str, token: &str) -> Diagnostic {
+    if let Some((s, e, line, column)) = span_for(file, token) {
+        d.primary_span.start = s;
+        d.primary_span.end = e;
+        d.primary_span.line = line;
+        d.primary_span.column = column;
+    }
+    d
+}
+
+fn backticked(s: &str) -> Option<String> {
+    let a = s.find('`')?;
+    let b = s[a + 1..].find('`')?;
+    Some(s[a + 1..a + 1 + b].to_string())
+}
+
 fn duplicate(file: &str, message: &str) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-DUPLICATE",
         message,
         file,
@@ -51,11 +78,15 @@ fn duplicate(file: &str, message: &str) -> Diagnostic {
         "two items share one name",
         &["rename one of them"],
         "names/duplicate",
-    )
+    );
+    if let Some(tok) = backticked(message) {
+        return with_span(d, file, &tok);
+    }
+    d
 }
 
 fn undefined(file: &str, name: &str) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-UNDEFINED",
         &format!("undefined `{name}`"),
         file,
@@ -64,11 +95,12 @@ fn undefined(file: &str, name: &str) -> Diagnostic {
         "name is not visible at this path",
         &["check the module name and item spelling"],
         "names/scope",
-    )
+    );
+    with_span(d, file, name)
 }
 
 fn not_a_value(file: &str, path: &str, what: &str, use_instead: &str) -> Diagnostic {
-    Diagnostic::error(
+    let d = Diagnostic::error(
         "E-TYPE",
         &format!("`{path}` is {what}, not a value ({use_instead})"),
         file,
@@ -77,7 +109,8 @@ fn not_a_value(file: &str, path: &str, what: &str, use_instead: &str) -> Diagnos
         "only enum variants construct values with `()`; functions need a call",
         &["write the full path"],
         "types/mismatch",
-    )
+    );
+    with_span(d, file, path)
 }
 
 /// Membership tables for one module: member name -> visibility.
@@ -131,11 +164,13 @@ impl<'a> Ctx<'a> {
 
     /// Gate a resolved member access: private members are visible only from
     /// inside their own module. `cur` is the module of the use site.
+    /// Points at the offending path's head (`m` of `m::item`) when found.
     fn gate(&mut self, module: &str, is_pub: bool, cur: Option<&str>, full: &str) {
         if !is_pub && cur != Some(module) {
             let file = self.file.clone();
-            self.diags
-                .push(Diagnostic::private_access(&file, 0, 0, full));
+            let d = Diagnostic::private_access(&file, 0, 0, full);
+            let head = full.split("::").next().unwrap_or(full);
+            self.diags.push(with_span(d, &file, head));
         }
     }
 }
