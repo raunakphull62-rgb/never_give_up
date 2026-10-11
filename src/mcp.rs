@@ -363,6 +363,20 @@ fn diagnostic_from_json(v: &Json) -> Result<Diagnostic, String> {
         Some(Json::Str(s)) => Some(s.clone()),
         _ => None,
     };
+    // `line`/`column` are new (S2) and optional on the wire: old
+    // payloads without them stay valid (default 0 = no-location).
+    let line = span
+        .get("line")
+        .map(json_int)
+        .transpose()?
+        .unwrap_or(0)
+        .max(0) as usize;
+    let column = span
+        .get("column")
+        .map(json_int)
+        .transpose()?
+        .unwrap_or(0)
+        .max(0) as usize;
     Ok(Diagnostic {
         code: code.to_string(),
         severity: v
@@ -375,6 +389,8 @@ fn diagnostic_from_json(v: &Json) -> Result<Diagnostic, String> {
             file: file.to_string(),
             start,
             end,
+            line,
+            column,
         },
         cause: v
             .get("cause")

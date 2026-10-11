@@ -243,11 +243,25 @@ fn diagnostic_from_check_json(json: &str) -> Option<Diagnostic> {
         Some(Json::Int(n)) => (*n).max(0) as usize,
         _ => 0,
     };
+    let line = match span.get("line") {
+        Some(Json::Int(n)) => (*n).max(0) as usize,
+        _ => 0,
+    };
+    let column = match span.get("column") {
+        Some(Json::Int(n)) => (*n).max(0) as usize,
+        _ => 0,
+    };
     Some(Diagnostic {
         code,
         severity,
         message,
-        primary_span: crate::diagnostics::Span { file, start, end },
+        primary_span: crate::diagnostics::Span {
+            file,
+            start,
+            end,
+            line,
+            column,
+        },
         cause: String::new(),
         expected: None,
         found: None,

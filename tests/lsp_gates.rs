@@ -88,6 +88,8 @@ fn sample_diag() -> Diagnostic {
             file: "f.klang".to_string(),
             start: 3,
             end: 5,
+            line: 2,
+            column: 1,
         },
         cause: String::new(),
         expected: None,

@@ -4,11 +4,54 @@
 use std::fmt;
 
 /// Byte span inside one source file.
+///
+/// `start`/`end` are byte offsets into the file's text. `line`/`column`
+/// are 1-based (column counts Unicode scalar values from the line start);
+/// `line == 0 && column == 0` is the explicit "no location" form for
+/// errors that truly have no source position (e.g. a missing file on the
+/// command line, or a runtime failure where the position was lost). Real
+/// spans always have `line >= 1`, `column >= 1`, and `end > start`.
+/// The JSON shape keeps the existing `file`/`start`/`end` fields and adds
+/// `line`/`column`, so old readers keep parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub file: String,
     pub start: usize,
     pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Span {
+    /// Explicit no-location span for `file` (documents "no position"
+    /// instead of a fake 0,0).
+    pub fn no_location(file: &str) -> Self {
+        Self {
+            file: file.to_string(),
+            start: 0,
+            end: 0,
+            line: 0,
+            column: 0,
+        }
+    }
+
+    /// True for the explicit no-location form.
+    pub fn is_no_location(&self) -> bool {
+        self.line == 0 && self.column == 0
+    }
+}
+
+/// 1-based `(line, column)` of byte `offset` in `text` (column counts
+/// Unicode scalar values). Clamps offsets past the end. Used to fill
+/// `Span::line`/`column` from a real byte span.
+pub fn line_col_for(text: &str, offset: usize) -> (usize, usize) {
+    let off = offset.min(text.len());
+    // Count lines by bytes up to `off`; column by chars since last newline.
+    let prefix = &text[..off];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = prefix[line_start..].chars().count() + 1;
+    (line, col)
 }
 
 /// One machine-applicable repair suggestion.
@@ -48,6 +91,10 @@ impl Diagnostic {
         fix_labels: &[&str],
         rule: &str,
     ) -> Self {
+        // Plain `error` keeps the historical (start,end) args but marks
+        // the span locationless until a caller attaches line/column via
+        // `with_location`/`error_with_location`. Callers with source text
+        // must use the location-carrying constructors below.
         Self {
             code: code.to_string(),
             severity: "error".to_string(),
@@ -56,6 +103,8 @@ impl Diagnostic {
                 file: file.to_string(),
                 start,
                 end,
+                line: 0,
+                column: 0,
             },
             cause: cause.to_string(),
             expected: None,
@@ -75,6 +124,64 @@ impl Diagnostic {
     /// these never fail `check` on their own: `TypedHIR::check` only sees
     /// errors, and callers surface warnings through a separate channel
     /// (CLI stderr, LSP severity-2 diagnostics). First code: `W-TYPE-NARROW`.
+    /// Location-carrying constructor: `source` is the full text of `file`;
+    /// `line`/`column` are derived from `start` (1-based). For a span that
+    /// truly has no source position, use [`Span::no_location`] via `error`
+    /// (which leaves line/column 0) instead of a fake 0,0 with line 1.
+    pub fn error_with_location(
+        code: &str,
+        message: &str,
+        file: &str,
+        source: &str,
+        start: usize,
+        end: usize,
+        cause: &str,
+        fix_labels: &[&str],
+        rule: &str,
+    ) -> Self {
+        let (line, column) = line_col_for(source, start);
+        Self {
+            code: code.to_string(),
+            severity: "error".to_string(),
+            message: message.to_string(),
+            primary_span: Span {
+                file: file.to_string(),
+                start,
+                end,
+                line,
+                column,
+            },
+            cause: cause.to_string(),
+            expected: None,
+            found: None,
+            fixes: fix_labels
+                .iter()
+                .map(|l| Fix {
+                    label: l.to_string(),
+                })
+                .collect(),
+            rule: rule.to_string(),
+            related: Vec::new(),
+        }
+    }
+
+    /// Attach a real location (computed from `source`) to a diagnostic
+    /// built with the plain constructor.
+    pub fn with_location(mut self, source: &str, start: usize, end: usize) -> Self {
+        let (line, column) = line_col_for(source, start);
+        self.primary_span.start = start;
+        self.primary_span.end = end;
+        self.primary_span.line = line;
+        self.primary_span.column = column;
+        self
+    }
+
+    /// True when this diagnostic carries a real source location
+    /// (vs the explicit no-location form).
+    pub fn has_location(&self) -> bool {
+        !self.primary_span.is_no_location()
+    }
+
     pub fn warning(
         code: &str,
         message: &str,
@@ -93,6 +200,8 @@ impl Diagnostic {
                 file: file.to_string(),
                 start,
                 end,
+                line: 0,
+                column: 0,
             },
             cause: cause.to_string(),
             expected: None,
@@ -121,11 +230,7 @@ impl Diagnostic {
             code: "E-TASK-GROUP".to_string(),
             severity: "error".to_string(),
             message: format!("task group failed with {} errors", failures.len()),
-            primary_span: Span {
-                file: "runtime".to_string(),
-                start: 0,
-                end: 0,
-            },
+            primary_span: Span::no_location("runtime"),
             cause: "one or more child tasks failed; siblings were cancelled and joined".to_string(),
             expected: None,
             found: None,
@@ -301,6 +406,11 @@ impl Diagnostic {
     }
 
     /// Render as a JSON object per the architecture schema.
+    ///
+    /// Backward compatible: the existing `file`/`start`/`end` fields are
+    /// unchanged; `line`/`column` are ADDED inside `primary_span`
+    /// (1-based; 0,0 means the explicit no-location form). Old readers
+    /// that ignore unknown keys keep parsing.
     pub fn to_json(&self) -> String {
         let fixes: Vec<String> = self
             .fixes
@@ -315,13 +425,15 @@ impl Diagnostic {
             None => "null".to_string(),
         };
         format!(
-            "{{\n  \"code\": \"{}\",\n  \"severity\": \"{}\",\n  \"message\": \"{}\",\n  \"primary_span\": {{\"file\": \"{}\", \"start\": {}, \"end\": {}}},\n  \"cause\": \"{}\",\n  \"expected\": {},\n  \"found\": {},\n  \"fixes\": [{}],\n  \"rule\": \"{}\",\n  \"related\": [{}]\n}}",
+            "{{\n  \"code\": \"{}\",\n  \"severity\": \"{}\",\n  \"message\": \"{}\",\n  \"primary_span\": {{\"file\": \"{}\", \"start\": {}, \"end\": {}, \"line\": {}, \"column\": {}}},\n  \"cause\": \"{}\",\n  \"expected\": {},\n  \"found\": {},\n  \"fixes\": [{}],\n  \"rule\": \"{}\",\n  \"related\": [{}]\n}}",
             Self::esc(&self.code),
             Self::esc(&self.severity),
             Self::esc(&self.message),
             Self::esc(&self.primary_span.file),
             self.primary_span.start,
             self.primary_span.end,
+            self.primary_span.line,
+            self.primary_span.column,
             Self::esc(&self.cause),
             opt(&self.expected),
             opt(&self.found),
@@ -334,17 +446,33 @@ impl Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "[{}] {}:{}-{} {} (cause: {}; rule: {})",
-            self.code,
-            self.primary_span.file,
-            self.primary_span.start,
-            self.primary_span.end,
-            self.message,
-            self.cause,
-            self.rule
-        )
+        if self.has_location() {
+            write!(
+                f,
+                "[{}] {}:{}-{} ({}:{}) {} (cause: {}; rule: {})",
+                self.code,
+                self.primary_span.file,
+                self.primary_span.start,
+                self.primary_span.end,
+                self.primary_span.line,
+                self.primary_span.column,
+                self.message,
+                self.cause,
+                self.rule
+            )
+        } else {
+            write!(
+                f,
+                "[{}] {}:{}-{} {} (cause: {}; rule: {})",
+                self.code,
+                self.primary_span.file,
+                self.primary_span.start,
+                self.primary_span.end,
+                self.message,
+                self.cause,
+                self.rule
+            )
+        }
     }
 }
 
