@@ -1,6 +1,6 @@
 # Klang stdlib — every builtin (generated from code)
 
-Source: `src/hir.rs:is_builtin` (82 flat) + `check_method_call`/`exec_method`
+Source: `src/hir.rs:is_builtin` (100 flat) + `check_method_call`/`exec_method`
 (14 str + 6 array + 3 map methods). If a builtin exists in code but not
 here, the gate fails. Each entry lists exact arity, return type (checker
 `Ty`), and error codes (checker `E-ARITY`/`E-TYPE` plus runtime codes).
@@ -92,6 +92,24 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `sha256` | `(s: str)` | `str` (64 hex) | `E-ARITY`, `E-TYPE` |
 | `hmac_sha256` | `(key: str, msg: str)` | `str` (64 hex) | `E-ARITY`, `E-TYPE`, `E-RUNTIME` (key) |
 | `uuid_v4` | `()` | `str` (36, `4xxx`) | `E-ARITY` |
+| `tcp_listen` | `(host: str, port: int)` | `unknown` (Listener; port 0 = any) | `E-ARITY`, `E-TYPE`, `E-NET-ADDR-INVALID`, `E-NET-ADDR-IN-USE`, `E-SANDBOX-NETWORK` |
+| `listener_port` | `(l: listener)` | `int` | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-SANDBOX-NETWORK` |
+| `tcp_accept` | `(l: listener)` | `unknown` (Conn, blocking) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `tcp_accept_timeout` | `(l: listener, ms: int)` | `unknown` (Conn or null) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `tcp_connect` | `(host: str, port: int, timeout_ms: int)` | `unknown` (Conn) | `E-ARITY`, `E-TYPE`, `E-NET-ADDR-INVALID`, `E-NET-DNS`, `E-NET-REFUSED`, `E-NET-TIMEOUT`, `E-SANDBOX-NETWORK` |
+| `conn_read` | `(c: conn, max: int)` | `str` (lossy UTF-8; `""` at peer close) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-NET-TIMEOUT`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `conn_read_line` | `(c: conn)` | `unknown` (str without newline, or null at close) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-NET-TIMEOUT`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `conn_read_hex` | `(c: conn, max: int)` | `str` (lowercase hex; `""` at close) | `E-ARITY`, `E-TYPE`, `E-NET-*`, `E-SANDBOX-NETWORK` |
+| `conn_write` | `(c: conn, s: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-NET-TIMEOUT`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `conn_write_hex` | `(c: conn, hex: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `conn_close` | `(h: conn\|listener\|udpsock)` | `int` (1, idempotent) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-NETWORK` |
+| `conn_set_timeout` | `(c: conn, ms: int)` | `int` (1; 0 clears) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-NET-IO`, `E-SANDBOX-NETWORK` |
+| `conn_peer` | `(c: conn)` | `str` (`"ip:port"`) | `E-ARITY`, `E-TYPE`, `E-NET-CLOSED`, `E-SANDBOX-NETWORK` |
+| `udp_bind` | `(host: str, port: int)` | `unknown` (UdpSock; port 0 = any) | `E-ARITY`, `E-TYPE`, `E-NET-*`, `E-SANDBOX-NETWORK` |
+| `udp_send_to` | `(s: udpsock, host: str, port: int, data: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-NET-*`, `E-SANDBOX-NETWORK` |
+| `udp_recv_from` | `(s: udpsock, max: int, timeout: int)` | `map{data,str;host,str;port,int}` | `E-ARITY`, `E-TYPE`, `E-NET-TIMEOUT`, `E-NET-*`, `E-SANDBOX-NETWORK` |
+| `dns_lookup` | `(host: str)` | `array<str>` (sorted deduped IPs) | `E-ARITY`, `E-TYPE`, `E-NET-DNS`, `E-SANDBOX-NETWORK` |
+| `is_null` | `(x: unknown)` | `bool` (`1` for null) | `E-ARITY` |
 
 ## Methods
 
