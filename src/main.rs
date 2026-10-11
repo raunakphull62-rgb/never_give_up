@@ -914,10 +914,10 @@ fn run_file_mode(args: &[String]) {
         // a wrapped exit code or a JIT-FAIL is never mistaken for the
         // reference interpreter's verdict.
         eprintln!(
-            "warning: --backend-jit is experimental: it does not check division by zero, overflow, or recursion depth yet"
+            "warning: --backend-jit is experimental: int-only subset; out-of-subset programs are refused loudly"
         );
         let omitted = entry_omitted_return(&prog, &run_entry);
-        match klang::jit::run_jit(&mir, &run_entry, &[]) {
+        match klang::jit::run_jit_fallible(&mir, &run_entry, &[]) {
             Ok((v, out)) => {
                 for line in &out {
                     if verbose {
@@ -934,9 +934,24 @@ fn run_file_mode(args: &[String]) {
                 // return type always exits 0 (Phase 3b).
                 std::process::exit(if omitted { 0 } else { v as i32 });
             }
-            Err(e) => {
+            Err(klang::jit::JitError::Unsupported(e)) => {
                 eprintln!("run: JIT-FAIL");
                 eprintln!("{e}");
+                std::process::exit(1);
+            }
+            Err(klang::jit::JitError::Runtime { diagnostic: d, output: out }) => {
+                // Same failure contract as the interpreter: flush whatever
+                // the program printed before it failed, then `run: FAIL`
+                // with the identical diagnostic JSON, exit 1.
+                for line in &out {
+                    if verbose {
+                        println!("print: {line}");
+                    } else {
+                        println!("{line}");
+                    }
+                }
+                eprintln!("run: FAIL");
+                eprintln!("{}", d.to_json());
                 std::process::exit(1);
             }
         }

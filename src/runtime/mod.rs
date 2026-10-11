@@ -216,7 +216,11 @@ fn value_type_name(v: &Value) -> &'static str {
 /// `u32`, `u64`, `u8`) enforce their own ranges at value boundaries
 /// (parameter passing, return, assignment); this error is only for
 /// genuinely unrepresentable 64-bit results.
-fn overflow_err(op: &str) -> Diagnostic {
+///
+/// `pub(crate)` (not private) so the JIT backend builds byte-identical
+/// diagnostics through this single constructor instead of duplicating
+/// the code/message/cause/fixes/rule tuple.
+pub(crate) fn overflow_err(op: &str) -> Diagnostic {
     Diagnostic::error(
         "E-OVERFLOW",
         &format!("integer overflow in `{op}`: result out of i64 range"),
@@ -311,7 +315,10 @@ fn concurrent_err(msg: &str) -> Diagnostic {
 
 /// Call-depth guard: single-threaded recursion exceeding the frame limit,
 /// unrelated to concurrency.
-fn depth_limit_err() -> Diagnostic {
+///
+/// `pub(crate)` (not private) so the JIT backend reports the identical
+/// diagnostic through this single constructor.
+pub(crate) fn depth_limit_err() -> Diagnostic {
     Diagnostic::error(
         "E-RUNTIME",
         "call depth exceeded (possible recursion)",
