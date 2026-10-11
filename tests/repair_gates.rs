@@ -3,7 +3,7 @@
 //! All tests use `MockBackend` (no network): the mock stands in for the
 //! harness-owned model, so every test below exercises the mechanism
 //! (scope -> prompt -> splice -> re-check), never a connector. Live-model
-//! validation happens in the harness, against `klang mcp` tools.
+//! validation happens in the harness, against `klang check --json` output.
 
 use klang::repair::{
     MockBackend, ModelBackend, RepairCliOverrides, RepairConfig, RepairFileConfig, Scope,

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::mcp::{parse_json, Json};
+use crate::json::{parse_json, Json};
 use crate::registry_storage::{
     local_archive_key, local_index_key, s3_archive_key, s3_checksum_key, s3_index_key,
     PutOutcome, Storage,

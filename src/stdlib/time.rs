@@ -13,8 +13,8 @@
 //! Clock choice: `now()` returns seconds since the Unix epoch via
 //! `std::time::SystemTime` — a real wall-clock timestamp, not a
 //! process-local tick count. There is no monotonic-clock precedent
-//! elsewhere in this codebase to match (the only `Duration` use is the
-//! MCP run timeout in `mcp.rs`); a Unix-epoch `f64` is directly usable
+//! elsewhere in this codebase to match; a Unix-epoch `f64` is directly
+//! usable
 //! both as a timestamp and, paired with `elapsed()`, for measuring
 //! durations. `elapsed(since)` is computed against the same clock as
 //! `now()`, so the pair is self-consistent. All calls are synchronous

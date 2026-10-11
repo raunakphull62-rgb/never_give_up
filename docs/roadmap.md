@@ -2,8 +2,9 @@
 
 This file used to describe "Stage 1.5" as current work and an MCP
 server as a future goal. Both are stale: enums/generics/modules
-shipped (SPEC §7), and `klang mcp` exists (`src/mcp.rs`,
-`tests/mcp_gates.rs`). Rewritten to match what `cargo test` proves.
+shipped (SPEC §7). Rewritten to match what `cargo test` proves.
+(X1: the MCP server was removed; use `klang check --json`,
+`klang run --sandbox`, `klang fmt`.)
 
 ## Done and pinned by tests
 
@@ -21,9 +22,9 @@ shipped (SPEC §7), and `klang mcp` exists (`src/mcp.rs`,
   behind `--backend-jit` (anything non-int is a loud rejection, never
   silent wrong code).
 - Repair (Phase 4): Klang no longer calls a model — the harness owns
-  the model connection and drives the loop via `klang mcp`
-  (`klang_check`, `klang_run`, `klang_fmt`, `klang_scope_plan`);
-  `klang repair --dry-run` prints the planned prompt.
+  the model connection and drives the loop via `klang check --json`
+  + `klang repair --dry-run`;
+  `klang repair --dry-run` prints the planned prompt. (X1: MCP removed.)
 - v2 language track: schemas, `echo fn`/`listen`, `flow` with
   `dep=`, `tune`/`verify`, real v2 interpreter (`run-v2`).
 - Robustness: CLI runs on a 256 MiB deep-stack worker; call depth

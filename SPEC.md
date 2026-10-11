@@ -288,8 +288,8 @@ cargo run -- run --verbose|-v <file> [entry]  # full dump (MIR, print: lines, ru
 cargo run -- build <file>        # parse + check + MIR listing
 cargo run -- repair <file> [--max-iters N] [--scope function|file] [--dry-run]
                                  # repair-prompt inspector (see below)
-cargo run -- mcp                 # MCP server on stdio: klang_check,
-                                 # klang_run, klang_fmt, klang_scope_plan
+cargo run -- check [--json] <file>  # parse + type-check; --json prints one {"diagnostics":[...]} object
+cargo run -- run [--sandbox] <file> [entry]  # parse + check + run; --sandbox limits files to temp + E-SANDBOX-* denials
 cargo run -- lsp                  # LSP server on stdio (see below)
 ```
 
@@ -298,19 +298,18 @@ parenthesized. `fmt(fmt(x)) == fmt(x)`; formatted code re-parses and
 runs identically (tested in `tests/toolchain_gates.rs`).
 
 `repair` mechanism (Phase 4: Klang no longer calls a model — the
-harness owns the model connection and drives the loop via `klang mcp`):
+harness owns the model connection and drives the loop via `klang check --json`
++ `klang repair --dry-run`):
 parse + `TypedHIR::check` the target file; the failing scope's source
 plus `Diagnostic::to_json()` output is exactly what `--dry-run` prints
-and what `klang_scope_plan` returns, for the harness to send to its own
+for the harness to send to its own
 model. A harness-side response is spliced back as `fn` block(s) and the
 full program is re-checked, repeating up to `--max-iters` (default 5,
 hard max 10) via `contracts::repair_loop`. Default scope is `function`
 (falls back to whole-file when diagnostics span >2 functions).
 `--dry-run` prints the planned prompt with zero model calls. Tested in
 `tests/repair_gates.rs` (mock backend: the mock stands in for the
-harness-owned model) and end-to-end through the MCP surface in
-`tests/mcp_gates.rs` (scripted fake harness: check -> scope -> fix ->
-check clean).
+harness-owned model).
 
 `repair` scope boundaries (Phase 1 decision, pinned by tests):
 - `--scope function` never claims declaration-level diagnostics: rules
@@ -406,9 +405,7 @@ calc = "registry:calc@1.0.0"         # exact registry pin (X.Y.Z only)
   visibility (`E-PRIVATE`), qualified `m::item` paths, plus cross-file
   `import` merging (`tests/module_gates.rs`).
 - `examples/full.klang` and `examples/simple.klang` still run; the whole
-  suite is 218 tests (`cargo test`), including the Phase 4 MCP gates
-  (`tests/mcp_gates.rs`: scripted fake harness proving identical
-  diagnostics and scope verdicts through the MCP surface), the Phase 2 adversarial
+  suite is 218 tests (`cargo test`), including the Phase 2 adversarial
   gates (`tests/type_adversarial_gates.rs`: missing struct fields,
   nominal struct signatures) and the multi-feature dogfood
   (`examples/eval.klang`: lexer/parser/eval modules over a generic
@@ -417,7 +414,7 @@ calc = "registry:calc@1.0.0"         # exact registry pin (X.Y.Z only)
   benchmark baseline (`tests/benchmark_gates.rs`: 8-task corpus across
   simple/moderate/complex tiers, 100% oracle-repair convergence in 1
   median iter; live-model convergence is measured inside harnesses via
-  `klang mcp`, and `bench/run_live.sh` now checks the harness signal —
+  `klang check --json`, and `bench/run_live.sh` now checks the harness signal —
   diagnostic family + planned scope per task — with zero model calls).
 
 ## 7b. Robustness (Phase 2 hardening)

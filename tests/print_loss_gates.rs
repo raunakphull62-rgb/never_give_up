@@ -2,7 +2,7 @@
 //!
 //! A program that prints and then fails used to show only the failure
 //! diagnostic: `run_with_output_value` dropped `ctx.output` on `Err`
-//! and the CLI/MCP error arms printed just the diagnostic. The partial
+//! and the CLI error arms printed just the diagnostic. The partial
 //! runners now return the accumulated output alongside the outcome, and
 //! every display site flushes it before the diagnostic. These tests pin
 //! both the mechanism (partial runners) and the user-visible behavior

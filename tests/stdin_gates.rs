@@ -4,7 +4,7 @@
 //! binary with piped stdin (library calls cannot feed process stdin),
 //! plus library-level parsing semantics: strictness, `i32` range,
 //! redaction, negatives, and the pre-existing `int()` equivalence.
-//! The MCP stdin reservation is pinned without touching the server loop.
+//! The protocol stdin reservation is pinned without touching the server loop.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -229,12 +229,14 @@ fn calculator_explicit_operator() {
     assert_eq!(out, "30\n", "got:\n{out}");
 }
 
-// ---- MCP stdin protection + backend boundaries ----
+// ---- protocol stdin protection + backend boundaries ----
 
 #[test]
 fn mcp_reserved_stdin_reads_eof_without_blocking() {
-    // With stdin reserved for the MCP loop, read_line returns ""
+    // With stdin reserved for the protocol loop, read_line returns ""
     // immediately instead of consuming protocol bytes.
+    // (X1: test name retains `mcp_` for history; the reservation now
+    // serves the LSP server.)
     klang::stdlib::io::reserve_stdin_for_mcp();
     assert!(klang::stdlib::io::stdin_reserved_for_mcp());
     assert_eq!(klang::stdlib::io::read_line(), "");

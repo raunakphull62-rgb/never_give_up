@@ -1,6 +1,6 @@
 # Klang
 
-**Klang is a small compiled language and toolchain for programs that need clear, repeatable verification.** Its Rust compiler parses and type-checks `.klang` source, reports structured diagnostics, and can run checked programs in an interpreter. A standard-I/O Model Context Protocol (MCP) server exposes those same checks and formatting tools to an AI coding harness. Klang does not make model or network calls itself.
+**Klang is a small compiled language and toolchain for programs that need clear, repeatable verification.** Its Rust compiler parses and type-checks `.klang` source, reports structured diagnostics, and can run checked programs in an interpreter. The same checks are available as plain CLI commands (`klang check --json`, `klang run --sandbox`, `klang fmt`) for AI coding harnesses. Klang does not make model or network calls itself.
 
 The current language includes functions, control flow, structs, arrays, maps, strings, enums and exhaustive pattern matching, generics, modules, imports, and effect annotations. Its `async` task groups enforce that spawned tasks are awaited before the group ends. See the [language tour][1] and [language reference][2] for syntax and precise behavior.
 
@@ -10,7 +10,7 @@ The current language includes functions, control flow, structs, arrays, maps, st
 - **Run programs:** execute checked source in the reference interpreter. The optional Cranelift JIT backend is available for integer-focused programs.
 - **Inspect the compiler pipeline:** lower checked programs to an intermediate representation (MIR) and print a readable instruction listing.
 - **Format source:** render a canonical form with consistent indentation and parenthesized operators.
-- **Integrate with coding agents:** serve compiler tools over MCP/stdio so an external harness can check, run, format, and plan a focused repair.
+- **Integrate with coding agents:** run `klang check --json`, `klang run --sandbox`, and `klang fmt` so an external harness can check, run, and format with deterministic compiler feedback.
 - **Explore a separate v2 track:** explicitly check or run v2 programs using resonance types, schemas, flows, and echoes. V2 uses separate commands or an explicit language flag; `.klang` files do not silently switch modes.
 
 ## Quick start
@@ -70,14 +70,13 @@ A successful run prints only the program output (`42`). The entry function's int
 
 | Command | Behavior |
 |---|---|
-| `klang check <file.klang>` | Parse and type-check source; print diagnostics on failure. |
-| `klang run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter; prints only program output, exit code is the return value. |
+| `klang check <file.klang>` | Parse and type-check source; print diagnostics on failure. ` --json` prints one `{"diagnostics":[...]}` object. |
+| `klang run <file.klang> [entry]` | Check, lower to MIR, then execute with the interpreter; prints only program output, exit code is the return value. `--sandbox` limits files to the temp dir and denies spawn/run/network with `E-SANDBOX-*`. |
 | `klang run --verbose\|-v <file.klang> [entry]` | Full dump (MIR listing, `print:` lines, `run entry() = value`); `--quiet\|-q` is a no-op alias. |
 | `klang run <file.klang> [entry] --backend-jit` | Execute with the optional JIT backend; its supported surface is integer-only. |
 | `klang build <file.klang>` | Check and print MIR; this command does not emit a native executable. |
 | `klang fmt [--write \| --check] <file\|dir> [paths...]` | Print canonical formatting; `--write` rewrites files in place, `--check` exits 1 when any file would change. Comments are preserved. |
 | `klang repair <file.klang> --dry-run` | Show the diagnostics and planned repair prompt without calling a model. |
-| `klang mcp` | Start the MCP server over standard input and output. |
 | `klang check-v2 <file.v2>` | Check a v2 program. `klang check --lang v2 <file.v2>` is an equivalent explicit form. |
 | `klang run-v2 <file.v2> [entry]` | Run a v2 program. `klang run --lang v2 <file.v2> [entry]` is an equivalent explicit form. |
 
@@ -127,25 +126,26 @@ Functions declare effects in their signatures. Calling a `throws` function requi
 
 A spawned task must be bound directly to a variable inside a `task_group`, and its handle must be awaited before leaving that group. The checker reports violations before execution. At runtime, spawned tasks run on threads and `await` joins them. When a child fails, Klang cancels siblings cooperatively and retains the group’s failures in its diagnostics.
 
-## MCP integration for coding harnesses
+## CLI integration for coding harnesses
 
-Start Klang as an MCP server over stdio:
+Run the compiler directly — no server needed:
 
 ```sh
-klang mcp
+klang check --json hello.klang
+klang run --sandbox hello.klang
+klang fmt hello.klang
 ```
 
-The server handles JSON-RPC messages and offers these tools:
+`check --json` prints one `{"diagnostics":[...]}` object (empty means
+clean, following imports and strict mode); `run --sandbox` limits files
+to the temp dir and denies spawn/run/network with `E-SANDBOX-*`; `fmt`
+prints canonical source.
 
-| Tool | Purpose |
-|---|---|
-| `klang_check` | Check source and return compiler diagnostics as JSON. |
-| `klang_run` | Check, then run source with a bounded execution time. |
-| `klang_fmt` | Return canonical source formatting. |
-| `klang_scope_plan` | Use check diagnostics to identify a focused function-level edit scope or recommend file scope. |
-| `klang_v2_check` | Check source written for the separate v2 language track. |
-
-A repair loop can therefore remain with the harness: check the source, send the diagnostics to its model, apply a proposed edit, and check again. Klang supplies deterministic compiler feedback; it does not choose or call a model. `repair --dry-run` is available to inspect the planned first prompt without making model calls. See the [repair guide][3].
+A repair loop can therefore remain with the harness: check the source with
+`--json`, send the diagnostics to its model, apply a proposed edit, and
+check again. Klang supplies deterministic compiler feedback; it does not
+choose or call a model. `repair --dry-run` is available to inspect the
+planned first prompt without making model calls. See the [repair guide][3].
 
 ## Contribute: build, test, and verify examples
 
@@ -162,7 +162,7 @@ The repository also includes documentation examples with machine-check directive
 scripts/verify_docs.py --bin "$(command -v klang)"
 ```
 
-The test suite covers the parser, type checker, runtime, task groups, enums, generics, modules, package helpers, MCP tools, repair planning, security checks, and v2 components. Runnable examples are in [`examples/`](examples/); user documentation is in [`docs/`](docs/).
+The test suite covers the parser, type checker, runtime, task groups, enums, generics, modules, package helpers, repair planning, security checks, and v2 components. Runnable examples are in [`examples/`](examples/); user documentation is in [`docs/`](docs/).
 
 ## Project structure
 
@@ -173,7 +173,7 @@ The test suite covers the parser, type checker, runtime, task groups, enums, gen
 | `src/mir/`, `src/runtime/` | Intermediate representation and interpreter runtimes. |
 | `src/jit.rs`, `src/codegen.rs` | Optional JIT execution and readable MIR listing. |
 | `src/diagnostics.rs`, `src/ai_safety/` | Structured diagnostics and input-safety helpers. |
-| `src/mcp.rs`, `src/repair/` | MCP tools and model-agnostic repair planning. |
+| `src/repair/` | Model-agnostic repair planning. |
 | `src/package/`, `src/db.rs` | Manifest/lockfile helpers and the incremental database. |
 | `docs/` | Getting started, language tour, reference, repair guide, and limitations. |
 | `examples/`, `tests/` | Example programs and unit/integration gate tests. |
@@ -197,14 +197,14 @@ See [known limitations][4] for additional detail and current caveats.
 - [Getting started][5]
 - [Language tour][1]
 - [Language reference][2]
-- [Repair and MCP guide][3]
+- [Repair guide][3]
 - [Known limitations][4]
 
 ## References
 
 [1]: ./docs/tour.md "Klang language tour"
 [2]: ./docs/reference.md "Klang language reference"
-[3]: ./docs/repair.md "Klang repair and MCP guide"
+[3]: ./docs/repair.md "Klang repair guide"
 [4]: ./docs/limitations.md "Klang known limitations"
 [5]: ./docs/getting-started.md "Klang getting started"
 [6]: https://github.com/raunakphull62-rgb/never_give_up/releases/latest "Klang precompiled release packages"

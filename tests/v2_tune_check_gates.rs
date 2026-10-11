@@ -11,7 +11,7 @@ use klang::parser::v2::parse_v2_program;
 const FILE: &str = "/tmp/bh_v2_tune_check.v2";
 
 fn check(src: &str) -> Vec<klang::diagnostics::Diagnostic> {
-    klang::mcp::v2_check_source_with_file(src, FILE)
+    klang::v2check::v2_check_source_with_file(src, FILE)
 }
 
 fn run(src: &str) -> Result<(i32, Vec<String>), klang::diagnostics::Diagnostic> {

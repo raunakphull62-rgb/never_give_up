@@ -433,7 +433,7 @@ struct ExecCtx {
     stubs: HashMap<String, i64>,
     output: Arc<Mutex<Vec<OutputChunk>>>,
     /// Program arguments after the `.klang` file (CLI `run` supplies
-    /// them; tests and MCP pass none). Read by the `args()` builtin.
+    /// them; tests pass none). Read by the `args()` builtin.
     argv: Vec<String>,
 }
 

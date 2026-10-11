@@ -264,7 +264,7 @@ impl Diagnostic {
     /// Whole-program exit request from `exit(code)`: unwinds every
     /// frame and every task group, uncatchable like cancellation
     /// (only `E-CANCELLED` and `E-EXIT` bypass `try/catch`). The CLI
-    /// maps it to the process exit code; other hosts (MCP, tests) see
+    /// maps it to the process exit code; other hosts (library tests) see
     /// the diagnostic.
     pub fn exit_request(code: i32) -> Self {
         Self::error(

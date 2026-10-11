@@ -616,8 +616,11 @@ fn run_file_mode(args: &[String]) {
         _ => ("run", args),
     };
     if cmd == "mcp" {
-        run_mcp_mode();
-        return;
+        // X1: the MCP server was removed. Keep the subcommand name reserved
+        // so `klang mcp` fails with a helpful pointer instead of being
+        // mistaken for a file to run.
+        eprintln!("E-CLI-REMOVED: `klang mcp` was removed; use `klang check --json`, `klang run --sandbox`, or `klang fmt`");
+        std::process::exit(2);
     }
     if cmd == "lsp" {
         run_lsp_mode();
@@ -786,7 +789,7 @@ fn run_file_mode(args: &[String]) {
             // plain check on the file. Recurse once on flag-free args.
             if files.is_empty() {
                 eprintln!(
-                    "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--write]"
+                    "usage: <check|fmt|run|run-v2|build|repair|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--write]"
                 );
                 std::process::exit(2);
             }
@@ -798,7 +801,7 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init|login|logout> <file.klang> [entry] [--backend-jit|--verbose|-v]"
+            "usage: <check|fmt|run|run-v2|build|repair|lsp|publish|add|fetch|install|remove|update|list|init|login|logout> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
         eprintln!("       check [--json] <file.klang> | check --lang v2 [--json] <file.v2> | check-v2 [--json] <file.v2>");
         eprintln!("       run [--sandbox] [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
@@ -1717,7 +1720,7 @@ fn load_with_imports(entry: &str, quiet: bool) -> Result<klang::ast::Program, St
 /// mechanism's observable surface: `--dry-run` prints the exact planned
 /// first prompt (scope + diagnostics JSON) a harness would send, and a
 /// clean file still exits 0. Anything else errors with a pointer to
-/// `klang mcp`, which exposes the same mechanism as tools.
+/// `klang check --json` + `klang repair --dry-run` (X1: MCP removed).
 fn run_repair_mode(path: &str, rest: &[String]) {
     use klang::repair::{RepairCliOverrides, RepairConfig, RepairFileConfig, Scope};
     let flag_val = |names: &[&str]| -> Option<String> {
@@ -1750,7 +1753,7 @@ fn run_repair_mode(path: &str, rest: &[String]) {
         println!("  --scope s       function (default) or file");
         println!("  --dry-run       print the planned first prompt, make no model calls");
         println!("Klang no longer calls a model directly (Phase 4): the repair loop is");
-        println!("driven by your harness via `klang mcp` (klang_check, klang_scope_plan).");
+        println!("driven by your harness via `klang check --json` + `klang repair --dry-run`.");
         return;
     }
     let max_iters = flag_val(&["--max-iters"]).map(|v| {
@@ -1795,49 +1798,13 @@ fn run_repair_mode(path: &str, rest: &[String]) {
         return;
     }
     eprintln!("repair: Klang no longer calls a model directly (Phase 4).");
-    eprintln!("repair: drive the loop from your harness via `klang mcp`, or inspect the planned prompt with `klang repair {path} --dry-run`.");
+    eprintln!("repair: drive the loop from your harness via `klang check --json`, or inspect the planned prompt with `klang repair {path} --dry-run`.");
     std::process::exit(2);
 }
 
-/// `klang mcp`: serve the verification engine as MCP tools on stdio.
-///
-/// One JSON-RPC message per line in, one per line out (responses only;
-/// notifications get silence). Each request is panic-isolated so a
-/// hostile input yields an error, never a dead server. Runs inside the
-/// CLI's deep-stack worker (see `main`), like every other subcommand.
-fn run_mcp_mode() {
-    use std::io::{BufRead, Write};
-    // Programs executed via `klang_run` share this process: reserve stdin
-    // for the JSON-RPC loop so a `read_line()` call sees EOF ("") instead
-    // of stealing protocol bytes off this stream.
-    klang::stdlib::io::reserve_stdin_for_mcp();
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let resp = std::panic::catch_unwind(|| klang::mcp::handle_request(&line))
-            .unwrap_or_else(|_| Some(klang::mcp::internal_error()));
-        if let Some(r) = resp {
-            if writeln!(stdout, "{r}").is_err() {
-                break;
-            }
-            if stdout.flush().is_err() {
-                break;
-            }
-        }
-    }
-}
-
 /// `klang lsp`: stdio JSON-RPC language server (FOUNDATION-3 Part 2C).
-/// Same stdin reservation as `klang mcp`: protocol owns the stream, so a
-/// `read_line()` call in a checked program sees EOF instead of stealing
-/// protocol bytes.
+/// The protocol owns stdin, so a `read_line()` call in a checked program
+/// sees EOF instead of stealing protocol bytes.
 fn run_lsp_mode() {
     klang::stdlib::io::reserve_stdin_for_mcp();
     klang::lsp::serve_stdio();
@@ -2070,11 +2037,11 @@ fn entry_omitted_return(prog: &klang::ast::Program, entry: &str) -> bool {
 }
 
 /// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
-/// shared [`klang::mcp::v2_check_source`] front end and print the same
-/// `Diagnostic::to_json()` objects the MCP tool embeds.
+/// shared [`klang::v2check::v2_check_source`] front end and print the same
+/// `Diagnostic::to_json()` objects.
 /// With `json` (`--json`), prints one `{"diagnostics":[...]}` object
-/// instead of the human `check: ...` lines (X1 CLI equivalent of
-/// `klang_v2_check`).
+/// instead of the human `check: ...` lines (X1 CLI equivalent of the
+/// removed `klang_v2_check` tool).
 fn run_v2_check_mode(path: &str, json: bool) {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
@@ -2082,7 +2049,7 @@ fn run_v2_check_mode(path: &str, json: bool) {
     });
     // Owned for the 'static deep-stack worker.
     let file = path.to_string();
-    match klang::with_deep_stack(move || klang::mcp::v2_check_source_with_file(&src, &file)) {
+    match klang::with_deep_stack(move || klang::v2check::v2_check_source_with_file(&src, &file)) {
         diags if diags.is_empty() => {
             if json {
                 println!("{{\"diagnostics\":[]}}");

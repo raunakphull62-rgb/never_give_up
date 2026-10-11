@@ -5,43 +5,39 @@ called a model, spliced the answer back, and re-checked. That assumed
 Klang needed its own model connection — wrong. You already run a
 harness (Cline, OpenCode, Claude Code, ...) that owns the model,
 provider config, and keys. So Klang stopped dialing out and instead
-exposes the verification mechanism for your harness to call. The
-mechanism is unchanged — check → structured diagnostics → scoped
-splice → re-check — only who calls it changed.
+exposes the verification mechanism as plain CLI commands for your
+harness to call. The mechanism is unchanged — check → structured
+diagnostics → scoped splice → re-check — only who calls it changed.
+(X1: the MCP server was removed; the CLI below replaces it.)
 
 ## The loop, as your harness runs it
 
-1. Send the failing source to `klang_check` (see `klang mcp` below).
-   Back comes `Diagnostic[]` as JSON — empty means clean.
-2. Feed source + diagnostics to `klang_scope_plan`. Back comes the
-   minimal edit scope: named functions, or file scope with the reason.
+1. Run `klang check --json broken.klang`. Back comes one
+   `{"diagnostics":[...]}` object — the exact `Diagnostic::to_json()`
+   objects (empty means clean). Imports are followed and strict mode
+   applies, exactly like plain `klang check`.
+2. Run `klang repair broken.klang --dry-run`. Back comes the minimal
+   edit scope (named functions, or file scope with the reason) plus the
+   planned prompt.
 3. Your model regenerates just that scope; you splice it back and
    re-check. Repeat until clean or the budget is gone.
 
 Every signal in that loop is compiler output, so it is deterministic
 given the same source: no clock, no randomness, no hidden state.
 
-## `klang mcp`: the tools
+## CLI equivalents of the removed MCP tools
 
-One JSON-RPC message per line on stdin, one per line on stdout:
-
-```sh
-cargo run -- mcp
-```
-
-| Tool | Input | Output |
+| Removed tool | Replacement | Notes |
 |---|---|---|
-| `klang_check` | source string | `diagnostics` array — the exact `Diagnostic::to_json()` objects (empty = clean) |
-| `klang_run` | source, optional entry fn | `stdout` + `return_value`, or the check diagnostics first if it fails |
-| `klang_fmt` | source | canonical source, or the parse diagnostic |
-| `klang_scope_plan` | source + diagnostics (exactly as `klang_check` returned them) | `function` scope with names, or `file` scope with the reason |
+| `klang_check` | `klang check --json <file>` | Same checker, imports, strict mode; one JSON object on stdout |
+| `klang_run` | `klang run [--sandbox] <file> [entry]` | Same check-then-run; `--sandbox` limits files to temp + `E-SANDBOX-*` denials |
+| `klang_fmt` | `klang fmt <file>` | Same canonical formatting |
+| `klang_scope_plan` | `klang repair <file> --dry-run` | Prints the scope (`scope: ...`) plus the planned prompt |
+| `klang_v2_check` | `klang check --lang v2 [--json] <file.v2>` | Same v2 checker |
 
-Deliberately absent: any tool that takes a task description and calls
-a model. That is the harness's job, using these tools as its feedback
+Deliberately absent: anything that takes a task description and calls
+a model. That is the harness's job, using the CLI above as its feedback
 signal — the same way it would use any other compiler's diagnostics.
-
-`klang_run` executes with a 30-second bound: a non-terminating program
-yields a timeout error, never a hung server.
 
 ## `klang repair --dry-run`: the prompt inspector
 
@@ -71,9 +67,9 @@ Flags: `--max-iters N` (1–10, default 5) and `--scope
 function|file` shape the planned prompt; `klang.toml [repair]` may
 set the same two keys (`max_iters`, `scope`) — the retired
 `endpoint`/`model`/`api_key`/`timeout` keys are ignored. Anything but
-`--dry-run` on a failing file errors with a pointer to `klang mcp`;
-a clean file exits 0 with `check: OK (0 diagnostics), nothing to
-repair`.
+`--dry-run` on a failing file errors with a pointer to
+`klang check --json`; a clean file exits 0 with
+`check: OK (0 diagnostics), nothing to repair`.
 
 ## The scope model
 

@@ -2,7 +2,7 @@
 //!
 //! Compatibility rule: every constructor returns the existing
 //! [`crate::diagnostics::Diagnostic`] shape with v2 `code`/`rule` values,
-//! so CLI, MCP, and tests consume v2 diagnostics identically to v1 ones.
+//! so CLI and tests consume v2 diagnostics identically to v1 ones.
 //! Later phases add their own constructors here; codes are never reused
 //! for a different rule.
 

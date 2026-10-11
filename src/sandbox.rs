@@ -1,11 +1,10 @@
 //! X1 sandbox mode for `klang run --sandbox`.
 //!
-//! Replaces the MCP-only execution guard (`klang_run` tool + strict file
-//! guard) with a plain CLI flag. In sandbox mode file access is limited
-//! to the system temp directory, and process spawning (`spawn`/`run`/
-//! `run_process`) plus network (`http_get`/`http_post` and async variants)
-//! are denied with clear `E-SANDBOX-*` codes. Plain `klang run` keeps
-//! normal behavior (relaxed relative paths, spawn/network allowed).
+//! In sandbox mode file access is limited to the system temp directory,
+//! and process spawning (`spawn`/`run`/`run_process`) plus network
+//! (`http_get`/`http_post` and async variants) are denied with clear
+//! `E-SANDBOX-*` codes. Plain `klang run` keeps normal behavior
+//! (relaxed relative paths, spawn/network allowed).
 //!
 //! Threads and FFI have no runtime surface in this tree (no `thread_spawn`
 //! / `extern` builtins yet), so there is nothing to deny for those
