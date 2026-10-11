@@ -1,0 +1,11 @@
+// Working directory: cwd() is non-empty; chdir(".") stays put.
+// Returns 1 on success; file guard allows "." under run.
+// Prints bools as 0/1 so output is deterministic.
+fn main() -> i32 {
+    print((len(cwd()) > 0))
+    print((cwd() == ""))
+    print(chdir("."))
+    print((len(cwd()) > 0))
+    print((cwd() != ""))
+    return 0
+}

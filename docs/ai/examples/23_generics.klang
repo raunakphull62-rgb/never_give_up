@@ -1,0 +1,18 @@
+struct Entry<K, V> { key: K, val: V }
+
+fn same<T>(a: T, b: T) -> T {
+    return a
+}
+
+fn first<T>(items: array) -> i32 {
+    return 0
+}
+
+fn main() -> i32 {
+    let e1 = Entry { key: "a", val: 1 }
+    let e2 = Entry { key: 2, val: "b" }
+    print((e1.val + e2.key))
+    print(same(1, 2))
+    print(same("x", "y"))
+    return 0
+}

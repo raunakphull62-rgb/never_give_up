@@ -1,0 +1,10 @@
+// Hashing: real SHA-256 hex (64 chars), HMAC-SHA256.
+// Same input always gives the same digest.
+fn main() -> i32 {
+    print((len(sha256("hello")) == 64))
+    print((len(hmac_sha256("key", "msg")) == 64))
+    print((sha256("hello") == sha256("hello")))
+    print((sha256("a") != sha256("b")))
+    print(sha256(""))
+    return 0
+}

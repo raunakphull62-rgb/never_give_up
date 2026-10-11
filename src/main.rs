@@ -71,14 +71,18 @@ fn main() {
 
 fn real_main() {
     // CLI: `cargo run -- <cmd> <file.klang> [entry]`
-    //   check <file>        parse + type-check, print diagnostics JSON
+    //   check [--json] <file> parse + type-check; human lines by default,
+    //     one `{"diagnostics":[...]}` object with `--json` (X1: CLI
+    //     equivalent of the removed `klang_check` tool, same imports/strict)
     //   fmt <file> [--write] print canonical source (or rewrite in place)
-    //   run <file> [entry]  parse + check + lower + run (default entry `main`)
+    //   run [--sandbox] <file> [entry]  parse + check + lower + run (default
+    //     entry `main`); `--sandbox` limits files to the temp dir and denies
+    //     spawn/run/network with E-SANDBOX-* (X1: replaces MCP execution)
     //   build <file>        parse + check + print MIR listing
     //   repair <file> [--max-iters N] [--scope function|file] [--dry-run]
     //     repair-mechanism inspector: --dry-run prints the planned prompt.
     //     Live model-calling was removed in Phase 4; harnesses drive the
-    //     loop via `klang mcp` (klang_check, klang_scope_plan).
+    //     loop via `klang check --json` + `klang repair --dry-run`.
     // Backcompat: `cargo run -- <file.klang> [entry]` == `run`.
     // No args = full gate demo below.
     let args: Vec<String> = std::env::args().collect();
@@ -612,8 +616,11 @@ fn run_file_mode(args: &[String]) {
         _ => ("run", args),
     };
     if cmd == "mcp" {
-        run_mcp_mode();
-        return;
+        // X1: the MCP server was removed. Keep the subcommand name reserved
+        // so `klang mcp` fails with a helpful pointer instead of being
+        // mistaken for a file to run.
+        eprintln!("E-CLI-REMOVED: `klang mcp` was removed; use `klang check --json`, `klang run --sandbox`, or `klang fmt`");
+        std::process::exit(2);
     }
     if cmd == "lsp" {
         run_lsp_mode();
@@ -678,26 +685,49 @@ fn run_file_mode(args: &[String]) {
     } else {
         rest
     };
+    // X1: `check --json` prints machine JSON `{"diagnostics":[...]}` (the
+    // same `Diagnostic::to_json()` objects the human output prints, wrapped
+    // as one object). Follows imports, respects `--strict`/manifest, and
+    // accepts the file anywhere (`check --json f.klang` == `check f.klang
+    // --json`). Only `check`/`check-v2` accept it; other commands leave it
+    // alone.
+    let (json_flag, rest_json_owned): (bool, Vec<String>) =
+        if cmd == "check" || cmd == "check-v2" {
+            strip_json_flag(rest)
+        } else {
+            (false, rest.to_vec())
+        };
+    let rest: &[String] = if cmd == "check" || cmd == "check-v2" {
+        &rest_json_owned
+    } else {
+        rest
+    };
     // Explicit v2 mode: `check --lang v2 <file>` or `check-v2 <file>`.
     // v1 files never silently use v2 semantics: the mode is always chosen
     // by the caller, never inferred.
     if cmd == "check-v2" {
         if rest.is_empty() {
-            eprintln!("usage: check-v2 <file.v2>");
+            eprintln!("usage: check-v2 [--json] <file.v2>");
             std::process::exit(2);
         }
-        run_v2_check_mode(&rest[0]);
+        run_v2_check_mode(&rest[0], json_flag);
         return;
     }
     if cmd == "run-v2" {
         if rest.is_empty() {
-            eprintln!("usage: run-v2 <file.v2> [entry] [--verbose|-v]");
+            eprintln!("usage: run-v2 [--sandbox] <file.v2> [entry] [--verbose|-v]");
             std::process::exit(2);
         }
         let verbose = has_verbose_flag(rest);
+        // X1: v2 has no sandbox-sensitive surface today; accept and set the
+        // flag anyway so `--sandbox` is never a silent no-op.
+        if has_sandbox_flag(rest) {
+            klang::sandbox::set_sandbox(true);
+            klang::runtime::set_file_guard_relaxed(false);
+        }
         let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
         if positional.is_empty() {
-            eprintln!("usage: run-v2 <file.v2> [entry] [--verbose|-v]");
+            eprintln!("usage: run-v2 [--sandbox] <file.v2> [entry] [--verbose|-v]");
             std::process::exit(2);
         }
         let entry = positional
@@ -736,6 +766,10 @@ fn run_file_mode(args: &[String]) {
                 .copied()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
+            if has_sandbox_flag(rest) {
+                klang::sandbox::set_sandbox(true);
+                klang::runtime::set_file_guard_relaxed(false);
+            }
             run_v2_mode(positional[0], entry, has_verbose_flag(rest));
             return;
         }
@@ -744,10 +778,10 @@ fn run_file_mode(args: &[String]) {
         let (is_v2, files) = split_check_lang(rest);
         if is_v2 {
             if files.is_empty() {
-                eprintln!("usage: check --lang v2 <file.v2>");
+                eprintln!("usage: check --lang v2 [--json] <file.v2>");
                 std::process::exit(2);
             }
-            run_v2_check_mode(&files[0]);
+            run_v2_check_mode(&files[0], json_flag);
             return;
         }
         if files.len() != rest.len() {
@@ -755,7 +789,7 @@ fn run_file_mode(args: &[String]) {
             // plain check on the file. Recurse once on flag-free args.
             if files.is_empty() {
                 eprintln!(
-                    "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--write]"
+                    "usage: <check|fmt|run|run-v2|build|repair|lsp|publish|add|fetch|install|remove|update|list|init> <file.klang> [entry] [--backend-jit|--write]"
                 );
                 std::process::exit(2);
             }
@@ -767,10 +801,10 @@ fn run_file_mode(args: &[String]) {
     }
     if rest.is_empty() {
         eprintln!(
-            "usage: <check|fmt|run|run-v2|build|repair|mcp|lsp|publish|add|fetch|install|remove|update|list|init|login|logout> <file.klang> [entry] [--backend-jit|--verbose|-v]"
+            "usage: <check|fmt|run|run-v2|build|repair|lsp|publish|add|fetch|install|remove|update|list|init|login|logout> <file.klang> [entry] [--backend-jit|--verbose|-v]"
         );
-        eprintln!("       check --lang v2 <file.v2> | check-v2 <file.v2>");
-        eprintln!("       run [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
+        eprintln!("       check [--json] <file.klang> | check --lang v2 [--json] <file.v2> | check-v2 [--json] <file.v2>");
+        eprintln!("       run [--sandbox] [--verbose|-v] [--offline] [--registry URL] <file.klang> [entry]  (default: only program output; exit code is main's return)");
         eprintln!("       publish [--dir PATH] [--registry URL] [--token TOKEN] (least safe; prefer `klang login` or KLANG_REGISTRY_TOKEN)");
         eprintln!("       add <name[@constraint]> [--dev] [--caret] [--registry URL] [--offline] | fetch [--registry URL] [--offline]");
         eprintln!("       install [name[@constraint]] [--registry URL] [--offline] | remove <name> | update [name] | list [--all] | init [name] [--dir PATH]");
@@ -817,7 +851,7 @@ fn run_file_mode(args: &[String]) {
             .map(String::as_str)
             .collect();
         if plain.is_empty() {
-            eprintln!("usage: run [--verbose|-v] <file.klang> [entry]  (default: only program output)");
+            eprintln!("usage: run [--sandbox] [--verbose|-v] <file.klang> [entry]  (default: only program output)");
             std::process::exit(2);
         }
         (
@@ -857,9 +891,9 @@ fn run_file_mode(args: &[String]) {
         let offline = rest.iter().any(|a| a == "--offline");
         ensure_registry_deps(run_path, offline, &reg_cli_base);
     }
-    let prog = match load_with_imports(run_path, !dump) {
+    let prog = match load_with_imports(run_path, json_flag || !dump) {
         Ok(prog) => {
-            if dump {
+            if dump && !(json_flag && cmd == "check") {
                 println!(
                     "parse: OK ({} functions, {} structs, {} enums)",
                     prog.functions.len(),
@@ -873,6 +907,11 @@ fn run_file_mode(args: &[String]) {
             prog
         }
         Err(d) => {
+            if json_flag && cmd == "check" {
+                // `d` is already one `Diagnostic::to_json()` object.
+                println!("{{\"diagnostics\":[{d}]}}");
+                std::process::exit(1);
+            }
             if loud_stdout {
                 println!("parse: FAIL");
                 println!("{d}");
@@ -890,6 +929,10 @@ fn run_file_mode(args: &[String]) {
     let strict = strict_flag.unwrap_or_else(|| project_strict(run_path));
     match TypedHIR::check_with_file_strict(prog.clone(), run_path, strict) {
         Ok(_) => {
+            if json_flag && cmd == "check" {
+                println!("{{\"diagnostics\":[]}}");
+                return;
+            }
             if dump {
                 println!("check: OK (0 diagnostics)");
             }
@@ -901,6 +944,11 @@ fn run_file_mode(args: &[String]) {
             }
         }
         Err(diags) => {
+            if json_flag && cmd == "check" {
+                let items: Vec<String> = diags.iter().map(|d| d.to_json()).collect();
+                println!("{{\"diagnostics\":[{}]}}", items.join(","));
+                std::process::exit(1);
+            }
             if loud_stdout {
                 println!("check: FAIL ({} diagnostics)", diags.len());
                 for d in &diags {
@@ -936,6 +984,13 @@ fn run_file_mode(args: &[String]) {
         eprintln!(
             "warning: --backend-jit is experimental: int-only subset; out-of-subset programs are refused loudly"
         );
+        // X1 sandbox: the JIT has no file/spawn/network surface of its own
+        // (out-of-subset builtins are loudly refused); still set the flags
+        // so `--sandbox --backend-jit` is never a silent bypass.
+        if cmd == "run" && has_sandbox_flag(rest) {
+            klang::sandbox::set_sandbox(true);
+            klang::runtime::set_file_guard_relaxed(false);
+        }
         let omitted = entry_omitted_return(&prog, &run_entry);
         match klang::jit::run_jit_fallible(&mir, &run_entry, &[]) {
             Ok((v, out)) => {
@@ -977,10 +1032,17 @@ fn run_file_mode(args: &[String]) {
         }
         return;
     }
-    // S9 item 6: plain `klang run` allows normal relative paths
-    // (including `..`, resolved against the current directory).
-    // MCP `tool_run` and library callers keep the strict sandbox guard.
-    klang::runtime::set_file_guard_relaxed(true);
+    // X1 sandbox: `klang run --sandbox` limits files to the temp dir
+    // (strict guard + E-SANDBOX-FILE) and denies spawn/run/network with
+    // E-SANDBOX-* (see src/sandbox.rs). Plain `klang run` keeps the S9
+    // relaxed behavior (relative `..` allowed, spawn/network allowed).
+    if cmd == "run" && has_sandbox_flag(rest) {
+        klang::sandbox::set_sandbox(true);
+        klang::runtime::set_file_guard_relaxed(false);
+    } else {
+        klang::sandbox::set_sandbox(false);
+        klang::runtime::set_file_guard_relaxed(true);
+    }
     match klang::runtime::run_with_argv_chunks(&mir, &run_entry, &[], &prog_argv, &HashMap::new()) {
         (Ok(v), out) => {
             emit_program_output(&out, verbose);
@@ -1658,7 +1720,7 @@ fn load_with_imports(entry: &str, quiet: bool) -> Result<klang::ast::Program, St
 /// mechanism's observable surface: `--dry-run` prints the exact planned
 /// first prompt (scope + diagnostics JSON) a harness would send, and a
 /// clean file still exits 0. Anything else errors with a pointer to
-/// `klang mcp`, which exposes the same mechanism as tools.
+/// `klang check --json` + `klang repair --dry-run` (X1: MCP removed).
 fn run_repair_mode(path: &str, rest: &[String]) {
     use klang::repair::{RepairCliOverrides, RepairConfig, RepairFileConfig, Scope};
     let flag_val = |names: &[&str]| -> Option<String> {
@@ -1691,7 +1753,7 @@ fn run_repair_mode(path: &str, rest: &[String]) {
         println!("  --scope s       function (default) or file");
         println!("  --dry-run       print the planned first prompt, make no model calls");
         println!("Klang no longer calls a model directly (Phase 4): the repair loop is");
-        println!("driven by your harness via `klang mcp` (klang_check, klang_scope_plan).");
+        println!("driven by your harness via `klang check --json` + `klang repair --dry-run`.");
         return;
     }
     let max_iters = flag_val(&["--max-iters"]).map(|v| {
@@ -1736,49 +1798,13 @@ fn run_repair_mode(path: &str, rest: &[String]) {
         return;
     }
     eprintln!("repair: Klang no longer calls a model directly (Phase 4).");
-    eprintln!("repair: drive the loop from your harness via `klang mcp`, or inspect the planned prompt with `klang repair {path} --dry-run`.");
+    eprintln!("repair: drive the loop from your harness via `klang check --json`, or inspect the planned prompt with `klang repair {path} --dry-run`.");
     std::process::exit(2);
 }
 
-/// `klang mcp`: serve the verification engine as MCP tools on stdio.
-///
-/// One JSON-RPC message per line in, one per line out (responses only;
-/// notifications get silence). Each request is panic-isolated so a
-/// hostile input yields an error, never a dead server. Runs inside the
-/// CLI's deep-stack worker (see `main`), like every other subcommand.
-fn run_mcp_mode() {
-    use std::io::{BufRead, Write};
-    // Programs executed via `klang_run` share this process: reserve stdin
-    // for the JSON-RPC loop so a `read_line()` call sees EOF ("") instead
-    // of stealing protocol bytes off this stream.
-    klang::stdlib::io::reserve_stdin_for_mcp();
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let resp = std::panic::catch_unwind(|| klang::mcp::handle_request(&line))
-            .unwrap_or_else(|_| Some(klang::mcp::internal_error()));
-        if let Some(r) = resp {
-            if writeln!(stdout, "{r}").is_err() {
-                break;
-            }
-            if stdout.flush().is_err() {
-                break;
-            }
-        }
-    }
-}
-
 /// `klang lsp`: stdio JSON-RPC language server (FOUNDATION-3 Part 2C).
-/// Same stdin reservation as `klang mcp`: protocol owns the stream, so a
-/// `read_line()` call in a checked program sees EOF instead of stealing
-/// protocol bytes.
+/// The protocol owns stdin, so a `read_line()` call in a checked program
+/// sees EOF instead of stealing protocol bytes.
 fn run_lsp_mode() {
     klang::stdlib::io::reserve_stdin_for_mcp();
     klang::lsp::serve_stdio();
@@ -1852,6 +1878,21 @@ fn has_verbose_flag(rest: &[String]) -> bool {
     rest.iter().any(|a| a == "--verbose" || a == "-v")
 }
 
+/// X1: `--sandbox` for `klang run` (and `run-v2`). True when an exact
+/// `--sandbox` appears before a `--` separator (after `--` it is program
+/// argv, e.g. `run prog.klang -- --sandbox` passes it through).
+fn has_sandbox_flag(rest: &[String]) -> bool {
+    for a in rest {
+        if a == "--" {
+            break;
+        }
+        if a == "--sandbox" {
+            return true;
+        }
+    }
+    false
+}
+
 /// D2 strict flag (Wave1 S4): split `--strict[=true|false]` out of the arg
 /// list. Returns the flag value (`--strict` means true; the last
 /// occurrence wins) plus the remaining args. Stripping stops at `--`:
@@ -1889,6 +1930,23 @@ fn strip_strict_flag(rest: &[String]) -> (Option<bool>, Vec<String>) {
         out.push(a.clone());
     }
     (flag, out)
+}
+
+/// X1: split `--json` out of `check` args. Returns `(json, remaining)`.
+/// `check` takes no program argv, so every exact `--json` match is a flag
+/// (before or after the file). Other `--flags` are left untouched for the
+/// existing `--lang`/usage paths.
+fn strip_json_flag(rest: &[String]) -> (bool, Vec<String>) {
+    let mut json = false;
+    let mut out = Vec::with_capacity(rest.len());
+    for a in rest {
+        if a == "--json" {
+            json = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    (json, out)
 }
 
 /// D2 strict via manifest (Wave1 S4): `strict = true` under `[project]` in
@@ -1979,18 +2037,32 @@ fn entry_omitted_return(prog: &klang::ast::Program, entry: &str) -> bool {
 }
 
 /// `klang check-v2 <file>` / `klang check --lang v2 <file>`: run the
-/// shared [`klang::mcp::v2_check_source`] front end and print the same
-/// `Diagnostic::to_json()` objects the MCP tool embeds.
-fn run_v2_check_mode(path: &str) {
+/// shared [`klang::v2check::v2_check_source`] front end and print the same
+/// `Diagnostic::to_json()` objects.
+/// With `json` (`--json`), prints one `{"diagnostics":[...]}` object
+/// instead of the human `check: ...` lines (X1 CLI equivalent of the
+/// removed `klang_v2_check` tool).
+fn run_v2_check_mode(path: &str, json: bool) {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("cannot read {path}: {e}");
         std::process::exit(1);
     });
     // Owned for the 'static deep-stack worker.
     let file = path.to_string();
-    match klang::with_deep_stack(move || klang::mcp::v2_check_source_with_file(&src, &file)) {
-        diags if diags.is_empty() => println!("check: OK (0 diagnostics)"),
+    match klang::with_deep_stack(move || klang::v2check::v2_check_source_with_file(&src, &file)) {
+        diags if diags.is_empty() => {
+            if json {
+                println!("{{\"diagnostics\":[]}}");
+            } else {
+                println!("check: OK (0 diagnostics)");
+            }
+        }
         diags => {
+            if json {
+                let items: Vec<String> = diags.iter().map(|d| d.to_json()).collect();
+                println!("{{\"diagnostics\":[{}]}}", items.join(","));
+                std::process::exit(1);
+            }
             println!("check: FAIL ({} diagnostics)", diags.len());
             for d in &diags {
                 println!("{}", d.to_json());

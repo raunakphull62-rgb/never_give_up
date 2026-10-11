@@ -1,0 +1,14 @@
+fn main() -> i32 {
+    let line = read_line()
+    print((line == ""))
+    print(is_eof())
+    print(parse_int("42"))
+    let n = 0
+    try {
+        n = parse_int(line)
+    } catch e {
+        n = (0 - 1)
+    }
+    print(n)
+    return 0
+}

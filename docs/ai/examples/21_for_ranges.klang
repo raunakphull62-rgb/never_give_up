@@ -1,0 +1,17 @@
+fn main() -> i32 {
+    for i in 0..3 {
+        print(i)
+    }
+    for x in [10, 20] {
+        print(x)
+    }
+    let m = {"a": 1, "b": 2}
+    for k in m {
+        print(k)
+        print(m[k])
+    }
+    for c in "hi" {
+        print(c)
+    }
+    return 0
+}

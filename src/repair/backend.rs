@@ -4,7 +4,8 @@
 //! harness the user already runs (Cline, OpenCode, Claude Code, ...)
 //! owns the model connection, provider config, and API keys; Klang
 //! exposes verification (check / diagnostics / scope planning) for the
-//! harness to call, via `klang mcp` or the library API. What remains
+//! harness to call, via `klang check --json` / `klang repair --dry-run`
+//! (X1: MCP removed) or the library API. What remains
 //! here is the mechanism side of the repair loop: one model call as an
 //! abstract `complete(system, user) -> source text`, backed in-tree
 //! only by the deterministic `MockBackend` used by tests and `--dry-run`

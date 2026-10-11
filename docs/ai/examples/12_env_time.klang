@@ -1,0 +1,12 @@
+// Env and time: missing vars are "" (never null).
+// time_now is float seconds; now_ms is Int millis.
+fn main() -> i32 {
+    print((env("KLANG_NOPE_XYZ") == ""))
+    print((get_env("KLANG_NOPE_XYZ") == ""))
+    set_env("KLANG_DEMO_X", "1")
+    print(get_env("KLANG_DEMO_X"))
+    print((time_now() > 0.0))
+    print((now_ms() > 0))
+    print((now_iso() != ""))
+    return 0
+}

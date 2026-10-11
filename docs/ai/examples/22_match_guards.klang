@@ -1,0 +1,12 @@
+enum Opt { Some(x: i32), None }
+
+fn classify(v: Opt) -> str {
+    return match v { Opt::Some(n) if (n > 10) => "big", Opt::Some(n) => "small", Opt::None => "none" }
+}
+
+fn main() -> i32 {
+    print(classify(Opt::Some(20)))
+    print(classify(Opt::Some(3)))
+    print(classify(Opt::None))
+    return 0
+}

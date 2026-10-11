@@ -1,0 +1,16 @@
+fn main() -> i32 {
+    make_dirs("29_d/a/b")
+    print(is_dir("29_d/a/b"))
+    write_file("29_d/a/b/f.txt", "hi")
+    print(is_file("29_d/a/b/f.txt"))
+    print(file_size("29_d/a/b/f.txt"))
+    print(list_dir("29_d/a/b"))
+    copy_file("29_d/a/b/f.txt", "29_d/a/b/g.txt")
+    print(exists("29_d/a/b/g.txt"))
+    rename_file("29_d/a/b/g.txt", "29_d/a/b/h.txt")
+    print(exists("29_d/a/b/h.txt"))
+    remove_file("29_d/a/b/f.txt")
+    remove_file("29_d/a/b/h.txt")
+    print(exists("29_d/a/b/f.txt"))
+    return 0
+}

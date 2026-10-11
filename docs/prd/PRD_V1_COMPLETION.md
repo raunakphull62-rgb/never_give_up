@@ -35,7 +35,7 @@ Everything in this PRD exists to make those four possible, plus tooling (tests, 
 9. Formatting: `klang fmt --check` must pass on every .klang file you add.
 10. Network in tests: tests may use ONLY loopback (127.0.0.1, port 0 for an OS-chosen free port, never a fixed port). Any test that needs the real internet is skipped unless env KLANG_TEST_NET=1. Tests must be deterministic and must not leave processes or sockets behind.
 11. Long cargo runs exceed the 10-minute shell limit: run with `nohup cargo test --locked > /tmp/<stage>.log 2>&1 &` and poll the log. Use your own CARGO_TARGET_DIR (/tmp/t1 for agent 1, /tmp/t2 for agent 2). Disk is limited: delete finished target dirs.
-12. Security defaults: network, FFI, and spawn are powerful. In sandbox/MCP execution mode (klang_run) they are DENIED by default (see section 2.7). Plain `klang run` from a terminal allows them.
+12. Security defaults: network, FFI, and spawn are powerful. In sandbox execution mode (`klang run --sandbox`) they are DENIED by default (see section 2.7). Plain `klang run` from a terminal allows them.
 13. Ask nothing mid-stage unless a decision cannot be undone. Take the most reasonable reading, state it at the top of docs/progress/<stage>.md, continue.
 14. Final report for each stage: commits (hash and subject), test count (baseline, final, 0 failed), what was built, what could not be built and why, any design deviation from this PRD.
 15. If something this PRD says conflicts with the code, trust the code, and record the mismatch in the report.
@@ -84,7 +84,7 @@ Safe flag model (no async-signal-unsafe user code): `signal_watch(name)` install
 - Runtime errors print a stack trace: function names with file:line:col per frame (top 20 frames, with "... N more" for deep recursion). Keep existing error codes stable and keep the JSON diagnostic shape backward compatible (add a `stack` array).
 
 ### 2.7 Sandbox mode
-There is a file-access guard (absolute /tmp only, no `..`) that S9 limits to sandbox mode. Define sandbox mode precisely: MCP `klang_run`, and `klang run --sandbox`. In sandbox mode the following are DENIED with a clear E-SANDBOX-* code: network, FFI, spawn/run, threads beyond a small cap, file access outside the temp dir. In normal mode all are allowed. Test both modes for each powerful feature (this is a gate for stages A1, A2, A3, A5).
+There is a file-access guard (absolute /tmp only, no `..`) that S9 limits to sandbox mode. Define sandbox mode precisely: `klang run --sandbox` (X1: the MCP server and its `klang_run` tool were removed; sandbox is now CLI-only). In sandbox mode the following are DENIED with a clear E-SANDBOX-* code: network, FFI, spawn/run, threads beyond a small cap, file access outside the temp dir. In normal mode all are allowed. Test both modes for each powerful feature (this is a gate for stages A1, A2, A3, A5).
 
 ### 2.8 Interpreter performance
 Fixed budget gates (on the CI machine class, generous so they do not flake): fib(30) recursive, a 10,000,000-iteration integer loop, building a 1,000,000-character string by appending in a loop, sorting 100,000 integers, 100,000 map inserts and lookups, and parsing a 5 MB JSON document. If any one is more than 5x slower than a plain-Python equivalent run on the same machine, profile and fix hot spots (string append must be amortized O(1)/O(n) total, not O(n^2); array push amortized O(1); map ops O(1) average; function-call overhead). Record before/after timings in docs/progress/B6.md. Do not weaken correctness (checked arithmetic, spans) for speed.

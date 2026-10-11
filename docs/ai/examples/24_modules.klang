@@ -1,0 +1,13 @@
+mod shape {
+    pub enum Kind { Circle(r: i32), Rect(w: i32) }
+    pub fn area(k: Kind) -> i32 {
+        return match k { Kind::Circle(r) => (r * 3), Kind::Rect(w) => (w * 2) }
+    }
+}
+
+
+fn main() -> i32 {
+    print(shape::area(shape::Kind::Circle(10)))
+    print(shape::area(shape::Kind::Rect(5)))
+    return 0
+}

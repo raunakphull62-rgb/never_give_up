@@ -177,14 +177,14 @@ Free functions and methods:
 | `range(a, b)` | 2 | int bounds; returns array |
 | `str(x)` / `int(x)` / `float(x)` | 1 | conversions (`int(4.9)`→4, `float(2)`→2.0). `int`/`float` accept strings too but fail with generic `E-RUNTIME`; prefer `parse_int`/`parse_float` for input |
 | `format(...)` | 0+ | variadic string builder: renders each value like `str()`/`print` (whole floats keep `.0`) and joins with a single space; `format()` is `""`. Any value type is accepted. Works in `run` and `run-v2` (v2 programs cannot hold an `f64` yet — no float literals there — so float args only arise under `run`). Rejected loudly by `--backend-jit` like other `str` builtins |
-| `read_line()` / `parse_int(s)` / `parse_float(s)` | 0 / 1 / 1 | stdin line without the newline (`""` at EOF; CRLF becomes LF-free); strict decimal `i32` (`-` only, digits only) else `E-PARSE-INT`; finite `f64` decimal else `E-PARSE-FLOAT`. Offending text over 40 chars is redacted in the diagnostic. Under `klang mcp`, stdin belongs to the JSON-RPC loop, so `read_line()` always sees EOF. v2 has no stdin builtins (`read_line` is `E-UNDEFINED` there) |
-| `is_eof()` | 0 | true (Bool) when stdin has reached end of input, peeking without consuming (buffers one line for the next `read_line`, which is otherwise unchanged). Distinguishes an empty line (`is_eof()` false) from EOF (`is_eof()` true); under `klang mcp` immediately true. Interpreter-only (JIT loud-rejects, v2 `E-UNDEFINED`) |
+| `read_line()` / `parse_int(s)` / `parse_float(s)` | 0 / 1 / 1 | stdin line without the newline (`""` at EOF; CRLF becomes LF-free); strict decimal `i32` (`-` only, digits only) else `E-PARSE-INT`; finite `f64` decimal else `E-PARSE-FLOAT`. Offending text over 40 chars is redacted in the diagnostic. Under `klang lsp`, stdin belongs to the protocol loop, so `read_line()` always sees EOF. v2 has no stdin builtins (`read_line` is `E-UNDEFINED` there) |
+| `is_eof()` | 0 | true (Bool) when stdin has reached end of input, peeking without consuming (buffers one line for the next `read_line`, which is otherwise unchanged). Distinguishes an empty line (`is_eof()` false) from EOF (`is_eof()` true); under `klang lsp` immediately true. Interpreter-only (JIT loud-rejects, v2 `E-UNDEFINED`) |
 | `print_raw(x)` | 1 | writes `x` (rendered like `print`/`str`) to stdout with no trailing newline and flushes (prompt-safe before a blocking `read_line`); returns 1. Ordered with `print` (both buffered). Interpreter-only (JIT loud-rejects, v2 has no such call) |
 | `chdir(path)` | 1 | changes the process working directory so later `spawn`/`run` children and relative file paths use it; returns 1. Missing target is `E-IO-NOT-FOUND`, permission denied `E-IO-PERMISSION`, other OS refusals `E-IO-FAILED` (never bare `E-RUNTIME`). Interpreter-only (JIT loud-rejects, v2 `E-UNDEFINED`) |
 | `sort_by(array, key_fn)` | 2 | stable ascending sort by key: `key_fn` is a one-argument closure value (`fn(x) -> ...`); each element maps to a key, keys must be all Int or all Str else clear `E-TYPE` (mixed/other key types have no total order). Returns a sorted copy (input never mutated). Interpreter-only (JIT loud-rejects since closures are int-only-incompatible; v2 `E-UNDEFINED`) |
 | `keys(m)` | 1 | map→array of keys |
 | `assert(c)` | 1 | bool/int; failure is `E-RUNTIME` at run |
-| `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND`. File guard (S9 item 6): MCP/agent execution and library calls keep the strict sandbox (absolute only under the temp dir, relative with no `..`, else `E-RUNTIME`); plain `klang run` additionally allows relative paths with `..` resolved against the current directory (so `chdir` + relative reads work) while absolute outside temp stays `E-RUNTIME`. It does not protect against symlinks. |
+| `read_file(p)` / `write_file(p, c)` / `append_file(p, c)` / `exists(p)` / `remove_file(p)` / `env(n)` | 1 / 2 / 2 / 1 / 1 / 1 | file/env IO; missing file is `E-IO-NOT-FOUND`. File guard (S9/X1): `klang run --sandbox` and library calls keep the strict sandbox (absolute only under the temp dir, relative with no `..`; sandbox denials are `E-SANDBOX-FILE`, library strict is `E-RUNTIME`); plain `klang run` additionally allows relative paths with `..` resolved against the current directory (so `chdir` + relative reads work) while absolute outside temp stays rejected. `run --sandbox` also denies spawn/run/network with `E-SANDBOX-*`. It does not protect against symlinks. |
 | `run_process(cmd, args)` | 2 | argv-array spawn, no shell; returns map `stdout`/`stderr`/`exit_code`; non-zero exit is a normal result, missing binary is `E-PROCESS-NOT-FOUND` |
 | `spawn(cmd, args)` | 2 | argv-array spawn, no shell; returns map `status`/`stdout`/`stderr` (`status` is Int exit code, `-1` on signal; non-zero is a normal result, missing binary is `E-PROCESS-NOT-FOUND` catchable via try/catch) |
 | `run(cmd, args)` | 2 | argv-array spawn with stdio inherited; returns Int exit code only (`-1` on signal; missing binary is `E-PROCESS-NOT-FOUND`) |
@@ -635,8 +635,8 @@ the `ownership` API — only `Managed` ships).
 
 Span contract: `start < end`, `end <= file bytes`, `(line, column)
 == line_col(file_text, start)`, and `file_text[start..end]` contains the
-offending token (function/variable/keyword/literal). `klang_check` with
-`file` follows imports and reports each diagnostic in its own file.
+offending token (function/variable/keyword/literal). `klang check --json`
+follows imports and reports each diagnostic in its own file.
 
 ## 11. What is not in the language
 

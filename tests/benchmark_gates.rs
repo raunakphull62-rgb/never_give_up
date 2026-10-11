@@ -8,7 +8,7 @@
 //! (`check_candidate` for syntax/semantics, `run_repair` +
 //! `RepairOutcome::iters_used` for convergence, diagnostic codes for the
 //! "almost-right" category). Live-model convergence is measured inside
-//! harnesses via `klang mcp`; `bench/run_live.sh` (companion) checks the
+//! harnesses via `klang check --json`; `bench/run_live.sh` (companion) checks the
 //! harness signal per task with zero model calls.
 //!
 //! Tiers: simple (single fn, no advanced features), moderate (one

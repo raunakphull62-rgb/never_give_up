@@ -26,8 +26,8 @@
 //!   all other v1 scopes are untouched by this module.
 //!
 //! Transport: LSP `Content-Length` framing over stdin/stdout (byte-exact,
-//! NOT line-delimited like `klang mcp`: bodies may contain newlines).
-//! Hand-rolled JSON via `crate::mcp::{parse_json, Json}` — no tower-lsp,
+//! NOT line-delimited: bodies may contain newlines).
+//! Hand-rolled JSON via `crate::json::{parse_json, Json}` — no tower-lsp,
 //! no tokio (two heavy async deps for a synchronous checker would be
 //! absurd; stated cost avoided).
 //!
@@ -43,7 +43,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::diagnostics::Diagnostic;
-use crate::mcp::{parse_json, Json};
+use crate::json::{parse_json, Json};
 
 /// Debounce window: after a change notification, wait this long for
 /// quiet before re-checking (whole-file re-check per settled change).

@@ -15,7 +15,7 @@ not invented syntax.
 - [OS interop](os-interop.md) — files, processes, regex, env, time,
   and HTTP with runnable examples.
 - [`klang repair` guide](repair.md) — the repair loop harnesses drive:
-  `klang mcp` tools, `--dry-run` prompt inspector, scope model.
+  `klang check --json`, `klang run --sandbox`, `--dry-run` prompt inspector, scope model.
 - [Known limitations](limitations.md) — what Klang does not do yet,
   pulled from the audit's triaged findings.
 

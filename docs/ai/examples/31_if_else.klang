@@ -1,0 +1,18 @@
+fn sign(n: i32) -> str {
+    if (n > 0) {
+        return "pos"
+    } else if (n < 0) {
+        return "neg"
+    } else {
+        return "zero"
+    }
+}
+
+fn main() -> i32 {
+    print(sign(5))
+    print(sign((0 - 3)))
+    print(sign(0))
+    print(((1 < 2) && (2 < 3)))
+    print(((0 == 1) || (1 == 1)))
+    return 0
+}

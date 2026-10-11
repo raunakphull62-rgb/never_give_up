@@ -2,8 +2,8 @@
 //!
 //! Phase 4 correction: Klang no longer calls a model. The harness the
 //! user already runs owns the model connection; what lives here is the
-//! verification mechanism the harness drives — via `klang mcp`
-//! (`klang_check`, `klang_scope_plan`, ...) or the library API — plus
+//! verification mechanism the harness drives — via `klang check --json`
+//! + `klang repair --dry-run` (X1: MCP removed) or the library API — plus
 //! the `klang repair --dry-run` prompt planner that shows exactly what
 //! signal a harness would get.
 //!

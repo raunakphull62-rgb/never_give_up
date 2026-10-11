@@ -1,0 +1,12 @@
+fn main() -> i32 {
+    let nums = [3, 1, 2]
+    print(sort(nums))
+    print(nums)
+    let words = ["pear", "fig", "apple"]
+    let bylen = fn(s: str) -> i32 {
+    return len(s)
+}
+    print(sort_by(words, bylen))
+    print(words)
+    return 0
+}

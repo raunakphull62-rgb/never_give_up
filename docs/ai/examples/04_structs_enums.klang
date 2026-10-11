@@ -1,0 +1,15 @@
+struct Point { x: i32, y: i32 }
+enum Shape { Circle(r: i32), Rect(w: i32), Point }
+
+fn area(s: Shape) -> i32 {
+    return match s { Shape::Circle(r) => (r * 3), Shape::Rect(w) => (w * 2), Shape::Point => 0 }
+}
+
+fn main() -> i32 {
+    let p = Point { x: 3, y: 4 }
+    print((p.x + p.y))
+    p.y = 10
+    print(p.y)
+    print((area(Shape::Circle(10)) + area(Shape::Rect(5))))
+    return 0
+}

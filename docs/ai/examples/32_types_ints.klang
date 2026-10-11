@@ -1,0 +1,23 @@
+fn take_u8(x: u8) -> i32 {
+    return x
+}
+
+fn take_u32(x: u32) -> u32 {
+    return x
+}
+
+fn take_i64(x: i64) -> i32 {
+    return 1
+}
+
+fn main() -> i32 {
+    print(take_u8(255))
+    print(take_u32(4000000000))
+    print(take_i64(9223372036854775807))
+    print((7 / 2))
+    print((7.0 / 2.0))
+    print((7 % 3))
+    print(len("é"))
+    print("héllo"[1])
+    return 0
+}

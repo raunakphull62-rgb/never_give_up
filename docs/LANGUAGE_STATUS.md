@@ -86,11 +86,11 @@ a record of what Phase 0 found. Staged detail lives in
   per line, parenthesized operators, comments preserved) and
   `klang lsp` serves diagnostics-as-you-type over stdio
   (`tests/s3_gates.rs`).
-- Spans and `klang_check` (S2): check-time diagnostics carry the
+- Spans and `klang check` (S2): check-time diagnostics carry the
   defining file, byte `start`/`end`, and 1-based `line`/`column`
   (`line 0, column 0` is the explicit no-location form);
-  `klang_check` with `file` follows imports and reports per-file
-  diagnostics (`tests/s2_span_gates.rs`, `tests/s2_mcp_gates.rs`).
+  `klang check` (and `--json`) follows imports and reports per-file
+  diagnostics (`tests/s2_span_gates.rs`).
 - Item 6 (S5, D6): the int-only JIT is now exact on its subset —
   checked arithmetic, div/mod-by-zero and `MIN/-1` (`E-RUNTIME` /
   `E-OVERFLOW`), the 1024-frame depth guard, and D3 narrow boundaries

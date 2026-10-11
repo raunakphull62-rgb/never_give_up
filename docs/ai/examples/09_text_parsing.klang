@@ -1,0 +1,13 @@
+fn main() -> i32 {
+    let line = "amy,30,bo"
+    let parts = line.split(",")
+    print(len(parts))
+    print(parts[0])
+    print(parse_int(parts[1]))
+    let total = 0
+    for p in parts {
+        total = (total + len(p))
+    }
+    print(total)
+    return 0
+}

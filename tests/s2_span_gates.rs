@@ -74,10 +74,10 @@ fn s2_import_unresolved_has_real_span() {
     let j = e.to_json();
     assert!(j.contains("\"line\""), "{j}");
     // Rehydrate to Diagnostic to reuse the span assertions.
-    let v = klang::mcp::parse_json(&j).expect("json");
+    let v = klang::json::parse_json(&j).expect("json");
     let file = v.get("primary_span").and_then(|s| s.get("file")).and_then(|f| f.as_str()).unwrap();
     assert_eq!(file, path.as_str());
-    // Direct field assertions (no MCP round-trip needed).
+    // Direct field assertions (no server round-trip needed).
     assert_ne!((e.start, e.end), (0, 0), "{j}");
     let text = std::fs::read_to_string(&path).unwrap();
     let (el, ec) = klang::diagnostics::line_col_for(&text, e.start);

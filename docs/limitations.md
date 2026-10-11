@@ -31,8 +31,8 @@ fn main() -> i32 {
 ## F7 — most diagnostics carry `0,0` spans (fixed in Wave 1 S2)
 
 Spans are real: check-time diagnostics (parse, import, type,
-strict, match, duplicate, D3 boundaries via MIR files, and MCP
-`klang_check` with `file`) carry the defining file, byte offsets, and
+strict, match, duplicate, D3 boundaries via MIR files, and
+`klang check --json` with imports) carry the defining file, byte offsets, and
 1-based line/column verified against the file text. Explicit
 no-location (`line 0, column 0`) remains for: in-memory checks without a
 real path, a missing command-line file, most runtime failures where the
@@ -99,10 +99,11 @@ and entry arity above 4 — is refused loudly at compile time.
 - `slice(x, a, b)` with an `unknown` static type returns `Unknown`
   (array at runtime stays array, strings stay strings), so
   `spawn(cmd, slice(toks, 1, len(toks)))` checks clean (FINDINGS B1).
-- File guard is strict for MCP/agent execution and library calls
-  (absolute only under the temp dir, relative with no `..`); plain
+- File guard is strict for `klang run --sandbox` and library calls
+  (absolute only under the temp dir, relative with no `..`; sandbox
+  denials are `E-SANDBOX-FILE`); plain
   `klang run` additionally allows relative `..` resolved against the
-  current directory. Absolute outside temp stays `E-RUNTIME` in both.
+  current directory. Absolute outside temp stays rejected in both.
 
 ## `run` exit codes wrap at 8 bits (Linux)
 

@@ -1,0 +1,16 @@
+fn add_i32(a: i32, b: i32) -> i32 {
+    return (a + b)
+}
+
+fn main() -> i32 {
+    print(add_i32(100, 23))
+    let hit = 0
+    try {
+        print((9223372036854775807 + 1))
+    } catch e {
+        print(e["code"])
+        hit = 1
+    }
+    print(hit)
+    return 0
+}

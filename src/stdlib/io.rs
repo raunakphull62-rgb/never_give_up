@@ -28,9 +28,10 @@ use crate::diagnostics::Diagnostic;
 /// hostile multi-megabyte line never lands verbatim in a diagnostic.
 pub const MAX_SHOWN_INPUT_CHARS: usize = 40;
 
-/// Set while the MCP server owns process stdin (`main::run_mcp_mode`).
-/// Programs executed via `mcp::tool_run` then see EOF (`""`) instead of
-/// stealing JSON-RPC bytes off the server's stdin stream.
+/// Set while a protocol server (LSP) owns process stdin.
+/// Programs executed under it then see EOF (`""`) instead of
+/// stealing protocol bytes off the server's stdin stream.
+/// (X1: name retains `_for_mcp` for compat; the MCP server is gone.)
 static MCP_OWNS_STDIN: AtomicBool = AtomicBool::new(false);
 
 /// Serializes whole-line reads so concurrent spawned tasks each receive
@@ -48,14 +49,14 @@ struct PeekState {
 
 static STDIN_PEEK: Mutex<PeekState> = Mutex::new(PeekState { line: None, eof: false });
 
-/// Mark process stdin as owned by the MCP server. After this call,
+/// Mark process stdin as owned by the protocol server. After this call,
 /// [`read_line`] returns `""` without touching stdin.
 pub fn reserve_stdin_for_mcp() {
     MCP_OWNS_STDIN.store(true, Ordering::SeqCst);
 }
 
 /// True when [`reserve_stdin_for_mcp`] has been called (test hook for the
-/// MCP-protection guarantee).
+/// protocol-protection guarantee).
 pub fn stdin_reserved_for_mcp() -> bool {
     MCP_OWNS_STDIN.load(Ordering::SeqCst)
 }
@@ -110,7 +111,7 @@ fn parse_float_err(text: &str) -> Diagnostic {
 
 /// Read one line from process stdin, without the trailing newline.
 /// Returns `""` at EOF (indistinguishable from an empty line, by design).
-/// When stdin is reserved for the MCP server, returns `""` immediately.
+/// When stdin is reserved for the protocol server, returns `""` immediately.
 ///
 /// A line previously peeked by [`is_eof`] is returned first (the peek
 /// buffers exactly one line, so `is_eof` never consumes input).
@@ -150,7 +151,7 @@ pub fn read_line() -> String {
 /// Buffers at most one line: when not at EOF the next line is read from
 /// the OS (blocking like [`read_line`] on a TTY) and held for the next
 /// [`read_line`] call, which returns it unchanged. When stdin is reserved
-/// for the MCP server this is immediately true (reads there see EOF).
+/// for the protocol server this is immediately true (reads there see EOF).
 /// `read_line()` behavior is otherwise unchanged.
 ///
 /// This distinguishes an empty line (`is_eof()` false, `read_line()`
