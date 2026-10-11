@@ -1,3 +1,5 @@
+> merged into shared docs in S8.
+
 # S6 notes — process, time and environment builtins (Wave1 S6)
 
 ## Exact shape
