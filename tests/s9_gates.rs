@@ -1,8 +1,9 @@
 //! S9 gaps from docs/FINDINGS.md — gates for the six items.
 //!
 //! Each item has at least three tests. Library execution uses
-//! `run_with_output` (strict file guard); CLI execution spawns the real
-//! binary (relaxed relative paths, real stdin/stdout bytes).
+//! `run_with_output` (F1 plain mode: all paths allowed, OS errors are
+//! `E-IO-*`); CLI execution spawns the real binary (plain `run` allows
+//! all paths; `--sandbox` keeps the strict temp-dir-only guard).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -467,22 +468,25 @@ fn s9_slice_spawn_with_dynamic_toks() {
     assert!(out.contains(&"0".to_string()), "{out:?}");
 }
 
-// ---- item 6: file guard (strict library, relaxed `klang run` relatives) ----
+// ---- item 6: file guard (F1: plain allows all, sandbox strict) ----
 
 #[test]
 fn s9_guard_library_rejects_parent_relative() {
+    // F1: plain mode (library, non-sandbox) allows `..`; a missing target
+    // is E-IO-NOT-FOUND, not E-RUNTIME. Sandbox still denies (see f1_gates).
     klang::runtime::set_file_guard_relaxed(false);
     let src = "fn main() -> i32 { print(read_file(\"../evil\")) return 0 }";
     let prog = check_ok(src);
     let mir = klang::mir::lower(&prog);
     let err =
         klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new()).expect_err("must fail");
-    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
-    assert!(err.message.contains("unsafe path"), "got: {}", err.to_json());
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
 
 #[test]
 fn s9_guard_library_rejects_absolute_outside_tmp() {
+    // F1: plain mode allows absolute paths outside tmp; missing file is
+    // E-IO-NOT-FOUND. Sandbox still denies with E-SANDBOX-FILE.
     klang::runtime::set_file_guard_relaxed(false);
     let src =
         "fn main() -> i32 { print(read_file(\"/no/such/klang-file-xyz-outside-tmp\")) return 0 }";
@@ -490,7 +494,7 @@ fn s9_guard_library_rejects_absolute_outside_tmp() {
     let mir = klang::mir::lower(&prog);
     let err =
         klang::runtime::run_with_output(&mir, "main", &[], &HashMap::new()).expect_err("must fail");
-    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
 
 #[test]
@@ -510,6 +514,8 @@ fn s9_guard_cli_allows_relative_dotdot() {
 
 #[test]
 fn s9_guard_cli_absolute_outside_tmp_still_rejected() {
+    // F1: plain `klang run` allows absolute paths outside tmp; a missing
+    // file is E-IO-NOT-FOUND (not E-RUNTIME). Sandbox still denies.
     let base = tmp_base("guard-abs");
     let prog = write_tmp_prog(
         &base,
@@ -518,7 +524,6 @@ fn s9_guard_cli_absolute_outside_tmp_still_rejected() {
     );
     let (out, err, code) = run_cli(&["run", &prog], "");
     assert_eq!(code, 1, "stdout:\n{out}\nstderr:\n{err}");
-    assert!(err.contains("E-RUNTIME"), "stderr:\n{err}");
-    assert!(err.contains("unsafe absolute path"), "stderr:\n{err}");
+    assert!(err.contains("E-IO-NOT-FOUND"), "stderr:\n{err}");
     let _ = std::fs::remove_dir_all(&base);
 }

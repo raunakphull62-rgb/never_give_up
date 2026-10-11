@@ -1,9 +1,10 @@
 //! SECAUDIT-1 — file-path sandbox adversarial gates.
 //!
-//! The `reject_unsafe_path` guard (all five file builtins) is probed
-//! with new cases actually run, not re-read: `..` escapes, embedded
-//! NUL bytes (via `\u0000`), and symlink behavior. The symlink
-//! read-through is the F14-documented residual (canonicalization
+//! F1: plain mode allows every path (OS errors are `E-IO-*`); only
+//! `klang run --sandbox` keeps the strict guard (`E-SANDBOX-FILE`).
+//! The `..` escapes below run in plain library mode, so a missing target
+//! is `E-IO-NOT-FOUND`. Embedded NUL bytes stay a loud `E-IO-FAILED`.
+//! Symlink read-through is the F14-documented residual (canonicalization
 //! would break legitimately symlinked temp dirs, e.g. macOS
 //! `/tmp → /private/tmp`): pinned here deliberately so any future
 //! change shows as an intentional diff, not a silent drift.
@@ -31,16 +32,16 @@ fn tmp_path(name: &str) -> String {
 
 #[test]
 fn sandbox_parent_escape_rejected() {
-    // Any `..` component rejects before touching the filesystem,
-    // regardless of whether the target exists.
+    // F1: plain mode allows `..` (OS decides). These targets do not exist,
+    // so the result is E-IO-NOT-FOUND. Sandbox denial is E-SANDBOX-FILE
+    // (see f1_gates / x1_sandbox_gates).
     let src = "fn main() -> i32 { print(read_file(\"../../../etc/passwd\")) return 0 }";
     let err = run_src(src, "main").expect_err("escape must fail");
-    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
-    assert!(err.message.contains("unsafe path"), "got: {}", err.to_json());
-    // A buried `..` (not just a leading one) rejects identically.
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
+    // A buried `..` (not just a leading one) behaves identically.
     let src = "fn main() -> i32 { print(read_file(\"sub/../../etc/passwd\")) return 0 }";
     let err = run_src(src, "main").expect_err("escape must fail");
-    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
 
 #[test]

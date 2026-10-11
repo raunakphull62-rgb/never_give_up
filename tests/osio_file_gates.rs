@@ -3,8 +3,9 @@
 //! Covers `read_file` / `write_file` / `append_file` / `exists` per the
 //! PRD: read-present, read-missing (`E-IO-NOT-FOUND`), write-then-read
 //! roundtrip, double-append landing, `exists` true/false, plus the
-//! `E-IO-*` code specificity and the unchanged unsafe-path guard
-//! (`E-RUNTIME`, distinct from I/O failures).
+//! `E-IO-*` code specificity and plain-mode file access (F1: ALL
+//! relative and absolute paths allowed, OS errors map to `E-IO-*`; only
+//! `klang run --sandbox` keeps the temp-dir-only `E-SANDBOX-FILE` guard).
 
 use std::collections::HashMap;
 
@@ -139,14 +140,13 @@ fn osio_file_error_codes_are_specific() {
 
 #[test]
 fn osio_file_unsafe_absolute_path_stays_runtime_error() {
-    // The capability guard (`reject_unsafe_path`) is distinct from I/O
-    // failures: absolute paths outside the temp dir are E-RUNTIME, not
-    // E-IO-*. This pins the guard so the E-IO-* change cannot silently
-    // widen filesystem access.
+    // F1: plain mode allows ALL absolute paths; a missing file outside
+    // the temp dir is E-IO-NOT-FOUND (not E-RUNTIME). Only
+    // `klang run --sandbox` denies with E-SANDBOX-FILE (see f1_gates).
     let src =
         "fn main() -> i32 { print(read_file(\"/no/such/klang-file-xyz-outside-tmp\")) return 0 }";
     let err = run_src(src, "main").expect_err("must fail");
-    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
 
 #[test]
@@ -188,10 +188,10 @@ fn osio_file_remove_missing_is_not_found() {
 
 #[test]
 fn osio_file_remove_unsafe_absolute_path_stays_runtime_error() {
-    // Same capability guard as reads/writes (`reject_unsafe_path`):
-    // absolute paths outside the temp dir are E-RUNTIME, not E-IO-*.
+    // F1: same as reads — plain mode allows the path, missing file is
+    // E-IO-NOT-FOUND. Sandbox denial is E-SANDBOX-FILE (see f1_gates).
     let src =
         "fn main() -> i32 { remove_file(\"/no/such/klang-file-xyz-outside-tmp\") return 0 }";
     let err = run_src(src, "main").expect_err("must fail");
-    assert_eq!(err.code, "E-RUNTIME", "got: {}", err.to_json());
+    assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }

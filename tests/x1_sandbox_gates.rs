@@ -1,12 +1,12 @@
 //! X1 Step 2 — `klang run --sandbox` gates (both modes).
 //!
-//! Sandbox mode (CLI `--sandbox` or `klang::sandbox::set_sandbox(true)`
-//! + strict file guard) limits files to the temp dir (`E-SANDBOX-FILE`)
-//! and denies process spawn/run (`E-SANDBOX-SPAWN`) and network
-//! (`E-SANDBOX-NETWORK`). Plain `klang run` keeps normal behavior
-//! (relative `..` allowed, spawn/network attempted). Threads and FFI
-//! have no runtime surface in this tree, so there is nothing to deny
-//! for those categories (reserved codes documented in `src/sandbox.rs`).
+//! Sandbox mode (CLI `--sandbox` or `klang::sandbox::set_sandbox(true)`)
+//! limits files to the temp dir (`E-SANDBOX-FILE`) and denies process
+//! spawn/run (`E-SANDBOX-SPAWN`) and network (`E-SANDBOX-NETWORK`).
+//! Plain mode (`klang run` without `--sandbox`, library callers) allows
+//! ALL paths with `E-IO-*` errors. Threads and FFI have no runtime
+//! surface in this tree, so there is nothing to deny for those categories
+//! (reserved codes documented in `src/sandbox.rs`).
 //!
 //! Library tests serialize on a mutex because the sandbox/file-guard
 //! flags are process-global; CLI tests spawn the real binary and are
@@ -127,10 +127,11 @@ fn x1_sandbox_file_absolute_outside_tmp_rejected_with_sandbox_code() {
 
 #[test]
 fn x1_nonsandbox_strict_file_keeps_runtime_code() {
-    // Plain library strict (no sandbox) preserves the pinned E-RUNTIME.
+    // F1: plain library mode (no sandbox) allows `..`; a missing target
+    // is E-IO-NOT-FOUND, never a sandbox code.
     let src = "fn main() -> i32 { print(read_file(\"../evil\")) return 0 }";
-    let err = run_with_flags(src, false, false).expect_err("strict must deny ..");
-    assert!(err.starts_with("E-RUNTIME"), "got: {err}");
+    let err = run_with_flags(src, false, false).expect_err("plain allows .., missing is IO");
+    assert!(err.starts_with("E-IO-NOT-FOUND"), "got: {err}");
     assert!(!err.starts_with("E-SANDBOX"), "must not be sandbox code: {err}");
 }
 

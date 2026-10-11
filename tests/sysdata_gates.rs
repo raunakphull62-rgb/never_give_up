@@ -5,9 +5,8 @@
 //! `file_size`, `ord`, `chr`, `slice`, `sort`: happy paths, failure
 //! codes (`E-EXIT` uncatchable, `E-ENV-INVALID`, `E-CHAR-INVALID`,
 //! `E-IO-*`, `E-TYPE` on mixed sorts), and builtin arity/type checking.
-//! File tests use real temp-dir paths (inside `temp_dir()` so the
-//! unsafe-path guard does not fire); guard behavior itself is pinned by
-//! `osio_file_gates`.
+//! File tests use real temp-dir paths; F1 plain mode allows all paths
+//! (OS errors are `E-IO-*`); only `--sandbox` denies (see f1_gates).
 
 use std::collections::HashMap;
 
@@ -181,10 +180,10 @@ fn sysdata_dir_error_codes() {
     )
     .expect_err("must fail");
     assert_eq!(err.code, "E-IO-FAILED", "got: {}", err.to_json());
-    // Unsafe paths stay E-RUNTIME (capability guard, not I/O).
+    // `../evil` in plain mode is allowed; missing dir is E-IO-NOT-FOUND.
     let err = run_src("fn main() -> i32 { print(list_dir(\"../evil\")) return 0 }", "main")
         .expect_err("must fail");
-    assert_eq!(err.code, "E-RUNTIME");
+    assert_eq!(err.code, "E-IO-NOT-FOUND");
 }
 
 // ---- ord / chr ----
