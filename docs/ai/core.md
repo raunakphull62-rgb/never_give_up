@@ -1,10 +1,11 @@
 # Klang for AI — core guide
 
 Example-first. Every snippet was executed with the real compiler.
-Run `klang check <file>` (JSON diagnostics on stdout, always — there is
-no `--json` flag) and `klang run <file>` (only program output on stdout,
-diagnostics on stderr). There is no `--sandbox` flag: plain `klang run`
-relaxes relative `..` paths automatically; library/MCP callers stay strict.
+Run `klang check <file>` (human lines plus JSON diagnostics) or
+`klang check --json <file>` (one `{"diagnostics":[...]}` object, X1) and
+`klang run <file>` (only program output on stdout, diagnostics on stderr).
+There is no `--sandbox` flag: plain `klang run` relaxes relative `..`
+paths automatically; library callers stay strict.
 `klang fmt --check <file>` reports canonical form. No MCP server exists.
 
 ## Toolchain
@@ -39,7 +40,7 @@ fn main() -> i32 {
 42
 ```
 
-Rules: `klang check <file>` prints `check: OK` or `check: FAIL` plus JSON; `klang run <file>` prints program output only, exit code is return value.
+Rules: `klang check <file>` prints `check: OK` or `check: FAIL` plus JSON lines; `klang check --json <file>` prints one `{"diagnostics":[...]}` object; `klang run <file>` prints program output only, exit code is return value.
 
 ## Variables and assignment
 

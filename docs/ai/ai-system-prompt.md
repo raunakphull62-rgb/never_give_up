@@ -34,8 +34,8 @@ line; env missing→`""`; struct args pass-by-value; exit codes wrap 8-bit.
 5. `spawn("echo", ["hi"])["stdout"]`, check `["status"]`.
 6. `format(a, b)` for joins, `sprintf("{}..", [...])` for templates.
 
-Workflow: write file, run `klang check <file>` (JSON diagnostics always,
-no `--json` flag — do not pass `--json`), fix first diagnostic by its
-`code` (see `docs/ai/errors.md`), then `klang run <file>` (stdout only).
+Workflow: write file, run `klang check --json <file>` (one
+`{"diagnostics":[...]}` object), fix first diagnostic by its `code` (see
+`docs/ai/errors.md`), then `klang run <file>` (stdout only).
 Keep `klang fmt --check` clean. Never use `--sandbox` (no such flag;
 `run` relaxes `..` automatically). No MCP server exists.
