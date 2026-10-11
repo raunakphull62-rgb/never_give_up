@@ -25,6 +25,9 @@ first. All others fail loudly with the recorded code + message.
 | S15 | `return 256` expecting exit 256 | wraps 8-bit to 0 (`-1` to 255) | keep codes 0..125 |
 | S16 | `format("a", 1)` expecting Python format | joins with spaces (`"a 1"`) | use `sprintf("{}..", [...])` for templates |
 | S17 | `run("ls -l", [])` expecting shell | argv-only, no shell/glob/pipe | pass `("ls", ["-l"])`, no metachars |
+| S18 | `len(s)` as char count for `slice`/`s[i]` | `len("é")` is `2` bytes but `slice("é", 0, 1)` is 1 char; `slice(s, 0, len(s))` OOB for non-ASCII | use `len(s.chars())` for char counts |
+| S19 | `==` on arrays/structs/maps expecting JS reference or Python order-insensitive | value equality; maps order-sensitive (`{"x":1,"y":2}=={"y":2,"x":1}` is `0`, Python `True`) | compare explicitly, do not rely on order |
+| S20 | `if ""`/`if []` expecting Python falsy | literal empty is loud `E-TYPE`; same value via `unknown` (`m["k"]`) runs silent falsy | use `== ""` / `len() == 0` explicitly |
 
 Details with verified runs follow; then the loud (caught) pitfalls.
 
@@ -491,6 +494,118 @@ fn main() -> i32 {
 0
 hi
 
+```
+
+### S18 `len()` is bytes, `s[i]`/`slice()` are chars
+
+Wrong (silent `2` vs 1 char; `slice(s, 0, len(s))` is OOB for non-ASCII):
+
+```klang silent
+fn main() -> i32 {
+    print(len("é"))
+    print(slice("é", 0, 1))
+    return 0
+}
+```
+
+Correct (char counts via `chars()`):
+
+```klang run
+fn main() -> i32 {
+    print(len("héllo"))
+    print(len("héllo".chars()))
+    print(slice("héllo", 1, 3))
+    print("héllo"[1])
+    return 0
+}
+```
+
+```output
+6
+5
+él
+é
+```
+
+### S19 `==` on arrays/structs/maps is value equality, maps order-sensitive
+
+Wrong (silent `1`/`0`; JS would be reference-false, Python map order-insensitive true):
+
+```klang silent
+fn main() -> i32 {
+    print([1, 2] == [1, 2])
+    print([1, 2] == [1, 3])
+    return 0
+}
+```
+
+Correct (same-struct value equality; map order matters):
+
+```klang run
+struct P {
+    x: i32
+}
+
+fn main() -> i32 {
+    let a = P {
+        x: 1
+    }
+    let b = P {
+        x: 1
+    }
+    print(a == b)
+    let m1 = {"x": 1, "y": 2}
+    let m2 = {"y": 2, "x": 1}
+    print(m1 == m2)
+    return 0
+}
+```
+
+```output
+1
+0
+```
+
+### S20 truthiness: literal empty is loud, dynamic empty is silent falsy
+
+Wrong (silent `0`/`1` via `unknown`; `if ""` literally is `E-TYPE`):
+
+```klang silent
+fn main() -> i32 {
+    let m = {"s": "", "a": [1]}
+    let s = m["s"]
+    if s {
+        print(1)
+    } else {
+        print(0)
+    }
+    let v = m["a"]
+    if v {
+        print(1)
+    } else {
+        print(0)
+    }
+    return 0
+}
+```
+
+Correct (explicit comparisons):
+
+```klang run
+fn main() -> i32 {
+    if len("") == 0 {
+        print(1)
+    }
+    print(!0)
+    print(!5)
+    return 0
+}
+```
+
+```output
+1
+1
+0
 ```
 
 ## Loud pitfalls (caught with a diagnostic)
