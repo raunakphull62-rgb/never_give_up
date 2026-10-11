@@ -41,5 +41,5 @@ Workflow: write file, run `klang check --json <file>` (one
 `docs/ai/errors.md`), re-check until clean, then `klang run [--sandbox] <file>`
 (stdout only). Use `--sandbox` to limit files to temp dir (`E-SANDBOX-FILE`)
 and deny spawn/network (`E-SANDBOX-SPAWN`/`E-SANDBOX-NETWORK`); plain `run`
-allows relative `..` and spawn/network. Keep `klang fmt --check` clean.
+allows all paths (OS errors are `E-IO-*`) and spawn/network. Keep `klang fmt --check` clean.
 `klang mcp` was removed; use the CLI above.

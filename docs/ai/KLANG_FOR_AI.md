@@ -9,8 +9,8 @@ Run `klang check <file>` (human lines plus JSON diagnostics) or
 `klang run [--sandbox] <file>` (only program output on stdout, diagnostics on stderr).
 `klang run --sandbox` limits files to the temp dir (`E-SANDBOX-FILE`) and denies
 spawn/run (`E-SANDBOX-SPAWN`) and network (`E-SANDBOX-NETWORK`); plain `klang run`
-allows relative `..` and spawn/network, but absolute paths outside the temp dir
-stay rejected (`E-RUNTIME`). `klang fmt --check <file>` / `--write` reports/rewrites
+allows all relative and absolute paths (OS permissions only, `E-IO-*` on failure)
+and spawn/network. `klang fmt --check <file>` / `--write` reports/rewrites
 canonical form. `klang mcp` was removed (`E-CLI-REMOVED`); use the CLI above.
 Loop: write file, run `klang check --json`, fix first diagnostic by its `code`
 (see errors.md), re-check until clean, then `klang run`. Keep `fmt --check` clean.
@@ -1077,7 +1077,7 @@ fn main() -> i32 {
 hi
 ```
 
-Rules: file guard is strict for `klang run --sandbox` and library calls (absolute only under temp dir, relative with no `..`; sandbox denials are `E-SANDBOX-FILE`, library strict is `E-RUNTIME`); plain `klang run` additionally allows relative `..` resolved against CWD (so `chdir` + relative reads work) while absolute outside temp stays rejected (`E-RUNTIME`). Temp-dir files work in both modes. `run --sandbox` also denies `spawn`/`run`/`run_process` (`E-SANDBOX-SPAWN`) and `http_*` (`E-SANDBOX-NETWORK`); `task_group`/`spawn f()` (structured concurrency) still runs under sandbox. Missing file is `E-IO-NOT-FOUND`. `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
+Rules: only `klang run --sandbox` limits files (absolute only under temp dir, relative with no `..`; denials are `E-SANDBOX-FILE`). Plain `klang run` allows all relative and absolute paths resolved against CWD (so `chdir` + relative reads work), with OS failures as `E-IO-*`. Temp-dir files work in both modes. `run --sandbox` also denies `spawn`/`run`/`run_process` (`E-SANDBOX-SPAWN`) and `http_*` (`E-SANDBOX-NETWORK`); `task_group`/`spawn f()` (structured concurrency) still runs under sandbox. Missing file is `E-IO-NOT-FOUND`. `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
 
 ## Stdin, args, exit codes, formatting, comments
 
@@ -3069,11 +3069,11 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `float` | `(x: int\|float\|str)` | `float` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` (parse) |
 | `keys` | `(m: map)` | `array<str>` | `E-ARITY`, `E-TYPE` |
 | `assert` | `(c: bool\|int)` | `int` (1) | `E-ARITY`, `E-RUNTIME` (failed) |
-| `read_file` | `(p: str)` | `str` | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-RUNTIME` (guard) |
-| `write_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `append_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `exists` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` (guard) |
-| `remove_file` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-RUNTIME` |
+| `read_file` | `(p: str)` | `str` | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-SANDBOX-FILE` (sandbox only) |
+| `write_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `append_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `exists` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-SANDBOX-FILE` (sandbox only) |
+| `remove_file` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-SANDBOX-FILE` (sandbox only) |
 | `env` | `(n: str)` | `str` (`""` when unset) | `E-ARITY`, `E-TYPE` |
 | `get_env` | `(n: str)` | `str` (`""` when unset) | `E-ARITY`, `E-TYPE` |
 | `set_env` | `(n: str, v: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-ENV-INVALID` |
@@ -3107,15 +3107,15 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `args` | `()` | `array<str>` (no prog name) | `E-ARITY` |
 | `exit` | `(code: int)` | — (exits, `E-EXIT`) | `E-ARITY` |
 | `cwd` | `()` | `str` | `E-ARITY` |
-| `list_dir` | `(p: str)` | `array<str>` | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `make_dir` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `make_dirs` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `is_dir` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` |
-| `is_file` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` |
-| `rename_file` | `(from: str, to: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `copy_file` | `(from: str, to: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `file_size` | `(p: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `file_mtime` | `(p: str)` | `float` (epoch secs) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
+| `list_dir` | `(p: str)` | `array<str>` | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `make_dir` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `make_dirs` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `is_dir` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-SANDBOX-FILE` (sandbox only) |
+| `is_file` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-SANDBOX-FILE` (sandbox only) |
+| `rename_file` | `(from: str, to: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `copy_file` | `(from: str, to: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `file_size` | `(p: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `file_mtime` | `(p: str)` | `float` (epoch secs) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
 | `path_absolute` | `(p: str)` | `str` (CWD-joined, infallible) | `E-ARITY`, `E-TYPE` |
 | `ord` | `(s: str)` | `int` (first char code) | `E-ARITY`, `E-TYPE`, `E-CHAR-INVALID` |
 | `chr` | `(n: int)` | `str` (1 char) | `E-ARITY`, `E-TYPE`, `E-CHAR-INVALID` |
@@ -3662,7 +3662,7 @@ fn main() -> i32 {
 
 | Code | Cause | Fix |
 |---|---|---|
-| `E-RUNTIME` | division by zero, bad index, missing key, guard, OOB | guard inputs |
+| `E-RUNTIME` | division by zero, bad index, missing key, OOB | guard inputs |
 | `E-OVERFLOW` | `i64` arithmetic past range (never wraps) | smaller operands / bounds check |
 | `E-PARSE-INT` | `parse_int` non-decimal or outside `i32` | validate / `try` |
 | `E-PARSE-FLOAT` | `parse_float` non-finite decimal | validate / `try` |
@@ -3684,7 +3684,7 @@ fn main() -> i32 {
 | `E-FMT-INVALID` | lone `{`/`}` in `sprintf` | escape `{{`/`}}` |
 | `E-FMT-ARG-MISMATCH` | more `{}` than args | add args |
 | `E-RANDOM-BOUNDS` | `lo > hi` in seeded int | `lo <= hi` |
-| `E-ENV-INVALID` | `set_env` name with `=`/NUL | plain NAME |
+| `E-ENV-INVALID` | `set_env` with empty name or `=`/NUL in name (or NUL in value) | plain non-empty NAME |
 | `E-TASK-GROUP` | several spawns failed (each under `related`) | fix children |
 | `E-TYPE` | run-time type mismatch (dynamic `unknown` misused) | check types |
 | `E-SANDBOX-FILE` | file outside temp dir (or `..`) under `klang run --sandbox` only | run without `--sandbox` or use temp-dir paths |
@@ -3692,7 +3692,7 @@ fn main() -> i32 {
 | `E-SANDBOX-NETWORK` | `http_get`/`http_post` (sync/async) under `--sandbox` only | run without `--sandbox` |
 
 Sandbox codes only trigger under `klang run --sandbox` (plain `run` uses
-`E-RUNTIME`/`E-PROCESS-*`/`E-NET-*` for the same operations). Examples (shell,
+`E-IO-*` for files and `E-PROCESS-*`/`E-NET-*` for spawn/network). Examples (shell,
 not gated — the gate runs plain `run` only):
 
 ```sh

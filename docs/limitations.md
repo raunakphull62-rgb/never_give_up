@@ -99,11 +99,11 @@ and entry arity above 4 — is refused loudly at compile time.
 - `slice(x, a, b)` with an `unknown` static type returns `Unknown`
   (array at runtime stays array, strings stay strings), so
   `spawn(cmd, slice(toks, 1, len(toks)))` checks clean (FINDINGS B1).
-- File guard is strict for `klang run --sandbox` and library calls
-  (absolute only under the temp dir, relative with no `..`; sandbox
-  denials are `E-SANDBOX-FILE`); plain
-  `klang run` additionally allows relative `..` resolved against the
-  current directory. Absolute outside temp stays rejected in both.
+- File access (F1): plain `klang run` (and `klang test`) allows ALL
+  relative and absolute paths, subject only to OS permissions
+  (`E-IO-NOT-FOUND`/`E-IO-PERMISSION`/`E-IO-FAILED`). Only
+  `klang run --sandbox` limits files to the temp dir (absolute only
+  under temp, relative with no `..`; denials are `E-SANDBOX-FILE`).
 
 ## `run` exit codes wrap at 8 bits (Linux)
 
@@ -169,14 +169,16 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   `0..i64::MAX`, since values are `i64` — cannot be spelled or
   produced); enum payloads are statically checked only (no runtime
   boundary there); `parse_int` bounds stay 32-bit.
-- **Process/time/env (S6)**: `spawn`/`run` are argv-only (no shell, no
+- **Process/time/env (S6, F1)**: `spawn`/`run` are argv-only (no shell, no
   glob, no timeout, no stdin piping); `spawn` buffers all output in
   memory (no cap — hostile gigabytes OOM like `run_process`); `run`
   inherits stdio. `spawn` is both a task keyword and a builtin
   (`spawn (f())` is task-group spawn, `spawn(cmd, args)` is the
   builtin). `now_ms` exceeds `i32` (flows as Int, `E-OVERFLOW` on
   arithmetic); `now_iso` is wall-clock UTC. `get_env`/`env` absence is
-  `""` (no null — unset is indistinguishable from empty). All six are
+  `""` (no null — unset is indistinguishable from empty). `set_env` with an
+  empty name or `=`/NUL in the name (or NUL in the value) is `E-ENV-INVALID`
+  naming the bad name, never a panic. All six are
   interpreter-only (JIT loud-rejects, v2 `E-UNDEFINED`). Missing
   binaries are `E-PROCESS-NOT-FOUND` (other OS refusals are
   `E-PROCESS-FAILED`); bad sleep durations are `E-TIME-INVALID`.

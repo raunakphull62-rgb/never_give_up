@@ -224,7 +224,7 @@ fn main() -> i32 {
 
 | Code | Cause | Fix |
 |---|---|---|
-| `E-RUNTIME` | division by zero, bad index, missing key, guard, OOB | guard inputs |
+| `E-RUNTIME` | division by zero, bad index, missing key, OOB | guard inputs |
 | `E-OVERFLOW` | `i64` arithmetic past range (never wraps) | smaller operands / bounds check |
 | `E-PARSE-INT` | `parse_int` non-decimal or outside `i32` | validate / `try` |
 | `E-PARSE-FLOAT` | `parse_float` non-finite decimal | validate / `try` |
@@ -246,7 +246,7 @@ fn main() -> i32 {
 | `E-FMT-INVALID` | lone `{`/`}` in `sprintf` | escape `{{`/`}}` |
 | `E-FMT-ARG-MISMATCH` | more `{}` than args | add args |
 | `E-RANDOM-BOUNDS` | `lo > hi` in seeded int | `lo <= hi` |
-| `E-ENV-INVALID` | `set_env` name with `=`/NUL | plain NAME |
+| `E-ENV-INVALID` | `set_env` with empty name or `=`/NUL in name (or NUL in value) | plain non-empty NAME |
 | `E-TASK-GROUP` | several spawns failed (each under `related`) | fix children |
 | `E-TYPE` | run-time type mismatch (dynamic `unknown` misused) | check types |
 | `E-SANDBOX-FILE` | file outside temp dir (or `..`) under `klang run --sandbox` only | run without `--sandbox` or use temp-dir paths |
@@ -254,7 +254,7 @@ fn main() -> i32 {
 | `E-SANDBOX-NETWORK` | `http_get`/`http_post` (sync/async) under `--sandbox` only | run without `--sandbox` |
 
 Sandbox codes only trigger under `klang run --sandbox` (plain `run` uses
-`E-RUNTIME`/`E-PROCESS-*`/`E-NET-*` for the same operations). Examples (shell,
+`E-IO-*` for files and `E-PROCESS-*`/`E-NET-*` for spawn/network). Examples (shell,
 not gated — the gate runs plain `run` only):
 
 ```sh

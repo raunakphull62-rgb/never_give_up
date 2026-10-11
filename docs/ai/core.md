@@ -6,8 +6,8 @@ Run `klang check <file>` (human lines plus JSON diagnostics) or
 `klang run [--sandbox] <file>` (only program output on stdout, diagnostics on stderr).
 `klang run --sandbox` limits files to the temp dir (`E-SANDBOX-FILE`) and denies
 spawn/run (`E-SANDBOX-SPAWN`) and network (`E-SANDBOX-NETWORK`); plain `klang run`
-allows relative `..` and spawn/network, but absolute paths outside the temp dir
-stay rejected (`E-RUNTIME`). `klang fmt --check <file>` / `--write` reports/rewrites
+allows all relative and absolute paths (OS permissions only, `E-IO-*` on failure)
+and spawn/network. `klang fmt --check <file>` / `--write` reports/rewrites
 canonical form. `klang mcp` was removed (`E-CLI-REMOVED`); use the CLI above.
 Loop: write file, run `klang check --json`, fix first diagnostic by its `code`
 (see errors.md), re-check until clean, then `klang run`. Keep `fmt --check` clean.
@@ -1074,7 +1074,7 @@ fn main() -> i32 {
 hi
 ```
 
-Rules: file guard is strict for `klang run --sandbox` and library calls (absolute only under temp dir, relative with no `..`; sandbox denials are `E-SANDBOX-FILE`, library strict is `E-RUNTIME`); plain `klang run` additionally allows relative `..` resolved against CWD (so `chdir` + relative reads work) while absolute outside temp stays rejected (`E-RUNTIME`). Temp-dir files work in both modes. `run --sandbox` also denies `spawn`/`run`/`run_process` (`E-SANDBOX-SPAWN`) and `http_*` (`E-SANDBOX-NETWORK`); `task_group`/`spawn f()` (structured concurrency) still runs under sandbox. Missing file is `E-IO-NOT-FOUND`. `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
+Rules: only `klang run --sandbox` limits files (absolute only under temp dir, relative with no `..`; denials are `E-SANDBOX-FILE`). Plain `klang run` allows all relative and absolute paths resolved against CWD (so `chdir` + relative reads work), with OS failures as `E-IO-*`. Temp-dir files work in both modes. `run --sandbox` also denies `spawn`/`run`/`run_process` (`E-SANDBOX-SPAWN`) and `http_*` (`E-SANDBOX-NETWORK`); `task_group`/`spawn f()` (structured concurrency) still runs under sandbox. Missing file is `E-IO-NOT-FOUND`. `spawn`/`run_process`/`run` take `(cmd, args_array)`, no shell; `time_sleep`/`sleep_ms` bad durations are `E-TIME-INVALID`.
 
 ## Stdin, args, exit codes, formatting, comments
 

@@ -19,11 +19,11 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `float` | `(x: int\|float\|str)` | `float` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` (parse) |
 | `keys` | `(m: map)` | `array<str>` | `E-ARITY`, `E-TYPE` |
 | `assert` | `(c: bool\|int)` | `int` (1) | `E-ARITY`, `E-RUNTIME` (failed) |
-| `read_file` | `(p: str)` | `str` | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-RUNTIME` (guard) |
-| `write_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `append_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `exists` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` (guard) |
-| `remove_file` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-RUNTIME` |
+| `read_file` | `(p: str)` | `str` | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-SANDBOX-FILE` (sandbox only) |
+| `write_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `append_file` | `(p: str, c: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `exists` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-SANDBOX-FILE` (sandbox only) |
+| `remove_file` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-NOT-FOUND`, `E-SANDBOX-FILE` (sandbox only) |
 | `env` | `(n: str)` | `str` (`""` when unset) | `E-ARITY`, `E-TYPE` |
 | `get_env` | `(n: str)` | `str` (`""` when unset) | `E-ARITY`, `E-TYPE` |
 | `set_env` | `(n: str, v: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-ENV-INVALID` |
@@ -57,15 +57,15 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `args` | `()` | `array<str>` (no prog name) | `E-ARITY` |
 | `exit` | `(code: int)` | — (exits, `E-EXIT`) | `E-ARITY` |
 | `cwd` | `()` | `str` | `E-ARITY` |
-| `list_dir` | `(p: str)` | `array<str>` | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `make_dir` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `make_dirs` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `is_dir` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` |
-| `is_file` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-RUNTIME` |
-| `rename_file` | `(from: str, to: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `copy_file` | `(from: str, to: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `file_size` | `(p: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
-| `file_mtime` | `(p: str)` | `float` (epoch secs) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-RUNTIME` |
+| `list_dir` | `(p: str)` | `array<str>` | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `make_dir` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `make_dirs` | `(p: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `is_dir` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-SANDBOX-FILE` (sandbox only) |
+| `is_file` | `(p: str)` | `bool` | `E-ARITY`, `E-TYPE`, `E-SANDBOX-FILE` (sandbox only) |
+| `rename_file` | `(from: str, to: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `copy_file` | `(from: str, to: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `file_size` | `(p: str)` | `int` (bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `file_mtime` | `(p: str)` | `float` (epoch secs) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-SANDBOX-FILE` (sandbox only) |
 | `path_absolute` | `(p: str)` | `str` (CWD-joined, infallible) | `E-ARITY`, `E-TYPE` |
 | `ord` | `(s: str)` | `int` (first char code) | `E-ARITY`, `E-TYPE`, `E-CHAR-INVALID` |
 | `chr` | `(n: int)` | `str` (1 char) | `E-ARITY`, `E-TYPE`, `E-CHAR-INVALID` |
