@@ -1592,6 +1592,15 @@ fn is_builtin(name: &str) -> bool {
             | "random_float"
             | "sha256"
             | "hmac_sha256"
+            | "regex_find_all"
+            | "regex_replace"
+            | "uuid_v4"
+            | "path_absolute"
+            | "file_mtime"
+            | "sprintf"
+            | "random_seed"
+            | "random_seeded_int"
+            | "random_seeded_float"
             | "spawn"
             | "run"
             | "now_ms"
@@ -2397,6 +2406,89 @@ fn exec_builtin(
                 Ok(Value::Str(format!("{:x}", mac.finalize().into_bytes())))
             }
         }
+        // B1 gap fill (see src/stdlib/b1.rs): regex complements, uuid,
+        // path absolute, file mtime, sprintf, seeded RNG. All bad user
+        // input is a loud diagnostic, never a panic.
+        "regex_find_all" => {
+            if args.len() != 2 {
+                return Err(runtime_err("regex_find_all() takes 2 arguments"));
+            }
+            let pattern = get(&args[0]).render();
+            let text = get(&args[1]).render();
+            crate::stdlib::b1::find_all(&pattern, &text)
+                .map(|ms| Value::Array(ms.into_iter().map(Value::Str).collect()))
+        }
+        "regex_replace" => {
+            if args.len() != 3 {
+                return Err(runtime_err("regex_replace() takes 3 arguments"));
+            }
+            let pattern = get(&args[0]).render();
+            let text = get(&args[1]).render();
+            let repl = get(&args[2]).render();
+            crate::stdlib::b1::replace(&pattern, &text, &repl).map(Value::Str)
+        }
+        "uuid_v4" => {
+            if !args.is_empty() {
+                return Err(runtime_err("uuid_v4() takes 0 arguments"));
+            }
+            Ok(Value::Str(crate::stdlib::b1::uuid_v4()))
+        }
+        "path_absolute" => {
+            if args.len() != 1 {
+                return Err(runtime_err("path_absolute() takes 1 argument"));
+            }
+            Ok(Value::Str(crate::stdlib::b1::absolute(&get(&args[0]).render())))
+        }
+        "file_mtime" => {
+            if args.len() != 1 {
+                return Err(runtime_err("file_mtime() takes 1 argument"));
+            }
+            let path = get(&args[0]).render();
+            reject_unsafe_path(&path)?;
+            crate::stdlib::b1::mtime(&path).map(Value::Float)
+        }
+        "sprintf" => {
+            if args.len() != 2 {
+                return Err(runtime_err("sprintf() takes 2 arguments (fmt, args)"));
+            }
+            let fmt = get(&args[0]).render();
+            let argv = match get(&args[1]) {
+                Value::Array(items) => items,
+                other => {
+                    return Err(type_err("sprintf", "a format string and an array of args", &other))
+                }
+            };
+            crate::stdlib::b1::sprintf(&fmt, &argv).map(Value::Str)
+        }
+        "random_seed" => {
+            if args.len() != 1 {
+                return Err(runtime_err("random_seed() takes 1 argument"));
+            }
+            match get(&args[0]) {
+                Value::Int(v) => Ok(Value::Int(crate::stdlib::b1::seed(v))),
+                other => Err(type_err("random_seed", "an int seed", &other)),
+            }
+        }
+        "random_seeded_int" => {
+            if args.len() != 2 {
+                return Err(runtime_err("random_seeded_int() takes 2 arguments (lo, hi)"));
+            }
+            let lo = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("random_seeded_int", "int bounds", &other)),
+            };
+            let hi = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("random_seeded_int", "int bounds", &other)),
+            };
+            crate::stdlib::b1::seeded_int(lo, hi).map(Value::Int)
+        }
+        "random_seeded_float" => {
+            if !args.is_empty() {
+                return Err(runtime_err("random_seeded_float() takes 0 arguments"));
+            }
+            Ok(Value::Float(crate::stdlib::b1::seeded_float()))
+        }
         "__echo_create" => {
             if args.len() != 1 {
                 return Err(runtime_err("__echo_create takes 1 argument (inner type)"));
@@ -2682,6 +2774,53 @@ fn exec_method(
                         return Err(runtime_err("replace() takes 2 arguments"));
                     }
                     Ok(Value::Str(s.replace(&args[0].render(), &args[1].render())))
+                }
+                // B1 gap fill (see src/stdlib/b1.rs): width-exact
+                // char-based pads, bounded repeat, CRLF-safe lines.
+                "pad_start" => {
+                    if args.len() != 2 {
+                        return Err(runtime_err("pad_start() takes 2 arguments"));
+                    }
+                    let width = match &args[0] {
+                        Value::Int(v) => *v,
+                        other => return Err(type_err("pad_start", "an int width", other)),
+                    };
+                    let pad = match &args[1] {
+                        Value::Str(p) => p.clone(),
+                        other => return Err(type_err("pad_start", "a string pad", other)),
+                    };
+                    crate::stdlib::b1::pad_start(&s, width, &pad).map(Value::Str)
+                }
+                "pad_end" => {
+                    if args.len() != 2 {
+                        return Err(runtime_err("pad_end() takes 2 arguments"));
+                    }
+                    let width = match &args[0] {
+                        Value::Int(v) => *v,
+                        other => return Err(type_err("pad_end", "an int width", other)),
+                    };
+                    let pad = match &args[1] {
+                        Value::Str(p) => p.clone(),
+                        other => return Err(type_err("pad_end", "a string pad", other)),
+                    };
+                    crate::stdlib::b1::pad_end(&s, width, &pad).map(Value::Str)
+                }
+                "repeat" => {
+                    arity(1)?;
+                    let n = match &args[0] {
+                        Value::Int(v) => *v,
+                        other => return Err(type_err("repeat", "an int count", other)),
+                    };
+                    crate::stdlib::b1::repeat_str(&s, n).map(Value::Str)
+                }
+                "lines" => {
+                    arity(0)?;
+                    Ok(Value::Array(
+                        crate::stdlib::b1::split_lines(&s)
+                            .into_iter()
+                            .map(Value::Str)
+                            .collect(),
+                    ))
                 }
                 _ => Err(runtime_err("unknown string method")),
             }
