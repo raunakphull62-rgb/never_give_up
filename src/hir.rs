@@ -3689,6 +3689,9 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "udp_bind" => 2,
         "udp_send_to" => 4,
         "dns_lookup" => 1,
+        "thread_spawn" | "send" | "recv_timeout" => 2,
+        "thread_join" | "chan" | "recv" | "try_recv" | "close" | "signal_watch" | "signal_pending" => 1,
+        "thread_id" => 0,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -4383,6 +4386,92 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             Ty::Array
         }
         "is_null" => Ty::Bool,
+        // A2 threads/channels/signals: handles have no nominal `Ty`, so
+        // handle positions accept `Unknown` (what `chan`/`thread_spawn`
+        // return) and reject statically-known scalars with `E-TYPE`.
+        // `thread_spawn` with a statically-known closure body is the
+        // compile-time `E-THREAD-CLOSURE` (dynamic closures fail at
+        // runtime with the same code).
+        "thread_spawn" => {
+            match &args[0] {
+                Ty::Closure { .. } => {
+                    diags.push(Diagnostic::error(
+                        "E-THREAD-CLOSURE",
+                        "`thread_spawn()` cannot run a closure (spawn takes a named function)",
+                        file,
+                        0,
+                        0,
+                        "thread bodies must name a top-level function",
+                        &["define a top-level `fn` and pass its name as a string"],
+                        "thread/closure",
+                    ));
+                }
+                Ty::Str | Ty::Unknown => {}
+                other => {
+                    diags.push(type_mismatch(file, "`thread_spawn()` function", "str", other));
+                }
+            }
+            if !matches!(&args[1], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`thread_spawn()` args", "array", &args[1]));
+            }
+            Ty::Unknown
+        }
+        "thread_join" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`thread_join()` thread", "thread", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "thread_id" => Ty::Int,
+        "chan" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`chan()` capacity", "i32", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "send" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`send()` channel", "chan", &args[0]));
+            }
+            Ty::Int
+        }
+        "recv" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`recv()` channel", "chan", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "recv_timeout" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`recv_timeout()` channel", "chan", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`recv_timeout()` timeout", "i32", &args[1]));
+            }
+            Ty::Unknown
+        }
+        "try_recv" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`try_recv()` channel", "chan", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "close" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`close()` channel", "chan", &args[0]));
+            }
+            Ty::Int
+        }
+        "signal_watch" | "signal_pending" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` signal"), "str", &args[0]));
+            }
+            if func == "signal_pending" {
+                Ty::Bool
+            } else {
+                Ty::Int
+            }
+        }
         _ => Ty::Unknown,
     }
 }
@@ -4588,6 +4677,17 @@ pub fn is_builtin(name: &str) -> bool {
             | "udp_recv_from"
             | "dns_lookup"
             | "is_null"
+            | "thread_spawn"
+            | "thread_join"
+            | "thread_id"
+            | "chan"
+            | "send"
+            | "recv"
+            | "recv_timeout"
+            | "try_recv"
+            | "close"
+            | "signal_watch"
+            | "signal_pending"
     )
 }
 

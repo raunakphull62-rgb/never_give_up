@@ -3160,6 +3160,17 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `udp_recv_from` | `(s: udpsock, max: int, timeout: int)` | `map{data,str;host,str;port,int}` | `E-ARITY`, `E-TYPE`, `E-NET-TIMEOUT`, `E-NET-*`, `E-SANDBOX-NETWORK` |
 | `dns_lookup` | `(host: str)` | `array<str>` (sorted deduped IPs) | `E-ARITY`, `E-TYPE`, `E-NET-DNS`, `E-SANDBOX-NETWORK` |
 | `is_null` | `(x: unknown)` | `bool` (`1` for null) | `E-ARITY` |
+| `thread_spawn` | `(fn: str, args: array)` | `unknown` (Thread) | `E-ARITY`, `E-TYPE`, `E-THREAD-CLOSURE`, `E-THREAD-UNKNOWN`, `E-THREAD-ARITY`, `E-THREAD-LIMIT`, `E-SANDBOX-THREADS` |
+| `thread_join` | `(t: thread)` | `unknown` (value or `E-THREAD-FAILED`) | `E-ARITY`, `E-TYPE`, `E-THREAD-FAILED` |
+| `thread_id` | `()` | `int` (0 on main) | `E-ARITY` |
+| `chan` | `(cap: int)` | `unknown` (Chan; cap 1..1000000) | `E-ARITY`, `E-TYPE`, `E-CHAN-CAPACITY`, `E-SANDBOX-THREADS` |
+| `send` | `(ch: chan, v: unknown)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-CHAN-CLOSED`, `E-SANDBOX-THREADS` |
+| `recv` | `(ch: chan)` | `unknown` (value or null when closed-empty) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-THREADS` |
+| `recv_timeout` | `(ch: chan, ms: int)` | `unknown` (value or null on timeout/closed) | `E-ARITY`, `E-TYPE`, `E-CHAN-TIMEOUT`, `E-SANDBOX-THREADS` |
+| `try_recv` | `(ch: chan)` | `unknown` (value or null when empty) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-THREADS` |
+| `close` | `(ch: chan)` | `int` (1, idempotent) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-THREADS` |
+| `signal_watch` | `(name: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-SIGNAL-UNKNOWN`, `E-SIGNAL-UNSUPPORTED`, `E-SANDBOX-SIGNAL` |
+| `signal_pending` | `(name: str)` | `bool` (`1` once, clears) | `E-ARITY`, `E-TYPE`, `E-SIGNAL-UNKNOWN`, `E-SIGNAL-UNSUPPORTED`, `E-SANDBOX-SIGNAL` |
 
 ## Methods
 

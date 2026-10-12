@@ -10,6 +10,12 @@
 //! / `extern` builtins yet), so there is nothing to deny for those
 //! categories today; the codes below reserve the namespace for the
 //! A-lane stages that will add them (see PRD 2.7).
+//!
+//! A2 adds `thread_spawn` / channels / signals: all denied in sandbox
+//! except `thread_id` (pure, like `is_null`). `thread_spawn` beyond the
+//! sandbox cap (4) is `E-SANDBOX-THREADS`; channel and signal ops are
+//! denied outright in sandbox with `E-SANDBOX-THREADS` /
+//! `E-SANDBOX-SIGNAL` respectively.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -75,5 +81,38 @@ pub fn deny_file(path: &str, reason: &str) -> Diagnostic {
         "sandbox mode limits file access to the system temp directory",
         &["run without --sandbox for normal relative paths"],
         "sandbox/file",
+    )
+}
+
+/// `E-SANDBOX-THREADS`: threads and channels denied/capped in sandbox.
+///
+/// A2 policy: `thread_spawn` is allowed up to 4 live threads in sandbox;
+/// beyond that (and all channel ops `chan`/`send`/`recv`/`recv_timeout`/
+/// `try_recv`/`close`) are denied with this code. `thread_id` stays
+/// allowed (pure, like `is_null`).
+pub fn deny_threads(op: &str) -> Diagnostic {
+    Diagnostic::error(
+        "E-SANDBOX-THREADS",
+        &format!("{op}() denied in sandbox mode: threads and channels are not allowed with `klang run --sandbox`"),
+        "runtime",
+        0,
+        0,
+        "sandbox mode denies threads/channels: untrusted programs must not spawn OS threads",
+        &["run without --sandbox to allow threads and channels"],
+        "sandbox/threads",
+    )
+}
+
+/// `E-SANDBOX-SIGNAL`: signal handling denied in sandbox mode.
+pub fn deny_signal(op: &str) -> Diagnostic {
+    Diagnostic::error(
+        "E-SANDBOX-SIGNAL",
+        &format!("{op}() denied in sandbox mode: signal handling is not allowed with `klang run --sandbox`"),
+        "runtime",
+        0,
+        0,
+        "sandbox mode denies signals: untrusted programs must not install signal handlers",
+        &["run without --sandbox to allow signal handling"],
+        "sandbox/signal",
     )
 }

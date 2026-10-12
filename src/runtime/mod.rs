@@ -81,6 +81,13 @@ pub enum Value {
     Listener(crate::stdlib::a1_net::ListenerHandle),
     Conn(crate::stdlib::a1_net::ConnHandle),
     UdpSock(crate::stdlib::a1_net::UdpHandle),
+    /// A2 opaque handles: `Thread` is a detached OS thread (join via
+    /// `thread_join`, idempotent); `Chan` is a bounded channel (shared
+    /// `Arc` state, identity equality). Both are `Send` so they move
+    /// across threads; misuse is `E-TYPE`/`E-CHAN-*`/`E-THREAD-*`, never
+    /// a panic.
+    Thread(crate::stdlib::a2_threads::ThreadHandle),
+    Chan(crate::stdlib::a2_threads::ChanHandle),
 }
 
 impl PartialEq for Value {
@@ -103,6 +110,8 @@ impl PartialEq for Value {
             (Self::Listener(a), Self::Listener(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::Conn(a), Self::Conn(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::UdpSock(a), Self::UdpSock(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::Thread(a), Self::Thread(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::Chan(a), Self::Chan(b)) => std::sync::Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -125,6 +134,9 @@ impl Value {
             // arithmetic (checked programs never do math on them).
             Self::Null => 0,
             Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => 0,
+            // A2 handles likewise flow as 0 (checked programs never do
+            // math on threads or channels).
+            Self::Thread(_) | Self::Chan(_) => 0,
         }
     }
 
@@ -139,6 +151,7 @@ impl Value {
             Self::Closure { captures, .. } => captures.len() as f64,
             Self::Null => 0.0,
             Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => 0.0,
+            Self::Thread(_) | Self::Chan(_) => 0.0,
         }
     }
 
@@ -161,6 +174,9 @@ impl Value {
             // even when closed (closed is still a handle value).
             Self::Null => false,
             Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => true,
+            // A2: threads and channels are always truthy (like structs),
+            // even when finished/closed.
+            Self::Thread(_) | Self::Chan(_) => true,
         }
     }
 
@@ -202,6 +218,9 @@ impl Value {
             Self::Listener(_) => "<listener>".to_string(),
             Self::Conn(_) => "<conn>".to_string(),
             Self::UdpSock(_) => "<udpsock>".to_string(),
+            // A2: threads and channels are opaque placeholders.
+            Self::Thread(_) => "<thread>".to_string(),
+            Self::Chan(_) => "<chan>".to_string(),
         }
     }
 
@@ -258,6 +277,8 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::Listener(_) => "listener",
         Value::Conn(_) => "conn",
         Value::UdpSock(_) => "udpsock",
+        Value::Thread(_) => "thread",
+        Value::Chan(_) => "chan",
     }
 }
 
@@ -487,6 +508,11 @@ struct ExecCtx {
     /// Program arguments after the `.klang` file (CLI `run` supplies
     /// them; tests pass none). Read by the `args()` builtin.
     argv: Vec<String>,
+    /// A2 threads spawned during this run (shared across the main thread
+    /// and all workers, so children registering stays in one list).
+    /// At program exit the main thread joins any still-live entries so no
+    /// OS thread leaks past the run.
+    threads: Arc<Mutex<Vec<crate::stdlib::a2_threads::ThreadHandle>>>,
 }
 
 /// Run `entry` in `module` with joined task threads.
@@ -600,8 +626,28 @@ pub fn run_with_argv_chunks(
             .collect(),
         output: Arc::new(Mutex::new(Vec::new())),
         argv: argv.to_vec(),
+        threads: Arc::new(Mutex::new(Vec::new())),
     };
+    // Main thread is Klang id 0 (workers allocate 1..). Thread-local so
+    // `thread_id()` works without passing state.
+    crate::stdlib::a2_threads::set_current_thread_id(0);
     let r = exec_function(&ctx, entry, args, 0, &CancelToken::default());
+    // Reap any threads the program forgot to join (never detach): join
+    // each still-live handle (blocking) and drop the results. Failures of
+    // unjoined threads are ignored here (the program never observed them;
+    // `thread_join` is the observing path with `E-THREAD-FAILED`).
+    {
+        let handles: Vec<crate::stdlib::a2_threads::ThreadHandle> = {
+            let guard = ctx.threads.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        for h in handles {
+            // `thread_join` is idempotent and never hangs past thread exit;
+            // ignore its outcome (main's `r` wins).
+            let v = Value::Thread(h);
+            let _ = crate::stdlib::a2_threads::thread_join(&v);
+        }
+    }
     let out = ctx.output.lock().unwrap().clone();
     (r, out)
 }
@@ -1002,6 +1048,81 @@ fn run_instrs(
                     )?;
                     values.insert(into.clone(), v.clone());
                     last = v;
+                    pc += 1;
+                    continue;
+                }
+                // A2 `thread_spawn(fn_name, args_array)`: needs the module,
+                // output and thread registry, so it lives here (like
+                // `sort_by`), not in `exec_builtin` (values-only).
+                if func == "thread_spawn" {
+                    if args.len() != 2 {
+                        return Err(runtime_err("thread_spawn() takes 2 arguments"));
+                    }
+                    let fn_val =
+                        lookup(&values, &ctx.stubs, &args[0]).unwrap_or(Value::Int(0));
+                    let arr_val =
+                        lookup(&values, &ctx.stubs, &args[1]).unwrap_or(Value::Int(0));
+                    let (fname, fargs) = crate::stdlib::a2_threads::check_spawn_operands(
+                        "thread_spawn",
+                        &fn_val,
+                        &arr_val,
+                    )?;
+                    crate::stdlib::a2_threads::spawn_allowed("thread_spawn")?;
+                    let want = ctx.module.find(&fname).map(|f| f.params.len());
+                    crate::stdlib::a2_threads::check_spawn_target(
+                        "thread_spawn",
+                        &fname,
+                        fargs.len(),
+                        want,
+                    )?;
+                    let id = crate::stdlib::a2_threads::alloc_thread_id();
+                    crate::stdlib::a2_threads::inc_active();
+                    let child = ctx.clone();
+                    let tname = fname.clone();
+                    let targs = fargs.clone();
+                    let tname_for_err = tname.clone();
+                    struct ActiveGuard;
+                    impl Drop for ActiveGuard {
+                        fn drop(&mut self) {
+                            crate::stdlib::a2_threads::dec_active();
+                        }
+                    }
+                    let h = std::thread::Builder::new()
+                        .name(format!("klang-thread-{id}-{tname}"))
+                        .stack_size(SPAWN_STACK_BYTES)
+                        .spawn(move || {
+                            let _guard = ActiveGuard;
+                            crate::stdlib::a2_threads::set_current_thread_id(id);
+                            match exec_function(
+                                &child,
+                                &tname,
+                                &targs,
+                                0,
+                                &CancelToken::default(),
+                            ) {
+                                Ok(v) => Ok(v),
+                                Err(d) => Err(d),
+                            }
+                        })
+                        .map_err(|e| {
+                            crate::stdlib::a2_threads::dec_active();
+                            concurrent_err(&format!(
+                                "failed to spawn thread `{tname_for_err}`: {e}"
+                            ))
+                        })?;
+                    let th = crate::stdlib::a2_threads::new_thread_handle(id, &fname, h);
+                    {
+                        let mut reg = ctx
+                            .threads
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        // Store the ThreadHandle (unwrap the Thread value).
+                        if let Value::Thread(thh) = th.clone() {
+                            reg.push(thh);
+                        }
+                    }
+                    values.insert(into.clone(), th.clone());
+                    last = th;
                     pc += 1;
                     continue;
                 }
@@ -1677,6 +1798,17 @@ fn is_builtin(name: &str) -> bool {
             | "udp_recv_from"
             | "dns_lookup"
             | "is_null"
+            | "thread_spawn"
+            | "thread_join"
+            | "thread_id"
+            | "chan"
+            | "send"
+            | "recv"
+            | "recv_timeout"
+            | "try_recv"
+            | "close"
+            | "signal_watch"
+            | "signal_pending"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -2663,6 +2795,12 @@ fn exec_builtin(
                 return Err(runtime_err("conn_close() takes 1 argument"));
             }
             let v = get(&args[0]);
+            // A2: channels may also close via `conn_close` (polymorphic,
+            // like listeners/conns/udpsocks); the canonical channel close
+            // is `close(ch)`.
+            if matches!(v, Value::Chan(_)) {
+                return crate::stdlib::a2_threads::close(&v).map(|()| Value::Int(1));
+            }
             crate::stdlib::a1_net::conn_close(&v).map(|()| Value::Int(1))
         }
         "conn_set_timeout" => {
@@ -2735,6 +2873,88 @@ fn exec_builtin(
                 return Err(runtime_err("is_null() takes 1 argument"));
             }
             Ok(Value::Int(i64::from(matches!(get(&args[0]), Value::Null))))
+        }
+        // A2 threads/channels/signals (see src/stdlib/a2_threads.rs).
+        // `thread_spawn` needs the interpreter context (module/output),
+        // so it runs in `run_instrs` (like `sort_by`), never here: reaching
+        // this arm means an internal dispatch error, surfaced loudly.
+        "thread_spawn" => Err(runtime_err("thread_spawn() needs interpreter state")),
+        "thread_join" => {
+            if args.len() != 1 {
+                return Err(runtime_err("thread_join() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a2_threads::thread_join(&v)
+        }
+        "thread_id" => {
+            if !args.is_empty() {
+                return Err(runtime_err("thread_id() takes 0 arguments"));
+            }
+            Ok(Value::Int(crate::stdlib::a2_threads::current_thread_id() as i64))
+        }
+        "chan" => {
+            if args.len() != 1 {
+                return Err(runtime_err("chan() takes 1 argument"));
+            }
+            let cap = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("chan", "an int capacity", &other)),
+            };
+            crate::stdlib::a2_threads::chan(cap)
+        }
+        "send" => {
+            if args.len() != 2 {
+                return Err(runtime_err("send() takes 2 arguments"));
+            }
+            let ch = get(&args[0]);
+            let v = get(&args[1]);
+            crate::stdlib::a2_threads::send(&ch, &v).map(|()| Value::Int(1))
+        }
+        "recv" => {
+            if args.len() != 1 {
+                return Err(runtime_err("recv() takes 1 argument"));
+            }
+            let ch = get(&args[0]);
+            crate::stdlib::a2_threads::recv(&ch)
+        }
+        "recv_timeout" => {
+            if args.len() != 2 {
+                return Err(runtime_err("recv_timeout() takes 2 arguments"));
+            }
+            let ch = get(&args[0]);
+            let ms = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("recv_timeout", "an int timeout", &other)),
+            };
+            crate::stdlib::a2_threads::recv_timeout(&ch, ms)
+        }
+        "try_recv" => {
+            if args.len() != 1 {
+                return Err(runtime_err("try_recv() takes 1 argument"));
+            }
+            let ch = get(&args[0]);
+            crate::stdlib::a2_threads::try_recv(&ch)
+        }
+        "close" => {
+            if args.len() != 1 {
+                return Err(runtime_err("close() takes 1 argument"));
+            }
+            let ch = get(&args[0]);
+            crate::stdlib::a2_threads::close(&ch).map(|()| Value::Int(1))
+        }
+        "signal_watch" => {
+            if args.len() != 1 {
+                return Err(runtime_err("signal_watch() takes 1 argument"));
+            }
+            let name = get(&args[0]).render();
+            crate::stdlib::a2_threads::signal_watch(&name).map(|()| Value::Int(1))
+        }
+        "signal_pending" => {
+            if args.len() != 1 {
+                return Err(runtime_err("signal_pending() takes 1 argument"));
+            }
+            let name = get(&args[0]).render();
+            crate::stdlib::a2_threads::signal_pending(&name).map(|b| Value::Int(i64::from(b)))
         }
         "__echo_create" => {
             if args.len() != 1 {

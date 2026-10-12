@@ -69,6 +69,12 @@ pub mod b1;
 /// `udp_send_to` / `udp_recv_from` / `dns_lookup` / `is_null`.
 pub mod a1_net;
 
+/// A2 threads, channels, signals with opaque handle values.
+/// Wired as the flat builtins `thread_spawn` / `thread_join` /
+/// `thread_id` / `chan` / `send` / `recv` / `recv_timeout` / `try_recv` /
+/// `close` / `signal_watch` / `signal_pending`.
+pub mod a2_threads;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {
