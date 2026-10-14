@@ -75,6 +75,12 @@ pub mod a1_net;
 /// `close` / `signal_watch` / `signal_pending`.
 pub mod a2_threads;
 
+/// A3 HTTP server + fuller client with opaque server handles.
+/// Wired as the flat builtins `http_serve` / `server_port` /
+/// `http_stop` / `http_request` / `http_json` / `http_text` /
+/// `http_redirect` / `route_match` / `json_decode` / `json_stringify`.
+pub mod a3_http;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {

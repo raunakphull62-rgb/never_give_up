@@ -88,6 +88,9 @@ pub enum Value {
     /// a panic.
     Thread(crate::stdlib::a2_threads::ThreadHandle),
     Chan(crate::stdlib::a2_threads::ChanHandle),
+    /// A3 opaque HTTP server (stop via `http_stop`, port via
+    /// `server_port`; closed at program exit like other handles).
+    Server(crate::stdlib::a3_http::ServerHandle),
 }
 
 impl PartialEq for Value {
@@ -112,6 +115,7 @@ impl PartialEq for Value {
             (Self::UdpSock(a), Self::UdpSock(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::Thread(a), Self::Thread(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::Chan(a), Self::Chan(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::Server(a), Self::Server(b)) => std::sync::Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -137,6 +141,8 @@ impl Value {
             // A2 handles likewise flow as 0 (checked programs never do
             // math on threads or channels).
             Self::Thread(_) | Self::Chan(_) => 0,
+            // A3 servers likewise flow as 0.
+            Self::Server(_) => 0,
         }
     }
 
@@ -152,6 +158,7 @@ impl Value {
             Self::Null => 0.0,
             Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => 0.0,
             Self::Thread(_) | Self::Chan(_) => 0.0,
+            Self::Server(_) => 0.0,
         }
     }
 
@@ -177,6 +184,8 @@ impl Value {
             // A2: threads and channels are always truthy (like structs),
             // even when finished/closed.
             Self::Thread(_) | Self::Chan(_) => true,
+            // A3: servers are always truthy, even when stopped.
+            Self::Server(_) => true,
         }
     }
 
@@ -221,6 +230,8 @@ impl Value {
             // A2: threads and channels are opaque placeholders.
             Self::Thread(_) => "<thread>".to_string(),
             Self::Chan(_) => "<chan>".to_string(),
+            // A3: servers are opaque placeholders.
+            Self::Server(_) => "<server>".to_string(),
         }
     }
 
@@ -263,6 +274,11 @@ pub(crate) fn type_err(op: &str, want: &str, got: &Value) -> Diagnostic {
     )
 }
 
+/// Public `E-TYPE` helper for stdlib files (same shape as [`type_err`]).
+pub fn type_err_pub(op: &str, want: &str, got: &Value) -> Diagnostic {
+    type_err(op, want, got)
+}
+
 /// Runtime type name for [`type_err`] (`int`/`float`/`str`/...).
 fn value_type_name(v: &Value) -> &'static str {
     match v {
@@ -279,7 +295,13 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::UdpSock(_) => "udpsock",
         Value::Thread(_) => "thread",
         Value::Chan(_) => "chan",
+        Value::Server(_) => "server",
     }
+}
+
+/// Public type name for stdlib helpers (same table as [`value_type_name`]).
+pub fn value_type_name_pub(v: &Value) -> &'static str {
+    value_type_name(v)
 }
 
 /// Integer overflow: a 64-bit arithmetic result left the
@@ -501,18 +523,22 @@ impl OutputChunk {
 
 /// Shared execution context (cloned into spawned threads).
 #[derive(Debug, Clone)]
-struct ExecCtx {
-    module: Arc<MirModule>,
-    stubs: HashMap<String, i64>,
-    output: Arc<Mutex<Vec<OutputChunk>>>,
+pub(crate) struct ExecCtx {
+    pub(crate) module: Arc<MirModule>,
+    pub(crate) stubs: HashMap<String, i64>,
+    pub(crate) output: Arc<Mutex<Vec<OutputChunk>>>,
     /// Program arguments after the `.klang` file (CLI `run` supplies
     /// them; tests pass none). Read by the `args()` builtin.
-    argv: Vec<String>,
+    pub(crate) argv: Vec<String>,
     /// A2 threads spawned during this run (shared across the main thread
     /// and all workers, so children registering stays in one list).
     /// At program exit the main thread joins any still-live entries so no
     /// OS thread leaks past the run.
-    threads: Arc<Mutex<Vec<crate::stdlib::a2_threads::ThreadHandle>>>,
+    pub(crate) threads: Arc<Mutex<Vec<crate::stdlib::a2_threads::ThreadHandle>>>,
+    /// A3 servers started during this run (shared like threads). At
+    /// program exit the main thread stops any still-running entries so
+    /// no socket or worker thread leaks past the run.
+    pub(crate) servers: Arc<Mutex<Vec<crate::stdlib::a3_http::ServerHandle>>>,
 }
 
 /// Run `entry` in `module` with joined task threads.
@@ -627,6 +653,7 @@ pub fn run_with_argv_chunks(
         output: Arc::new(Mutex::new(Vec::new())),
         argv: argv.to_vec(),
         threads: Arc::new(Mutex::new(Vec::new())),
+        servers: Arc::new(Mutex::new(Vec::new())),
     };
     // Main thread is Klang id 0 (workers allocate 1..). Thread-local so
     // `thread_id()` works without passing state.
@@ -646,6 +673,19 @@ pub fn run_with_argv_chunks(
             // ignore its outcome (main's `r` wins).
             let v = Value::Thread(h);
             let _ = crate::stdlib::a2_threads::thread_join(&v);
+        }
+    }
+    // Stop any servers the program forgot to stop (never leak sockets
+    // or worker threads past the run). `http_stop` is idempotent and
+    // graceful (finishes in-flight, then joins).
+    {
+        let servers: Vec<crate::stdlib::a3_http::ServerHandle> = {
+            let guard = ctx.servers.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        for h in servers {
+            let v = Value::Server(h);
+            let _ = crate::stdlib::a3_http::http_stop(&v);
         }
     }
     let out = ctx.output.lock().unwrap().clone();
@@ -1123,6 +1163,36 @@ fn run_instrs(
                     }
                     values.insert(into.clone(), th.clone());
                     last = th;
+                    pc += 1;
+                    continue;
+                }
+                // A3 `http_serve(host, port, handler, options)`: needs the
+                // module/output/server registry, so it lives here (like
+                // `thread_spawn`), not in `exec_builtin` (values-only).
+                // Reuses A1 sockets + A2 threads/channels (no second path).
+                if func == "http_serve" {
+                    if args.len() != 4 {
+                        return Err(runtime_err("http_serve() takes 4 arguments (host, port, handler, options)"));
+                    }
+                    let host_val = lookup(&values, &ctx.stubs, &args[0]).unwrap_or(Value::Int(0));
+                    let port_val = lookup(&values, &ctx.stubs, &args[1]).unwrap_or(Value::Int(0));
+                    let handler_val = lookup(&values, &ctx.stubs, &args[2]).unwrap_or(Value::Int(0));
+                    let opts_val = lookup(&values, &ctx.stubs, &args[3]).unwrap_or(Value::Int(0));
+                    let host = match host_val {
+                        Value::Str(s) => s,
+                        other => return Err(type_err("http_serve", "a host string", &other)),
+                    };
+                    let port = match port_val {
+                        Value::Int(n) => n,
+                        other => return Err(type_err("http_serve", "an int port", &other)),
+                    };
+                    let handler_name = match handler_val {
+                        Value::Str(s) => s,
+                        other => return Err(type_err("http_serve", "a handler name string", &other)),
+                    };
+                    let v = start_http_server(ctx, &host, port, &handler_name, &opts_val)?;
+                    values.insert(into.clone(), v.clone());
+                    last = v;
                     pc += 1;
                     continue;
                 }
@@ -1809,6 +1879,16 @@ fn is_builtin(name: &str) -> bool {
             | "close"
             | "signal_watch"
             | "signal_pending"
+            | "http_serve"
+            | "server_port"
+            | "http_stop"
+            | "http_request"
+            | "http_json"
+            | "http_text"
+            | "http_redirect"
+            | "route_match"
+            | "json_decode"
+            | "json_stringify"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -2956,6 +3036,126 @@ fn exec_builtin(
             let name = get(&args[0]).render();
             crate::stdlib::a2_threads::signal_pending(&name).map(|b| Value::Int(i64::from(b)))
         }
+        // A3 HTTP (see src/stdlib/a3_http.rs). `http_serve` needs the
+        // interpreter context (module/output/servers), so it runs in
+        // `run_instrs` (like `thread_spawn`), never here.
+        "http_serve" => Err(runtime_err("http_serve() needs interpreter state")),
+        "server_port" => {
+            if args.len() != 1 {
+                return Err(runtime_err("server_port() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a3_http::server_port(&v).map(Value::Int)
+        }
+        "http_stop" => {
+            if args.len() != 1 {
+                return Err(runtime_err("http_stop() takes 1 argument"));
+            }
+            let v = get(&args[0]);
+            crate::stdlib::a3_http::http_stop(&v).map(|()| Value::Int(1))
+        }
+        "http_request" => {
+            if args.len() != 5 && args.len() != 6 {
+                return Err(runtime_err("http_request() takes 5 arguments (method, url, headers, body, timeout_ms) with an optional 6th options map"));
+            }
+            let method = match get(&args[0]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("http_request", "a method string", &other)),
+            };
+            let url = match get(&args[1]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("http_request", "a URL string", &other)),
+            };
+            let headers_val = get(&args[2]);
+            // Headers must be a map (E-TYPE otherwise, never silent).
+            if !matches!(headers_val, Value::Map(_)) {
+                return Err(type_err("http_request", "a headers map", &headers_val));
+            }
+            let body = match get(&args[3]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("http_request", "a body string", &other)),
+            };
+            let timeout_ms = match get(&args[4]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("http_request", "an int timeout", &other)),
+            };
+            if args.len() == 6 {
+                let opts = get(&args[5]);
+                crate::stdlib::a3_http::http_request(&method, &url, &headers_val, &body, timeout_ms, Some(&opts))
+            } else {
+                crate::stdlib::a3_http::http_request(&method, &url, &headers_val, &body, timeout_ms, None)
+            }
+        }
+        "http_json" => {
+            if args.len() != 2 {
+                return Err(runtime_err("http_json() takes 2 arguments (status, value)"));
+            }
+            let status = match get(&args[0]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("http_json", "an int status", &other)),
+            };
+            let v = get(&args[1]);
+            crate::stdlib::a3_http::http_json(status, &v)
+        }
+        "http_text" => {
+            if args.len() != 2 {
+                return Err(runtime_err("http_text() takes 2 arguments (status, body)"));
+            }
+            let status = match get(&args[0]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("http_text", "an int status", &other)),
+            };
+            let body = match get(&args[1]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("http_text", "a body string", &other)),
+            };
+            crate::stdlib::a3_http::http_text(status, &body)
+        }
+        "http_redirect" => {
+            if args.len() != 1 {
+                return Err(runtime_err("http_redirect() takes 1 argument (url)"));
+            }
+            let url = match get(&args[0]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("http_redirect", "a URL string", &other)),
+            };
+            crate::stdlib::a3_http::http_redirect(&url)
+        }
+        "route_match" => {
+            if args.len() != 2 {
+                return Err(runtime_err("route_match() takes 2 arguments (pattern, path)"));
+            }
+            let pat = match get(&args[0]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("route_match", "a pattern string", &other)),
+            };
+            let path = match get(&args[1]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("route_match", "a path string", &other)),
+            };
+            crate::stdlib::a3_http::route_match(&pat, &path)
+        }
+        "json_decode" => {
+            if args.len() != 1 {
+                return Err(runtime_err("json_decode() takes 1 argument"));
+            }
+            let s = match get(&args[0]) {
+                Value::Str(st) => st,
+                other => return Err(type_err("json_decode", "a JSON string", &other)),
+            };
+            crate::stdlib::a3_http::json_decode(&s)
+        }
+        "json_stringify" => {
+            if args.len() != 2 {
+                return Err(runtime_err("json_stringify() takes 2 arguments (value, pretty)"));
+            }
+            let val = get(&args[0]);
+            let pretty = match get(&args[1]) {
+                Value::Int(n) => n,
+                other => return Err(type_err("json_stringify", "an int pretty flag", &other)),
+            };
+            crate::stdlib::a3_http::json_stringify(&val, pretty).map(Value::Str)
+        }
         "__echo_create" => {
             if args.len() != 1 {
                 return Err(runtime_err("__echo_create takes 1 argument (inner type)"));
@@ -3026,6 +3226,482 @@ fn exec_builtin(
         }
         _ => Err(runtime_err("unknown builtin")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// A3 HTTP server (built on A1 sockets + A2 threads/channels).
+// ---------------------------------------------------------------------------
+
+// Clean A3 server implementation (replaces the stub in runtime/mod.rs).
+// Paste this between `exec_builtin` end and `exec_sort_by` start.
+
+fn start_http_server(
+    ctx: &ExecCtx,
+    host: &str,
+    port: i64,
+    handler_name: &str,
+    opts_val: &Value,
+) -> Result<Value, Diagnostic> {
+    const OP: &str = "http_serve";
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network(OP));
+    }
+    if handler_name.is_empty() || handler_name.contains('\0') {
+        return Err(Diagnostic::error(
+            "E-HTTP-HANDLER",
+            &format!("{OP}({handler_name:?}) failed: unknown handler (want a top-level fn name)"),
+            "runtime",
+            0,
+            0,
+            "handler must name a top-level function taking the request map",
+            &["define a top-level fn handler(req) and pass its name as a string"],
+            "http/handler",
+        ));
+    }
+    let want = ctx.module.find(handler_name).map(|f| f.params.len());
+    match want {
+        None => {
+            return Err(Diagnostic::error(
+                "E-HTTP-HANDLER",
+                &format!("{OP}({handler_name:?}) failed: unknown function `{handler_name}`"),
+                "runtime",
+                0,
+                0,
+                "handler must name a top-level function",
+                &["define the handler fn first"],
+                "http/handler",
+            ));
+        }
+        Some(n) if n != 1 => {
+            return Err(Diagnostic::error(
+                "E-HTTP-HANDLER",
+                &format!("{OP}({handler_name:?}) failed: `{handler_name}` takes {n} args, want 1 (req)"),
+                "runtime",
+                0,
+                0,
+                "handler takes exactly the request map",
+                &["define fn handler(req) with one parameter"],
+                "http/handler",
+            ));
+        }
+        _ => {}
+    }
+    let opts = crate::stdlib::a3_http::parse_serve_options(opts_val)?;
+    let listener_val = crate::stdlib::a1_net::tcp_listen(host, port)?;
+    let listener_handle = match listener_val {
+        Value::Listener(h) => h,
+        _ => return Err(runtime_err("tcp_listen() did not return a listener")),
+    };
+    let port_got = {
+        let lv = Value::Listener(listener_handle.clone());
+        crate::stdlib::a1_net::listener_port(&lv)?
+    };
+    let cap = ((opts.workers * 4).max(8).min(1000)) as i64;
+    let jobs_val = crate::stdlib::a2_threads::chan(cap)?;
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let state = Arc::new(Mutex::new(crate::stdlib::a3_http::ServerState {
+        listener: listener_handle.clone(),
+        port: port_got,
+        handler: handler_name.to_string(),
+        workers: opts.workers,
+        max_body_bytes: opts.max_body_bytes,
+        read_timeout_ms: opts.read_timeout_ms,
+        max_header_bytes: opts.max_header_bytes,
+        running: running.clone(),
+        jobs: jobs_val.clone(),
+        accept: None,
+        worker_handles: Vec::new(),
+    }));
+    {
+        let mut reg = ctx.servers.lock().unwrap_or_else(|e| e.into_inner());
+        reg.push(state.clone());
+    }
+    let listener_for_accept = Value::Listener(listener_handle.clone());
+    let jobs_for_accept = jobs_val.clone();
+    let running_for_accept = running.clone();
+    let acc_handle = std::thread::Builder::new()
+        .name("klang-http-accept".to_string())
+        .stack_size(SPAWN_STACK_BYTES)
+        .spawn(move || {
+            loop {
+                if !running_for_accept.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                match crate::stdlib::a1_net::tcp_accept_timeout(
+                    &listener_for_accept,
+                    crate::stdlib::a3_http::ACCEPT_POLL_MS,
+                ) {
+                    Ok(Value::Null) => continue,
+                    Ok(conn_val) => {
+                        match crate::stdlib::a2_threads::send(&jobs_for_accept, &conn_val) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                if e.code == "E-CHAN-CLOSED" {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if e.code == "E-NET-CLOSED"
+                            || !running_for_accept.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
+        })
+        .map_err(|e| concurrent_err(&format!("failed to spawn http acceptor: {e}")))?;
+    let mut worker_handles = Vec::new();
+    for i in 0..opts.workers {
+        let child = ctx.clone();
+        let jobs_clone = jobs_val.clone();
+        let running_clone = running.clone();
+        let handler_owned = handler_name.to_string();
+        let h = std::thread::Builder::new()
+            .name(format!("klang-http-worker-{i}"))
+            .stack_size(SPAWN_STACK_BYTES)
+            .spawn(move || {
+                crate::stdlib::a3_http::mark_http_worker();
+                let wid = crate::stdlib::a2_threads::alloc_thread_id();
+                crate::stdlib::a2_threads::set_current_thread_id(wid);
+                let opts_copy = crate::stdlib::a3_http::ServeOptions {
+                    workers: opts.workers,
+                    max_body_bytes: opts.max_body_bytes,
+                    read_timeout_ms: opts.read_timeout_ms,
+                    max_header_bytes: opts.max_header_bytes,
+                };
+                loop {
+                    let job = match crate::stdlib::a2_threads::recv(&jobs_clone) {
+                        Ok(Value::Null) => break,
+                        Ok(v) => v,
+                        Err(e) => {
+                            if e.code.starts_with("E-SANDBOX") {
+                                break;
+                            }
+                            if !running_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    handle_http_conn(&child, &job, &handler_owned, &opts_copy, &running_clone);
+                }
+            })
+            .map_err(|e| concurrent_err(&format!("failed to spawn http worker: {e}")))?;
+        worker_handles.push(h);
+    }
+    {
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        st.accept = Some(acc_handle);
+        st.worker_handles = worker_handles;
+    }
+    Ok(Value::Server(state))
+}
+
+fn handle_http_conn(
+    ctx: &ExecCtx,
+    conn_val: &Value,
+    handler_name: &str,
+    opts: &crate::stdlib::a3_http::ServeOptions,
+    running: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let conn_clone = conn_val.clone();
+    if opts.read_timeout_ms == 0 {
+        let _ = crate::stdlib::a1_net::conn_set_timeout(&conn_clone, 0);
+    } else {
+        let _ = crate::stdlib::a1_net::conn_set_timeout(&conn_clone, opts.read_timeout_ms as i64);
+    }
+    let remote = match crate::stdlib::a1_net::conn_peer(&conn_clone) {
+        Ok(s) => s,
+        Err(_) => "unknown".to_string(),
+    };
+    loop {
+        if !running.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        let line_val = match crate::stdlib::a1_net::conn_read_line(&conn_clone) {
+            Ok(v) => v,
+            Err(e) => {
+                if e.code == "E-NET-TIMEOUT" {
+                    let body = "request timeout";
+                    let resp = crate::stdlib::a3_http::format_response(408, &[], body, false);
+                    let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+                }
+                break;
+            }
+        };
+        let line = match line_val {
+            Value::Null => break,
+            Value::Str(s) => s,
+            _ => {
+                let resp = crate::stdlib::a3_http::format_response(400, &[], "bad request", false);
+                let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+                break;
+            }
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let Some((method, target, version)) = crate::stdlib::a3_http::split_request_line(&line) else {
+            let resp = crate::stdlib::a3_http::format_response(400, &[], "bad request", false);
+            let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+            break;
+        };
+        if method.len() > 16 || target.len() > 8192 || version.len() > 16 {
+            let resp = crate::stdlib::a3_http::format_response(400, &[], "bad request", false);
+            let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+            break;
+        }
+        let mut header_bytes = line.len() + 2;
+        let mut headers: Vec<(String, String)> = Vec::new();
+        let mut bad_headers = false;
+        let mut header_timed_out = false;
+        let mut oversize_headers = false;
+        let mut req_conn_close = false;
+        let mut req_conn_keep = false;
+        let mut content_len: Option<usize> = None;
+        let mut chunked = false;
+        loop {
+            let hline_val = match crate::stdlib::a1_net::conn_read_line(&conn_clone) {
+                Ok(v) => v,
+                Err(e) => {
+                    if e.code == "E-NET-TIMEOUT" {
+                        let resp = crate::stdlib::a3_http::format_response(408, &[], "request timeout", false);
+                        let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+                        header_timed_out = true;
+                    } else {
+                        bad_headers = true;
+                    }
+                    break;
+                }
+            };
+            let hline = match hline_val {
+                Value::Null => {
+                    bad_headers = true;
+                    break;
+                }
+                Value::Str(s) => s,
+                _ => {
+                    bad_headers = true;
+                    break;
+                }
+            };
+            if hline.is_empty() {
+                break;
+            }
+            header_bytes += hline.len() + 2;
+            if header_bytes > opts.max_header_bytes {
+                oversize_headers = true;
+                break;
+            }
+            if hline.len() > 8192 {
+                bad_headers = true;
+                break;
+            }
+            let Some(colon) = hline.find(':') else {
+                bad_headers = true;
+                break;
+            };
+            let name = hline[..colon].trim().to_lowercase();
+            let value = hline[colon + 1..].trim().to_string();
+            if name.is_empty() || name.contains([' ', '\t', '\r', '\n', '\0']) {
+                bad_headers = true;
+                break;
+            }
+            if name == "content-length" {
+                match value.parse::<usize>() {
+                    Ok(n) => content_len = Some(n),
+                    Err(_) => {
+                        bad_headers = true;
+                        break;
+                    }
+                }
+            }
+            if name == "transfer-encoding" && value.to_lowercase().contains("chunked") {
+                chunked = true;
+            }
+            if name == "connection" {
+                let lv = value.to_lowercase();
+                if lv.contains("close") {
+                    req_conn_close = true;
+                }
+                if lv.contains("keep-alive") {
+                    req_conn_keep = true;
+                }
+            }
+            match headers.iter_mut().find(|(k, _)| *k == name) {
+                Some((_, old)) => {
+                    old.push_str(", ");
+                    old.push_str(&value);
+                }
+                None => headers.push((name, value)),
+            }
+            if headers.len() > 200 {
+                oversize_headers = true;
+                break;
+            }
+        }
+        if oversize_headers {
+            let resp = crate::stdlib::a3_http::format_response(413, &[], "headers too large", false);
+            let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+            break;
+        }
+        if header_timed_out {
+            // 408 already sent above; just close (no double 400).
+            break;
+        }
+        if bad_headers {
+            let resp = crate::stdlib::a3_http::format_response(400, &[], "bad request", false);
+            let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+            break;
+        }
+        if chunked {
+            let resp = crate::stdlib::a3_http::format_response(400, &[], "chunked not supported", false);
+            let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+            break;
+        }
+        if let Some(n) = content_len {
+            if n > opts.max_body_bytes {
+                let resp = crate::stdlib::a3_http::format_response(413, &[], "body too large", false);
+                let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+                break;
+            }
+        }
+        let body = if let Some(n) = content_len {
+            if n == 0 {
+                String::new()
+            } else {
+                let mut acc = String::new();
+                let mut remaining = n;
+                let mut timed_out = false;
+                let mut peer_closed = false;
+                while remaining > 0 {
+                    let want = remaining.min(65536) as i64;
+                    match crate::stdlib::a1_net::conn_read(&conn_clone, want) {
+                        Ok(chunk) => {
+                            if chunk.is_empty() {
+                                peer_closed = true;
+                                break;
+                            }
+                            remaining = remaining.saturating_sub(chunk.len());
+                            acc.push_str(&chunk);
+                            if acc.len() > opts.max_body_bytes {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            if e.code == "E-NET-TIMEOUT" {
+                                timed_out = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if timed_out {
+                    let resp = crate::stdlib::a3_http::format_response(408, &[], "request timeout", false);
+                    let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+                    break;
+                }
+                if peer_closed && remaining > 0 {
+                    break;
+                }
+                if acc.len() > opts.max_body_bytes {
+                    let resp = crate::stdlib::a3_http::format_response(413, &[], "body too large", false);
+                    let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
+                    break;
+                }
+                acc
+            }
+        } else {
+            String::new()
+        };
+        let (path, query_str) = crate::stdlib::a3_http::split_target(&target);
+        let query = crate::stdlib::a3_http::parse_query(&query_str);
+        let req_val = Value::Map(vec![
+            ("method".to_string(), Value::Str(method.clone())),
+            ("path".to_string(), Value::Str(path.clone())),
+            ("query".to_string(), Value::Map(query)),
+            (
+                "headers".to_string(),
+                Value::Map(headers.iter().map(|(k, v)| (k.clone(), Value::Str(v.clone()))).collect()),
+            ),
+            ("body".to_string(), Value::Str(body)),
+            ("remote".to_string(), Value::Str(remote.clone())),
+        ]);
+        let child = ctx.clone();
+        let handler_result = exec_function(&child, handler_name, &[req_val], 0, &CancelToken::default());
+        let (status, resp_headers, resp_body) = match handler_result {
+            Ok(v) => match response_from_value(&v) {
+                Ok(t) => t,
+                Err(log_msg) => {
+                    log_http_error(&child, handler_name, &log_msg);
+                    (500, vec![("content-type".to_string(), "application/json".to_string())], "{\"error\":\"internal server error\"}".to_string())
+                }
+            },
+            Err(d) => {
+                log_http_error(&child, handler_name, &format!("{} {}", d.code, d.message));
+                (500, vec![("content-type".to_string(), "application/json".to_string())], "{\"error\":\"internal server error\"}".to_string())
+            }
+        };
+        let mut keep_alive = if version == "HTTP/1.1" {
+            !req_conn_close
+        } else {
+            req_conn_keep && !req_conn_close
+        };
+        if !running.load(std::sync::atomic::Ordering::SeqCst) {
+            keep_alive = false;
+        }
+        for (k, v) in &resp_headers {
+            if k.to_lowercase() == "connection" && v.to_lowercase().contains("close") {
+                keep_alive = false;
+            }
+        }
+        let resp_str = crate::stdlib::a3_http::format_response(status, &resp_headers, &resp_body, keep_alive);
+        if crate::stdlib::a1_net::conn_write(&conn_clone, &resp_str).is_err() {
+            break;
+        }
+        if !keep_alive {
+            break;
+        }
+    }
+    let _ = crate::stdlib::a1_net::conn_close(&conn_clone);
+}
+
+fn response_from_value(v: &Value) -> Result<(i64, Vec<(String, String)>, String), String> {
+    let m = match v {
+        Value::Map(pairs) => pairs,
+        _ => return Err("handler must return {status, headers, body}".to_string()),
+    };
+    let status = match m.iter().find(|(k, _)| k == "status") {
+        Some((_, Value::Int(n))) => *n,
+        Some((_, other)) => return Err(format!("response status is {} (want int)", other.render())),
+        None => return Err("response missing status".to_string()),
+    };
+    if !(100..=599).contains(&status) {
+        return Err(format!("response status {status} out of range 100..599"));
+    }
+    let headers_val = match m.iter().find(|(k, _)| k == "headers") {
+        Some((_, h)) => h,
+        None => return Err("response missing headers".to_string()),
+    };
+    let headers = crate::stdlib::a3_http::check_response_headers(headers_val).map_err(|e| e)?;
+    let body = match m.iter().find(|(k, _)| k == "body") {
+        Some((_, Value::Str(s))) => s.clone(),
+        Some((_, other)) => return Err(format!("response body is {} (want str)", other.render())),
+        None => return Err("response missing body".to_string()),
+    };
+    Ok((status, headers, body))
+}
+
+fn log_http_error(ctx: &ExecCtx, handler: &str, msg: &str) {
+    // Log to stderr only (hosting-platform logs, Render-style). Do NOT push
+    // to `ctx.output` (program stdout): handler failures must not pollute
+    // `print` output (gates assert exact stdout).
+    let _ = ctx;
+    eprintln!("http handler `{handler}` failed: {msg}");
 }
 
 /// S9 `sort_by(array, key_fn)`: stable ascending sort by key.

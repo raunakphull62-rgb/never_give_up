@@ -121,6 +121,16 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `close` | `(ch: chan)` | `int` (1, idempotent) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-THREADS` |
 | `signal_watch` | `(name: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-SIGNAL-UNKNOWN`, `E-SIGNAL-UNSUPPORTED`, `E-SANDBOX-SIGNAL` |
 | `signal_pending` | `(name: str)` | `bool` (`1` once, clears) | `E-ARITY`, `E-TYPE`, `E-SIGNAL-UNKNOWN`, `E-SIGNAL-UNSUPPORTED`, `E-SANDBOX-SIGNAL` |
+| `http_serve` | `(host: str, port: int, handler: str, opts: map)` | `unknown` (Server; port 0 = any) | `E-ARITY`, `E-TYPE`, `E-HTTP-HANDLER`, `E-HTTP-OPTIONS`, `E-NET-*`, `E-SANDBOX-NETWORK` |
+| `server_port` | `(s: server)` | `int` | `E-ARITY`, `E-TYPE`, `E-HTTP-CLOSED`, `E-SANDBOX-NETWORK` |
+| `http_stop` | `(s: server)` | `int` (1, idempotent) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-NETWORK` |
+| `http_request` | `(method: str, url: str, headers: map, body: str, timeout: int[, opts: map])` | `map{status,int;body,str;headers,map}` | `E-ARITY`, `E-TYPE`, `E-HTTP-*`, `E-SANDBOX-NETWORK` |
+| `http_json` | `(status: int, v: unknown)` | `map` (response, `Null`->`null`) | `E-ARITY`, `E-TYPE`, `E-HTTP-STATUS`, `E-JSON-STRINGIFY` |
+| `http_text` | `(status: int, body: str)` | `map` (response) | `E-ARITY`, `E-TYPE`, `E-HTTP-STATUS` |
+| `http_redirect` | `(url: str)` | `map` (302 + location) | `E-ARITY`, `E-TYPE`, `E-HTTP-URL` |
+| `route_match` | `(pat: str, path: str)` | `unknown` (map or null) | `E-ARITY`, `E-TYPE`, `E-HTTP-ROUTE` |
+| `json_decode` | `(s: str)` | `unknown` (`null`->null) | `E-ARITY`, `E-TYPE`, `E-JSON-PARSE` |
+| `json_stringify` | `(v: unknown, pretty: int)` | `str` (`null`->`null`) | `E-ARITY`, `E-TYPE`, `E-JSON-STRINGIFY` |
 
 ## Methods
 

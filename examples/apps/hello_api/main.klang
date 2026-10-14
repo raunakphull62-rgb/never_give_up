@@ -1,0 +1,46 @@
+fn handle(req: map) -> map {
+    if (req["method"] == "GET") {
+        if (req["path"] == "/health") {
+            return http_json(200, {"status": "ok"})
+        }
+        if (req["path"] == "/time") {
+            return http_json(200, {"time": now_iso()})
+        }
+    }
+    if (req["method"] == "POST") {
+        if (req["path"] == "/echo") {
+            try {
+                let v = json_decode(req["body"])
+                return http_json(200, {"echo": v})
+            } catch e {
+                return http_text(400, "bad json")
+            }
+        }
+    }
+    return http_text(404, "not found")
+}
+
+fn main() -> i32 {
+    signal_watch("TERM")
+    signal_watch("INT")
+    let port_str = get_env("PORT")
+    let port = 0
+    if (port_str != "") {
+        port = parse_int(port_str)
+    }
+    let s = http_serve("0.0.0.0", port, "handle", {"workers": 4})
+    print(("listening on " + str(server_port(s))))
+    let port_file = get_env("PORT_FILE")
+    if (port_file != "") {
+        write_file(port_file, str(server_port(s)))
+    }
+    while (signal_pending("TERM") == false) {
+        if (signal_pending("INT") == true) {
+            break
+        }
+        sleep_ms(50)
+    }
+    print("shutting down")
+    http_stop(s)
+    return 0
+}

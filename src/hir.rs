@@ -3652,6 +3652,43 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
     if func == "format" {
         return Ty::Str;
     }
+    // `http_request` takes 5 (method, url, headers, body, timeout) with an
+    // optional 6th options map (follow_redirects, max_redirects). Like
+    // `format`, it needs variable-arity handling before the exact table.
+    if func == "http_request" {
+        if args.len() != 5 && args.len() != 6 {
+            diags.push(Diagnostic::error(
+                "E-ARITY",
+                &format!("`http_request` takes 5 arguments (method, url, headers, body, timeout_ms) with an optional 6th options map, got {}", args.len()),
+                file,
+                0,
+                0,
+                "builtin arity must match",
+                &["pass 5 args, or 6 with an options map"],
+                "calls/arity",
+            ));
+            return Ty::Unknown;
+        }
+        if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+            diags.push(type_mismatch(file, "`http_request()` method", "str", &args[0]));
+        }
+        if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+            diags.push(type_mismatch(file, "`http_request()` url", "str", &args[1]));
+        }
+        if !matches!(&args[2], Ty::Map | Ty::Unknown) {
+            diags.push(type_mismatch(file, "`http_request()` headers", "map", &args[2]));
+        }
+        if !matches!(&args[3], Ty::Str | Ty::Unknown) {
+            diags.push(type_mismatch(file, "`http_request()` body", "str", &args[3]));
+        }
+        if !matches!(&args[4], Ty::Int | Ty::Unknown) {
+            diags.push(type_mismatch(file, "`http_request()` timeout", "i32", &args[4]));
+        }
+        if args.len() == 6 && !matches!(&args[5], Ty::Map | Ty::Unknown) {
+            diags.push(type_mismatch(file, "`http_request()` options", "map", &args[5]));
+        }
+        return Ty::Map;
+    }
     let arity = match func {
         "len" | "pop" | "keys" => 1,
         "push" | "range" | "write_file" | "append_file" | "run_process" | "spawn" | "run" => 2,
@@ -3692,6 +3729,9 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "thread_spawn" | "send" | "recv_timeout" => 2,
         "thread_join" | "chan" | "recv" | "try_recv" | "close" | "signal_watch" | "signal_pending" => 1,
         "thread_id" => 0,
+        "http_serve" => 4,
+        "server_port" | "http_stop" | "http_redirect" | "json_decode" => 1,
+        "http_json" | "http_text" | "route_match" | "json_stringify" => 2,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -4472,6 +4512,72 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
                 Ty::Int
             }
         }
+        // A3 HTTP server + client: server handles are `Unknown` (what
+        // `http_serve` returns); handler names and option maps are checked
+        // lightly (Unknown passes, scalars fail with E-TYPE).
+        "http_serve" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_serve()` host", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_serve()` port", "i32", &args[1]));
+            }
+            if !matches!(&args[2], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_serve()` handler", "str", &args[2]));
+            }
+            if !matches!(&args[3], Ty::Map | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_serve()` options", "map", &args[3]));
+            }
+            Ty::Unknown
+        }
+        "server_port" | "http_stop" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` server"), "server", &args[0]));
+            }
+            Ty::Int
+        }
+        "http_json" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_json()` status", "i32", &args[0]));
+            }
+            Ty::Map
+        }
+        "http_text" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_text()` status", "i32", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_text()` body", "str", &args[1]));
+            }
+            Ty::Map
+        }
+        "http_redirect" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`http_redirect()` url", "str", &args[0]));
+            }
+            Ty::Map
+        }
+        "route_match" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`route_match()` pattern", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`route_match()` path", "str", &args[1]));
+            }
+            Ty::Unknown
+        }
+        "json_decode" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`json_decode()` text", "str", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "json_stringify" => {
+            if !matches!(&args[1], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`json_stringify()` pretty", "i32", &args[1]));
+            }
+            Ty::Str
+        }
         _ => Ty::Unknown,
     }
 }
@@ -4688,6 +4794,16 @@ pub fn is_builtin(name: &str) -> bool {
             | "close"
             | "signal_watch"
             | "signal_pending"
+            | "http_serve"
+            | "server_port"
+            | "http_stop"
+            | "http_request"
+            | "http_json"
+            | "http_text"
+            | "http_redirect"
+            | "route_match"
+            | "json_decode"
+            | "json_stringify"
     )
 }
 
