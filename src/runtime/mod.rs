@@ -1809,6 +1809,28 @@ fn is_builtin(name: &str) -> bool {
             | "close"
             | "signal_watch"
             | "signal_pending"
+            | "dt_now"
+            | "dt_parse_iso"
+            | "dt_format"
+            | "dt_add"
+            | "dt_diff_ms"
+            | "dt_parts"
+            | "dt_parts_offset"
+            | "dt_from_parts"
+            | "dt_local_offset_minutes"
+            | "dt_is_leap"
+            | "dt_days_in_month"
+            | "gzip_compress"
+            | "gzip_decompress"
+            | "gzip_file"
+            | "gunzip_file"
+            | "zlib_compress"
+            | "zlib_decompress"
+            | "zlib_file"
+            | "unzlib_file"
+            | "tar_create"
+            | "tar_extract"
+            | "tar_extract_limit"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -2955,6 +2977,254 @@ fn exec_builtin(
             }
             let name = get(&args[0]).render();
             crate::stdlib::a2_threads::signal_pending(&name).map(|b| Value::Int(i64::from(b)))
+        }
+        // L1 datetime (pure UTC math; allowed in sandbox).
+        "dt_now" => {
+            if !args.is_empty() {
+                return Err(runtime_err("dt_now() takes 0 arguments"));
+            }
+            Ok(Value::Int(crate::stdlib::l1_datetime::dt_now()))
+        }
+        "dt_parse_iso" => {
+            if args.len() != 1 {
+                return Err(runtime_err("dt_parse_iso() takes 1 argument"));
+            }
+            let s = match get(&args[0]) {
+                Value::Str(v) => v,
+                other => return Err(type_err("dt_parse_iso", "a string", &other)),
+            };
+            crate::stdlib::l1_datetime::dt_parse_iso(&s).map(Value::Int)
+        }
+        "dt_format" => {
+            if args.len() != 2 {
+                return Err(runtime_err("dt_format() takes 2 arguments"));
+            }
+            let ms = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_format", "an int epoch", &other)),
+            };
+            let pat = match get(&args[1]) {
+                Value::Str(v) => v,
+                other => return Err(type_err("dt_format", "a string pattern", &other)),
+            };
+            crate::stdlib::l1_datetime::dt_format(ms, &pat).map(Value::Str)
+        }
+        "dt_add" => {
+            if args.len() != 2 {
+                return Err(runtime_err("dt_add() takes 2 arguments"));
+            }
+            let ms = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_add", "an int epoch", &other)),
+            };
+            let delta = get(&args[1]);
+            crate::stdlib::l1_datetime::dt_add(ms, &delta).map(Value::Int)
+        }
+        "dt_diff_ms" => {
+            if args.len() != 2 {
+                return Err(runtime_err("dt_diff_ms() takes 2 arguments"));
+            }
+            let a = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_diff_ms", "an int epoch", &other)),
+            };
+            let b = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_diff_ms", "an int epoch", &other)),
+            };
+            crate::stdlib::l1_datetime::dt_diff_ms(a, b).map(Value::Int)
+        }
+        "dt_parts" => {
+            if args.len() != 1 {
+                return Err(runtime_err("dt_parts() takes 1 argument"));
+            }
+            let ms = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_parts", "an int epoch", &other)),
+            };
+            crate::stdlib::l1_datetime::dt_parts(ms)
+        }
+        "dt_parts_offset" => {
+            if args.len() != 2 {
+                return Err(runtime_err("dt_parts_offset() takes 2 arguments"));
+            }
+            let ms = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_parts_offset", "an int epoch", &other)),
+            };
+            let off = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_parts_offset", "an int offset", &other)),
+            };
+            crate::stdlib::l1_datetime::dt_parts_offset(ms, off)
+        }
+        "dt_from_parts" => {
+            if args.len() != 6 {
+                return Err(runtime_err("dt_from_parts() takes 6 arguments"));
+            }
+            let mut nums = [0i64; 6];
+            for (i, a) in args.iter().enumerate() {
+                nums[i] = match get(a) {
+                    Value::Int(v) => v,
+                    other => {
+                        return Err(type_err("dt_from_parts", "int parts", &other));
+                    }
+                };
+            }
+            crate::stdlib::l1_datetime::dt_from_parts(
+                nums[0], nums[1], nums[2], nums[3], nums[4], nums[5],
+            )
+            .map(Value::Int)
+        }
+        "dt_local_offset_minutes" => {
+            if !args.is_empty() {
+                return Err(runtime_err("dt_local_offset_minutes() takes 0 arguments"));
+            }
+            Ok(Value::Int(
+                crate::stdlib::l1_datetime::dt_local_offset_minutes(),
+            ))
+        }
+        "dt_is_leap" => {
+            if args.len() != 1 {
+                return Err(runtime_err("dt_is_leap() takes 1 argument"));
+            }
+            let y = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_is_leap", "an int year", &other)),
+            };
+            Ok(Value::Int(crate::stdlib::l1_datetime::dt_is_leap(y)))
+        }
+        "dt_days_in_month" => {
+            if args.len() != 2 {
+                return Err(runtime_err("dt_days_in_month() takes 2 arguments"));
+            }
+            let y = match get(&args[0]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_days_in_month", "an int year", &other)),
+            };
+            let m = match get(&args[1]) {
+                Value::Int(v) => v,
+                other => return Err(type_err("dt_days_in_month", "an int month", &other)),
+            };
+            crate::stdlib::l1_datetime::dt_days_in_month(y, m).map(Value::Int)
+        }
+        // L1 compression: string forms are pure (sandbox-allowed); file
+        // forms go through the temp-dir guard in sandbox.
+        "gzip_compress" => {
+            if args.len() != 1 {
+                return Err(runtime_err("gzip_compress() takes 1 argument"));
+            }
+            let s = match get(&args[0]) {
+                Value::Str(v) => v,
+                other => return Err(type_err("gzip_compress", "a string", &other)),
+            };
+            crate::stdlib::l1_compress::gzip_compress(&s).map(Value::Str)
+        }
+        "gzip_decompress" => {
+            if args.len() != 1 {
+                return Err(runtime_err("gzip_decompress() takes 1 argument"));
+            }
+            let s = match get(&args[0]) {
+                Value::Str(v) => v,
+                other => return Err(type_err("gzip_decompress", "a hex string", &other)),
+            };
+            crate::stdlib::l1_compress::gzip_decompress(&s).map(Value::Str)
+        }
+        "gzip_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("gzip_file() takes 2 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::gzip_file(&src, &dst).map(Value::Int)
+        }
+        "gunzip_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("gunzip_file() takes 2 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::gunzip_file(&src, &dst).map(Value::Int)
+        }
+        "zlib_compress" => {
+            if args.len() != 1 {
+                return Err(runtime_err("zlib_compress() takes 1 argument"));
+            }
+            let s = match get(&args[0]) {
+                Value::Str(v) => v,
+                other => return Err(type_err("zlib_compress", "a string", &other)),
+            };
+            crate::stdlib::l1_compress::zlib_compress(&s).map(Value::Str)
+        }
+        "zlib_decompress" => {
+            if args.len() != 1 {
+                return Err(runtime_err("zlib_decompress() takes 1 argument"));
+            }
+            let s = match get(&args[0]) {
+                Value::Str(v) => v,
+                other => return Err(type_err("zlib_decompress", "a hex string", &other)),
+            };
+            crate::stdlib::l1_compress::zlib_decompress(&s).map(Value::Str)
+        }
+        "zlib_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("zlib_file() takes 2 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::zlib_file(&src, &dst).map(Value::Int)
+        }
+        "unzlib_file" => {
+            if args.len() != 2 {
+                return Err(runtime_err("unzlib_file() takes 2 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::unzlib_file(&src, &dst).map(Value::Int)
+        }
+        "tar_create" => {
+            if args.len() != 2 {
+                return Err(runtime_err("tar_create() takes 2 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::tar_create(&src, &dst).map(Value::Int)
+        }
+        "tar_extract" => {
+            if args.len() != 2 {
+                return Err(runtime_err("tar_extract() takes 2 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::tar_extract(&src, &dst).map(Value::Int)
+        }
+        "tar_extract_limit" => {
+            if args.len() != 3 {
+                return Err(runtime_err("tar_extract_limit() takes 3 arguments"));
+            }
+            let src = get(&args[0]).render();
+            let dst = get(&args[1]).render();
+            let max = match get(&args[2]) {
+                Value::Int(v) => v,
+                other => {
+                    return Err(type_err("tar_extract_limit", "an int limit", &other));
+                }
+            };
+            reject_unsafe_path(&src)?;
+            reject_unsafe_path(&dst)?;
+            crate::stdlib::l1_compress::tar_extract_limit(&src, &dst, max).map(Value::Int)
         }
         "__echo_create" => {
             if args.len() != 1 {

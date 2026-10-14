@@ -75,6 +75,20 @@ pub mod a1_net;
 /// `close` / `signal_watch` / `signal_pending`.
 pub mod a2_threads;
 
+/// L1 datetime: UTC epoch-millisecond civil math via `chrono`.
+/// Wired as the flat builtins `dt_now` / `dt_parse_iso` / `dt_format` /
+/// `dt_add` / `dt_diff_ms` / `dt_parts` / `dt_parts_offset` /
+/// `dt_from_parts` / `dt_local_offset_minutes` / `dt_is_leap` /
+/// `dt_days_in_month`.
+pub mod l1_datetime;
+
+/// L1 compression: gzip/zlib strings (hex) + files + tar.
+/// Wired as the flat builtins `gzip_compress` / `gzip_decompress` /
+/// `gzip_file` / `gunzip_file` / `zlib_compress` / `zlib_decompress` /
+/// `zlib_file` / `unzlib_file` / `tar_create` / `tar_extract` /
+/// `tar_extract_limit`.
+pub mod l1_compress;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {
