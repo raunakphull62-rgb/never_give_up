@@ -99,7 +99,9 @@ fn a1_listener_port_is_nonzero() {
 #[test]
 fn a1_tcp_echo_round_trip() {
     // Single-threaded rendezvous: connect queues, accept picks up.
-    let src = "fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) assert(is_null(s) == false) print(conn_write(c, \"hello\")) print(conn_read(s, 100)) print(conn_write(s, \"world\")) print(conn_read(c, 100)) conn_close(c) conn_close(s) conn_close(l) return 42 }";
+    // Reads loop until the exact byte count: `conn_read` is one syscall
+    // and may return a short prefix under load (documented A1 limit).
+    let src = "fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) assert(is_null(s) == false) print(conn_write(c, \"hello\")) let g1 = \"\" while len(g1) < 5 { let pc = conn_read(s, 5 - len(g1)) if pc == \"\" { break } g1 = g1 + pc } print(g1) print(conn_write(s, \"world\")) let g2 = \"\" while len(g2) < 5 { let pc = conn_read(c, 5 - len(g2)) if pc == \"\" { break } g2 = g2 + pc } print(g2) conn_close(c) conn_close(s) conn_close(l) return 42 }";
     let (v, out) = run_ok(src);
     assert_eq!(v, 42, "prints: {out:?}");
     assert_eq!(out, vec!["5", "hello", "5", "world"]);
@@ -125,7 +127,9 @@ fn a1_conn_read_line_close_is_null() {
 fn a1_hex_round_trip_binary_safe() {
     // 0x00, 0xFF and UTF-8 multibyte survive exactly via hex (single
     // round trip only: a second read would block with no data left).
-    let src = "fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) print(conn_write_hex(c, \"00ff48c3a9\")) print(conn_read_hex(s, 10)) conn_close(c) conn_close(s) conn_close(l) return 42 }";
+    // The hex read loops until all 10 chars: `conn_read_hex` is one
+    // syscall and may short-read under load (same A1 limit as `conn_read`).
+    let src = "fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) print(conn_write_hex(c, \"00ff48c3a9\")) let hx = \"\" while len(hx) < 10 { let pc = conn_read_hex(s, 10) if pc == \"\" { break } hx = hx + pc } print(hx) conn_close(c) conn_close(s) conn_close(l) return 42 }";
     let (v, out) = run_ok(src);
     assert_eq!(v, 42, "prints: {out:?}");
     assert_eq!(out, vec!["5", "00ff48c3a9"]);
@@ -152,7 +156,9 @@ fn a1_large_payload_1mb() {
     // 1 MB total via 16 x 64 KB chunked writes/reads (single-threaded:
     // one big write would deadlock filling TCP buffers before the peer
     // reads; chunked interleaving keeps every round under the buffers).
-    let src = "fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) let chunk = \"ab\".repeat(32768) assert(len(chunk) == 65536) let total = 0 let i = 0 while i < 16 { print(conn_write(c, chunk)) let got = conn_read(s, 65536) assert(got == chunk) total = total + len(got) i = i + 1 } print(total) conn_close(c) conn_close(s) conn_close(l) return 42 }";
+    // Each chunk read loops until the full 64 KB: one `conn_read` syscall
+    // may return a short prefix under load (same A1 limit as above).
+    let src = "fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) let chunk = \"ab\".repeat(32768) assert(len(chunk) == 65536) let total = 0 let i = 0 while i < 16 { print(conn_write(c, chunk)) let got = \"\" while len(got) < 65536 { let pc = conn_read(s, 65536 - len(got)) if pc == \"\" { break } got = got + pc } assert(got == chunk) total = total + len(got) i = i + 1 } print(total) conn_close(c) conn_close(s) conn_close(l) return 42 }";
     let (v, out) = run_ok(src);
     assert_eq!(v, 42, "prints: {out:?}");
     assert_eq!(out[0], "65536");
@@ -249,7 +255,16 @@ fn a1_blocking_accept_with_rust_client() {
         s.write_all(b"blocking-hi").expect("write");
     });
     let conn = klang::stdlib::a1_net::tcp_accept(&l).expect("accept");
-    let line = klang::stdlib::a1_net::conn_read(&conn, 100).expect("read");
+    // Loop until the full 11 bytes: `conn_read` is one syscall and may
+    // return a short prefix under load (same A1 limit as above).
+    let mut line = String::new();
+    while line.len() < 11 {
+        let part = klang::stdlib::a1_net::conn_read(&conn, 100).expect("read");
+        if part.is_empty() {
+            break;
+        }
+        line.push_str(&part);
+    }
     assert_eq!(line, "blocking-hi");
     klang::stdlib::a1_net::conn_close(&conn).expect("close conn");
     klang::stdlib::a1_net::conn_close(&l).expect("close listener");

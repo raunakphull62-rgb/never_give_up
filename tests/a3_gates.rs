@@ -131,7 +131,9 @@ fn a3_query_headers_remote_parsing() {
 #[test]
 fn a3_keepalive_reuse_raw() {
     // Two sequential GETs on one raw TCP conn (keep-alive then close).
-    let src = "fn h(req: map) -> map { return http_text(200, \"ok-\" + req[\"path\"]) } fn main() -> i32 { let s = http_serve(\"127.0.0.1\", 0, \"h\", {}) let p = server_port(s) let c = tcp_connect(\"127.0.0.1\", p, 5000) conn_set_timeout(c, 5000) conn_write(c, \"GET /a HTTP/1.1\\r\\nHost: x\\r\\nConnection: keep-alive\\r\\n\\r\\n\") print(conn_read_line(c)) let hl = conn_read_line(c) while hl != \"\" { hl = conn_read_line(c) } print(conn_read(c, 5)) conn_write(c, \"GET /b HTTP/1.1\\r\\nHost: x\\r\\nConnection: close\\r\\n\\r\\n\") print(conn_read_line(c)) let h2 = conn_read_line(c) while h2 != \"\" { h2 = conn_read_line(c) } print(conn_read(c, 5)) conn_close(c) http_stop(s) return 42 }";
+    // Body reads loop until the exact 5 bytes: `conn_read` is one syscall
+    // and may short-read under load (same A1 limit as above).
+    let src = "fn h(req: map) -> map { return http_text(200, \"ok-\" + req[\"path\"]) } fn main() -> i32 { let s = http_serve(\"127.0.0.1\", 0, \"h\", {}) let p = server_port(s) let c = tcp_connect(\"127.0.0.1\", p, 5000) conn_set_timeout(c, 5000) conn_write(c, \"GET /a HTTP/1.1\\r\\nHost: x\\r\\nConnection: keep-alive\\r\\n\\r\\n\") print(conn_read_line(c)) let hl = conn_read_line(c) while hl != \"\" { hl = conn_read_line(c) } let b1 = \"\" while len(b1) < 5 { let pc = conn_read(c, 5 - len(b1)) if pc == \"\" { break } b1 = b1 + pc } print(b1) conn_write(c, \"GET /b HTTP/1.1\\r\\nHost: x\\r\\nConnection: close\\r\\n\\r\\n\") print(conn_read_line(c)) let h2 = conn_read_line(c) while h2 != \"\" { h2 = conn_read_line(c) } let b2 = \"\" while len(b2) < 5 { let pc = conn_read(c, 5 - len(b2)) if pc == \"\" { break } b2 = b2 + pc } print(b2) conn_close(c) http_stop(s) return 42 }";
     let (v, out) = run_ok(src);
     assert_eq!(v, 42, "prints: {out:?}");
     assert!(out[0].contains("200"), "first status: {out:?}");

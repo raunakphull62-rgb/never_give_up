@@ -202,7 +202,11 @@ fn a2_close_wakes_blocked_send() {
 fn a2_thread_serves_tcp() {
     // A1 handle moves to a worker thread (ownership transfer): the worker
     // reads a line and echoes with a prefix; the main thread is the client.
-    let src = "fn echo_worker(c: unknown) -> i32 { let line = conn_read_line(c) conn_write(c, \"hi:\") conn_write(c, line) conn_close(c) return 7 } fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) let t = thread_spawn(\"echo_worker\", [s]) conn_write(c, \"hello\\n\") print(conn_read(c, 100)) let r = thread_join(t) print(r) conn_close(c) conn_close(l) if r == 7 { return 42 } return 1 }";
+    // Single write on the worker (one segment) so the client's single
+    // `conn_read` sees the whole reply: `conn_read` is one syscall and may
+    // return a short prefix when the reply arrives in two chunks (known A1
+    // limit, not a Klang bug).
+    let src = "fn echo_worker(c: unknown) -> i32 { let line = conn_read_line(c) conn_write(c, \"hi:\" + line) conn_close(c) return 7 } fn main() -> i32 { let l = tcp_listen(\"127.0.0.1\", 0) let p = listener_port(l) let c = tcp_connect(\"127.0.0.1\", p, 5000) let s = tcp_accept_timeout(l, 5000) let t = thread_spawn(\"echo_worker\", [s]) conn_write(c, \"hello\\n\") print(conn_read(c, 100)) let r = thread_join(t) print(r) conn_close(c) conn_close(l) if r == 7 { return 42 } return 1 }";
     let (v, out) = run_ok(src);
     assert_eq!(v, 42, "prints: {out:?}");
     assert_eq!(out, vec!["hi:hello", "7"]);
