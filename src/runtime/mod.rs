@@ -1170,27 +1170,10 @@ fn run_instrs(
                 // module/output/server registry, so it lives here (like
                 // `thread_spawn`), not in `exec_builtin` (values-only).
                 // Reuses A1 sockets + A2 threads/channels (no second path).
+                // Delegates to `exec_http_serve` (separate function) to keep
+                // this hot loop's frame small (recursive_enum depth gate).
                 if func == "http_serve" {
-                    if args.len() != 4 {
-                        return Err(runtime_err("http_serve() takes 4 arguments (host, port, handler, options)"));
-                    }
-                    let host_val = lookup(&values, &ctx.stubs, &args[0]).unwrap_or(Value::Int(0));
-                    let port_val = lookup(&values, &ctx.stubs, &args[1]).unwrap_or(Value::Int(0));
-                    let handler_val = lookup(&values, &ctx.stubs, &args[2]).unwrap_or(Value::Int(0));
-                    let opts_val = lookup(&values, &ctx.stubs, &args[3]).unwrap_or(Value::Int(0));
-                    let host = match host_val {
-                        Value::Str(s) => s,
-                        other => return Err(type_err("http_serve", "a host string", &other)),
-                    };
-                    let port = match port_val {
-                        Value::Int(n) => n,
-                        other => return Err(type_err("http_serve", "an int port", &other)),
-                    };
-                    let handler_name = match handler_val {
-                        Value::Str(s) => s,
-                        other => return Err(type_err("http_serve", "a handler name string", &other)),
-                    };
-                    let v = start_http_server(ctx, &host, port, &handler_name, &opts_val)?;
+                    let v = exec_http_serve(ctx, args, &values)?;
                     values.insert(into.clone(), v.clone());
                     last = v;
                     pc += 1;
@@ -3232,8 +3215,35 @@ fn exec_builtin(
 // A3 HTTP server (built on A1 sockets + A2 threads/channels).
 // ---------------------------------------------------------------------------
 
-// Clean A3 server implementation (replaces the stub in runtime/mod.rs).
-// Paste this between `exec_builtin` end and `exec_sort_by` start.
+/// `http_serve` call site (separate function to keep `run_instrs`'s frame
+/// small for the recursive_enum depth gate). Looks up the four operands
+/// and delegates to [`start_http_server`].
+fn exec_http_serve(
+    ctx: &ExecCtx,
+    args: &[String],
+    values: &HashMap<String, Value>,
+) -> Result<Value, Diagnostic> {
+    if args.len() != 4 {
+        return Err(runtime_err("http_serve() takes 4 arguments (host, port, handler, options)"));
+    }
+    let host_val = lookup(values, &ctx.stubs, &args[0]).unwrap_or(Value::Int(0));
+    let port_val = lookup(values, &ctx.stubs, &args[1]).unwrap_or(Value::Int(0));
+    let handler_val = lookup(values, &ctx.stubs, &args[2]).unwrap_or(Value::Int(0));
+    let opts_val = lookup(values, &ctx.stubs, &args[3]).unwrap_or(Value::Int(0));
+    let host = match host_val {
+        Value::Str(s) => s,
+        other => return Err(type_err("http_serve", "a host string", &other)),
+    };
+    let port = match port_val {
+        Value::Int(n) => n,
+        other => return Err(type_err("http_serve", "an int port", &other)),
+    };
+    let handler_name = match handler_val {
+        Value::Str(s) => s,
+        other => return Err(type_err("http_serve", "a handler name string", &other)),
+    };
+    start_http_server(ctx, &host, port, &handler_name, &opts_val)
+}
 
 fn start_http_server(
     ctx: &ExecCtx,
