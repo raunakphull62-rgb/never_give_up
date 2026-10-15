@@ -3050,7 +3050,7 @@ fn main() -> i32 {
 <!-- ===== stdlib.md ===== -->
 # Klang stdlib — every builtin (generated from code)
 
-Source: `src/hir.rs:is_builtin` (100 flat) + `check_method_call`/`exec_method`
+Source: `src/hir.rs:is_builtin` (107 flat) + `check_method_call`/`exec_method`
 (14 str + 6 array + 3 map methods). If a builtin exists in code but not
 here, the gate fails. Each entry lists exact arity, return type (checker
 `Ty`), and error codes (checker `E-ARITY`/`E-TYPE` plus runtime codes).
@@ -3203,6 +3203,13 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `tar_create` | `(dir: str, out: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-CORRUPT`, `E-SANDBOX-FILE` (sandbox only) |
 | `tar_extract` | `(tar: str, dir: str)` | `int` (1; 256 MB cap) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
 | `tar_extract_limit` | `(tar: str, dir: str, max: int)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `pg_connect` | `(url: str)` | `unknown` (Pg) | `E-ARITY`, `E-TYPE`, `E-PG-CONNECT`, `E-PG-AUTH`, `E-SANDBOX-NETWORK` |
+| `pg_exec` | `(pg: pg, sql: str, params: array)` | `map{changes,int}` | `E-ARITY`, `E-TYPE`, `E-PG-SQL`, `E-PG-CLOSED`, `E-SANDBOX-NETWORK` |
+| `pg_query` | `(pg: pg, sql: str, params: array)` | `array<map>` | `E-ARITY`, `E-TYPE`, `E-PG-SQL`, `E-PG-CLOSED`, `E-SANDBOX-NETWORK` |
+| `pg_begin` | `(pg: pg)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-PG-TX`, `E-PG-CLOSED`, `E-SANDBOX-NETWORK` |
+| `pg_commit` | `(pg: pg)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-PG-TX`, `E-PG-CLOSED`, `E-SANDBOX-NETWORK` |
+| `pg_rollback` | `(pg: pg)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-PG-TX`, `E-PG-CLOSED`, `E-SANDBOX-NETWORK` |
+| `pg_close` | `(pg: pg)` | `int` (1, idempotent) | `E-ARITY`, `E-TYPE`, `E-SANDBOX-NETWORK` |
 
 ## Methods
 

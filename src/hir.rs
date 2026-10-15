@@ -3740,6 +3740,8 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         | "tar_extract" => 2,
         "tar_extract_limit" => 3,
         "dt_from_parts" => 6,
+        "pg_connect" | "pg_begin" | "pg_commit" | "pg_rollback" | "pg_close" => 1,
+        "pg_exec" | "pg_query" => 3,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -4710,6 +4712,44 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Int
         }
+        // A3b Postgres: Pg handles are `Unknown` (what `pg_connect`
+        // returns); SQL is `Str`, params are `Array`.
+        "pg_connect" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_connect()` url", "str", &args[0]));
+            }
+            Ty::Unknown
+        }
+        "pg_exec" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_exec()` pg", "pg", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_exec()` sql", "str", &args[1]));
+            }
+            if !matches!(&args[2], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_exec()` params", "array", &args[2]));
+            }
+            Ty::Map
+        }
+        "pg_query" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_query()` pg", "pg", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_query()` sql", "str", &args[1]));
+            }
+            if !matches!(&args[2], Ty::Array | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`pg_query()` params", "array", &args[2]));
+            }
+            Ty::Array
+        }
+        "pg_begin" | "pg_commit" | "pg_rollback" | "pg_close" => {
+            if !matches!(&args[0], Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` pg"), "pg", &args[0]));
+            }
+            Ty::Int
+        }
         _ => Ty::Unknown,
     }
 }
@@ -4958,6 +4998,13 @@ pub fn is_builtin(name: &str) -> bool {
             | "tar_create"
             | "tar_extract"
             | "tar_extract_limit"
+            | "pg_connect"
+            | "pg_exec"
+            | "pg_query"
+            | "pg_begin"
+            | "pg_commit"
+            | "pg_rollback"
+            | "pg_close"
     )
 }
 

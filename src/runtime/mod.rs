@@ -91,6 +91,10 @@ pub enum Value {
     /// A3 opaque HTTP server (stop via `http_stop`, port via
     /// `server_port`; closed at program exit like other handles).
     Server(crate::stdlib::a3_http::ServerHandle),
+    /// A3b opaque Postgres connection (close via `pg_close`; closed at
+    /// program exit like other handles; an open transaction aborts on
+    /// disconnect).
+    Pg(crate::stdlib::a3b_pg::PgHandle),
 }
 
 impl PartialEq for Value {
@@ -116,6 +120,7 @@ impl PartialEq for Value {
             (Self::Thread(a), Self::Thread(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::Chan(a), Self::Chan(b)) => std::sync::Arc::ptr_eq(a, b),
             (Self::Server(a), Self::Server(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Self::Pg(a), Self::Pg(b)) => std::sync::Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -143,6 +148,8 @@ impl Value {
             Self::Thread(_) | Self::Chan(_) => 0,
             // A3 servers likewise flow as 0.
             Self::Server(_) => 0,
+            // A3b Pg handles likewise flow as 0.
+            Self::Pg(_) => 0,
         }
     }
 
@@ -159,6 +166,7 @@ impl Value {
             Self::Listener(_) | Self::Conn(_) | Self::UdpSock(_) => 0.0,
             Self::Thread(_) | Self::Chan(_) => 0.0,
             Self::Server(_) => 0.0,
+            Self::Pg(_) => 0.0,
         }
     }
 
@@ -186,6 +194,8 @@ impl Value {
             Self::Thread(_) | Self::Chan(_) => true,
             // A3: servers are always truthy, even when stopped.
             Self::Server(_) => true,
+            // A3b: Pg handles are always truthy, even when closed.
+            Self::Pg(_) => true,
         }
     }
 
@@ -232,6 +242,8 @@ impl Value {
             Self::Chan(_) => "<chan>".to_string(),
             // A3: servers are opaque placeholders.
             Self::Server(_) => "<server>".to_string(),
+            // A3b: Pg handles are opaque placeholders (never leak the URL/password).
+            Self::Pg(_) => "<pg>".to_string(),
         }
     }
 
@@ -296,6 +308,7 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::Thread(_) => "thread",
         Value::Chan(_) => "chan",
         Value::Server(_) => "server",
+        Value::Pg(_) => "pg",
     }
 }
 
@@ -1894,6 +1907,13 @@ fn is_builtin(name: &str) -> bool {
             | "tar_create"
             | "tar_extract"
             | "tar_extract_limit"
+            | "pg_connect"
+            | "pg_exec"
+            | "pg_query"
+            | "pg_begin"
+            | "pg_commit"
+            | "pg_rollback"
+            | "pg_close"
             | "__echo_create"
             | "__echo_start"
             | "__echo_suspend"
@@ -3408,6 +3428,70 @@ fn exec_builtin(
             reject_unsafe_path(&src)?;
             reject_unsafe_path(&dst)?;
             crate::stdlib::l1_compress::tar_extract_limit(&src, &dst, max).map(Value::Int)
+        }
+        // A3b Postgres (all deny in sandbox with E-SANDBOX-NETWORK).
+        "pg_connect" => {
+            if args.len() != 1 {
+                return Err(runtime_err("pg_connect() takes 1 argument"));
+            }
+            let url = match get(&args[0]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("pg_connect", "a URL string", &other)),
+            };
+            crate::stdlib::a3b_pg::pg_connect(&url).map(Value::Pg)
+        }
+        "pg_exec" => {
+            if args.len() != 3 {
+                return Err(runtime_err("pg_exec() takes 3 arguments"));
+            }
+            let pg = get(&args[0]);
+            let sql = match get(&args[1]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("pg_exec", "a SQL string", &other)),
+            };
+            let params = get(&args[2]);
+            let n = crate::stdlib::a3b_pg::pg_exec(&pg, &sql, &params)?;
+            Ok(Value::Map(vec![("changes".to_string(), Value::Int(n))]))
+        }
+        "pg_query" => {
+            if args.len() != 3 {
+                return Err(runtime_err("pg_query() takes 3 arguments"));
+            }
+            let pg = get(&args[0]);
+            let sql = match get(&args[1]) {
+                Value::Str(s) => s,
+                other => return Err(type_err("pg_query", "a SQL string", &other)),
+            };
+            let params = get(&args[2]);
+            crate::stdlib::a3b_pg::pg_query(&pg, &sql, &params).map(Value::Array)
+        }
+        "pg_begin" => {
+            if args.len() != 1 {
+                return Err(runtime_err("pg_begin() takes 1 argument"));
+            }
+            let pg = get(&args[0]);
+            crate::stdlib::a3b_pg::pg_begin(&pg).map(|()| Value::Int(1))
+        }
+        "pg_commit" => {
+            if args.len() != 1 {
+                return Err(runtime_err("pg_commit() takes 1 argument"));
+            }
+            let pg = get(&args[0]);
+            crate::stdlib::a3b_pg::pg_commit(&pg).map(|()| Value::Int(1))
+        }
+        "pg_rollback" => {
+            if args.len() != 1 {
+                return Err(runtime_err("pg_rollback() takes 1 argument"));
+            }
+            let pg = get(&args[0]);
+            crate::stdlib::a3b_pg::pg_rollback(&pg).map(|()| Value::Int(1))
+        }
+        "pg_close" => {
+            if args.len() != 1 {
+                return Err(runtime_err("pg_close() takes 1 argument"));
+            }
+            let pg = get(&args[0]);
+            crate::stdlib::a3b_pg::pg_close(&pg).map(|()| Value::Int(1))
         }
         "__echo_create" => {
             if args.len() != 1 {

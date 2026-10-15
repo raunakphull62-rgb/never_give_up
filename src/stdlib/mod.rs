@@ -95,6 +95,11 @@ pub mod l1_datetime;
 /// `tar_extract_limit`.
 pub mod l1_compress;
 
+/// A3b Postgres client with opaque Pg handles.
+/// Wired as the flat builtins `pg_connect` / `pg_exec` / `pg_query` /
+/// `pg_begin` / `pg_commit` / `pg_rollback` / `pg_close`.
+pub mod a3b_pg;
+
 /// v2 stdlib error placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StdlibError {
