@@ -31,12 +31,13 @@
 //! `json_decode`/`json_stringify`: `Null` <-> SQL NULL, `Bool` <-> `Int`
 //! 0/1):
 //! integers (INT2/INT4/INT8/OID) -> `Int`, floats (FLOAT4/FLOAT8) ->
-//! `Float`, NUMERIC -> `Str` (exact decimal text, no float loss), text
-//! (TEXT/VARCHAR/CHAR/NAME) -> `Str`, BOOL -> `Int` (1/0), timestamps
-//! (TIMESTAMP/TIMESTAMPTZ/DATE/TIME) -> ISO `Str`, JSON/JSONB -> `Str`
-//! (canonical JSON text), NULL -> `Null` (`is_null`), other types ->
-//! `Str` via text output when possible, else `E-PG-TYPE`. Unknown-type
-//! columns never panic.
+//! `Float`, NUMERIC -> `E-PG-TYPE` unless cast in SQL (`n::text` -> `Str`,
+//! `n::float8` -> `Float`; exact decimal needs a cast since the driver has
+//! no arbitrary-precision decimal), text (TEXT/VARCHAR/CHAR/NAME) -> `Str`, BOOL ->
+//! `Int` (1/0), timestamps (TIMESTAMP/TIMESTAMPTZ/DATE/TIME) -> ISO `Str`,
+//! JSON/JSONB -> `Str` (canonical JSON text), NULL -> `Null` (`is_null`),
+//! other types -> `Str` via text output when possible, else `E-PG-TYPE`.
+//! Unknown-type columns never panic.
 //!
 //! Handles (`Pg`) are opaque `Value` variants holding
 //! `Arc<Mutex<...>>` state: they cannot be forged from ints, they compare
@@ -734,12 +735,10 @@ fn col_to_value(row: &postgres::Row, idx: usize) -> Result<Value, Diagnostic> {
             Err(e) => Err(type_err(OP, &format!("cannot decode FLOAT8 column {}: {e}", col.name()))),
         },
         Type::NUMERIC => {
-            // Exact decimal text (no float loss).
-            match row.try_get::<_, Option<String>>(idx) {
-                Ok(Some(s)) => Ok(Value::Str(s)),
-                Ok(None) => Ok(Value::Null),
-                Err(e) => Err(type_err(OP, &format!("cannot decode NUMERIC column {}: {e}", col.name()))),
-            }
+            // No arbitrary-precision decimal in the driver: use a SQL cast
+            // (`n::text` -> Str, `n::float8` -> Float). Direct NUMERIC reads
+            // are E-PG-TYPE (loud, never panic).
+            Err(type_err(OP, &format!("NUMERIC column {} needs a SQL cast (e.g. n::text or n::float8)", col.name())))
         }
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
             match row.try_get::<_, Option<String>>(idx) {
