@@ -128,8 +128,9 @@ fn x1_sandbox_file_absolute_outside_tmp_rejected_with_sandbox_code() {
 #[test]
 fn x1_nonsandbox_strict_file_keeps_runtime_code() {
     // F1: plain library mode (no sandbox) allows `..`; a missing target
-    // is E-IO-NOT-FOUND, never a sandbox code.
-    let src = "fn main() -> i32 { print(read_file(\"../evil\")) return 0 }";
+    // is E-IO-NOT-FOUND, never a sandbox code. Use a target that cannot
+    // exist on any machine.
+    let src = "fn main() -> i32 { print(read_file(\"../klang_gate_no_such_dir_7f3a_evil\")) return 0 }";
     let err = run_with_flags(src, false, false).expect_err("plain allows .., missing is IO");
     assert!(err.starts_with("E-IO-NOT-FOUND"), "got: {err}");
     assert!(!err.starts_with("E-SANDBOX"), "must not be sandbox code: {err}");

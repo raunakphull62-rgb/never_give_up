@@ -474,8 +474,10 @@ fn s9_slice_spawn_with_dynamic_toks() {
 fn s9_guard_library_rejects_parent_relative() {
     // F1: plain mode (library, non-sandbox) allows `..`; a missing target
     // is E-IO-NOT-FOUND, not E-RUNTIME. Sandbox still denies (see f1_gates).
+    // Use a target that cannot exist on any machine (not bare `evil`, which
+    // could theoretically exist in the parent dir).
     klang::runtime::set_file_guard_relaxed(false);
-    let src = "fn main() -> i32 { print(read_file(\"../evil\")) return 0 }";
+    let src = "fn main() -> i32 { print(read_file(\"../klang_gate_no_such_dir_7f3a_evil\")) return 0 }";
     let prog = check_ok(src);
     let mir = klang::mir::lower(&prog);
     let err =

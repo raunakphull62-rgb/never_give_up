@@ -143,7 +143,7 @@ fn model_parse_failure_is_failed_attempt_not_panic() {
 
 #[test]
 fn unsafe_import_in_response_rejected() {
-    let b = MockBackend::new(vec!["import \"../../etc/passwd\"\nfn main() -> i32 { return 1 }\n".into()]);
+    let b = MockBackend::new(vec!["import \"../../klang_gate_no_such_dir_7f3a/passwd\"\nfn main() -> i32 { return 1 }\n".into()]);
     let o = run_repair(
         "fn main() -> i32 { return x }\n",
         "t.klang",

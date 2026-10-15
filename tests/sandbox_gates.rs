@@ -35,11 +35,13 @@ fn sandbox_parent_escape_rejected() {
     // F1: plain mode allows `..` (OS decides). These targets do not exist,
     // so the result is E-IO-NOT-FOUND. Sandbox denial is E-SANDBOX-FILE
     // (see f1_gates / x1_sandbox_gates).
-    let src = "fn main() -> i32 { print(read_file(\"../../../etc/passwd\")) return 0 }";
+    // NOTE: must use a target that cannot exist on any machine (not a real
+    // system path like /etc/passwd, which exists when the repo is shallow).
+    let src = "fn main() -> i32 { print(read_file(\"../../../klang_gate_no_such_dir_7f3a/passwd\")) return 0 }";
     let err = run_src(src, "main").expect_err("escape must fail");
     assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
     // A buried `..` (not just a leading one) behaves identically.
-    let src = "fn main() -> i32 { print(read_file(\"sub/../../etc/passwd\")) return 0 }";
+    let src = "fn main() -> i32 { print(read_file(\"sub/../../klang_gate_no_such_dir_7f3a/passwd\")) return 0 }";
     let err = run_src(src, "main").expect_err("escape must fail");
     assert_eq!(err.code, "E-IO-NOT-FOUND", "got: {}", err.to_json());
 }
