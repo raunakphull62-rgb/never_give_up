@@ -658,7 +658,44 @@ ranges; no debugger/profiler.
 See [limitations](limitations.md) for the honest subset that matters
 most in practice.
 
-## 12. Formatter and language server
+## 12. Backend builtins (sockets, threads, HTTP, datetime, compression, Postgres)
+
+- Sockets: `tcp_listen(host, port)` (port `0` = any), `tcp_accept`,
+  `tcp_connect`, `conn_read` (one syscall — loop for exact sizes),
+  `conn_read_line` (frames lines, `null` at close), `conn_*_hex` for
+  exact bytes (strings are UTF-8), `udp_bind`/`udp_send_to`/`udp_recv_from`,
+  `dns_lookup`, `is_null` (no `null` literal). Handles are opaque,
+  identity-compared, closed at exit; sandbox denies with
+  `E-SANDBOX-NETWORK`.
+- Threads/channels/signals: `thread_spawn("fn", [args])` (named top-level
+  fn only), `thread_join` (re-raises `E-THREAD-FAILED`), `chan(n)`
+  (`1..1000000`, `0` rejected), `send`/`recv`/`recv_timeout`/`try_recv`/
+  `close` (`null` when empty/closed), `signal_watch`/`signal_pending`
+  (`INT`/`TERM`/`HUP`). Share-nothing data (deep-copied); handles clone
+  the `Arc` (give to ONE worker). Sandbox caps spawns at 4
+  (`E-SANDBOX-THREADS`).
+- HTTP/JSON: `http_serve(host, port, handler, opts)` + `server_port`/
+  `http_stop` (graceful; handler errors are `500`), `http_request`
+  (5 + optional 6th opts, redirects to 5), `http_json`/`http_text`/
+  `http_redirect`, `route_match("/notes/:id", path)`, `json_decode`
+  (`null`->`Null`, `true`/`false`->`1`/`0`) / `json_stringify`
+  (`Null`->`null`). Bodies need `Content-Length` (`chunked` is `400`).
+  `json_parse` is the package name (native is `json_decode`).
+- Datetime/compression: epoch-millis `Int` (UTC; `%z` is `+0000`; years
+  `1..9999`; fixed offsets `-1080..1080`); `gzip_*`/`zlib_*` (hex for
+  strings, files for binary); `tar_create` archives only (combine with
+  gzip), `tar_extract` caps 256 MB and rejects `..`/absolute/links.
+- Postgres: `pg_connect(url)` (redacted `***`), `pg_exec` (`{changes}`),
+  `pg_query` (array of maps), `pg_begin`/`pg_commit`/`pg_rollback`,
+  `pg_close` (idempotent). Params bound `$1` (never interpolated;
+  `Int`->INT4/INT8 by range, `Float`->FLOAT8, `Str`->TEXT, `Null`->NULL).
+  Reads: `INT`->`Int`, `FLOAT`->`Float`, `TEXT`->`Str`, `BOOL`->`Int` 0/1,
+  timestamps->ISO `Str`, JSON->`Str`, NULL->`Null`; NUMERIC needs
+  `::text`/`::float8` casts; `BOOL` writes use SQL literals. One
+  connection per request in handlers (no pool). Sandbox denies all seven.
+  See `docs/ai/backend.md` and `examples/apps/notes_api`.
+
+## 13. Formatter and language server
 
 `klang fmt [--write | --check] <file|dir> [paths...]` prints or rewrites
 the canonical form: 4-space indent, one statement per line, binary

@@ -143,6 +143,20 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   no stdin/file/process builtins, and the 26 package self-tests do not
   parse). Whatever it rejects, it rejects loudly (`E-PARSE-V2` /
   `E-UNDEFINED`), never silently.
+
+## Backend limits (Wave 2 A1/A2/A3/L1/A3b)
+
+- Sockets are blocking (`conn_read` is one syscall — loop; `conn_read_line`
+  frames lines); strings are UTF-8 (hex for binary); `null` has no literal.
+- Threads are share-nothing except handles (give a handle to ONE worker);
+  `chan(0)` rejected; join to observe failures; sandbox caps at 4.
+- HTTP needs `Content-Length` (`chunked` is `400`); `json_decode` is native
+  (`json_parse` is the package); handler errors are `500`.
+- Datetime is UTC millis (years `1..9999`, fixed offsets only); `tar_create`
+  does not compress; sandbox allows pure forms, temp-dir for files.
+- Postgres params are bound `$1` (`Int`/`Float`/`Str`/`Null` only);
+  NUMERIC needs `::text`/`::float8`; `BOOL` reads as `0`/`1`, writes via
+  literals; one connection per request in handlers; sandbox denies all.
 - **Packages**: manifest + FNV lockfile for local files is
   change-detection, not cryptography; registry pins add SHA-256
   (`package <name> <version> <sha256>` in `klang.lock`, verified on

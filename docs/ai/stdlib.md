@@ -452,3 +452,200 @@ fn main() -> i32 {
     return 0
 }
 ```
+
+Backend builtins (A1/A2/A3/L1/A3b) — verified
+
+Sockets + null (check only — needs loopback at run time; pure `is_null`
+runs):
+
+```klang check
+fn main() -> i32 {
+    let l = tcp_listen("127.0.0.1", 0)
+    print(listener_port(l))
+    let c = tcp_accept_timeout(l, 0)
+    print(is_null(c))
+    let s = tcp_connect("127.0.0.1", 0, 0)
+    print(conn_peer(s))
+    conn_set_timeout(s, 0)
+    print(conn_write(s, "hi"))
+    print(conn_read(s, 10))
+    print(conn_read_line(s))
+    print(conn_read_hex(s, 10))
+    print(conn_write_hex(s, "hi"))
+    conn_close(s)
+    conn_close(l)
+    let u = udp_bind("127.0.0.1", 0)
+    print(udp_send_to(u, "127.0.0.1", 0, "hi"))
+    print(udp_recv_from(u, 100, 0))
+    print(dns_lookup("localhost"))
+    print(is_null(c))
+    return 0
+}
+```
+
+```klang run
+fn main() -> i32 {
+    print(is_null(json_decode("null")))
+    print(is_null(0))
+    return 0
+}
+```
+
+```output
+1
+0
+```
+
+Threads, channels, signals (runs — no network):
+
+```klang run
+fn double(n: i32) -> i32 {
+    return n * 2
+}
+
+fn main() -> i32 {
+    print(thread_id() == 0)
+    let ch = chan(2)
+    send(ch, 5)
+    print(recv(ch))
+    print(recv_timeout(ch, 0))
+    print(try_recv(ch))
+    close(ch)
+    print(close(ch))
+    let t = thread_spawn("double", [21])
+    print(thread_join(t))
+    signal_watch("INT")
+    print(signal_pending("INT") == false)
+    return 0
+}
+```
+
+```output
+1
+5
+null
+null
+1
+42
+1
+```
+
+HTTP + JSON + routing (pure parts run; serve/request check only):
+
+```klang run
+fn main() -> i32 {
+    print(http_json(200, {"a": 1})["status"])
+    print(http_text(200, "hi")["status"])
+    print(http_redirect("http://x/")["status"])
+    print(route_match("/notes/:id", "/notes/7")["id"])
+    print(is_null(route_match("/a", "/b")))
+    print(json_decode("{\"a\": null}"))
+    print(json_stringify({"a": json_decode("null")}, 0))
+    return 0
+}
+```
+
+```output
+200
+200
+302
+7
+1
+{"a": null}
+{"a":null}
+```
+
+```klang check
+fn h(req: map) -> map {
+    return http_json(200, {"ok": 1})
+}
+
+fn main() -> i32 {
+    let s = http_serve("127.0.0.1", 0, "h", {"workers": 1})
+    print(server_port(s))
+    print(http_request("GET", "http://127.0.0.1/", {}, "", 1000)["status"])
+    http_stop(s)
+    print(json_decode("null"))
+    return 0
+}
+```
+
+Datetime (runs, UTC):
+
+```klang run
+fn main() -> i32 {
+    print(dt_now() > 0)
+    let ms = dt_from_parts(2024, 2, 29, 12, 34, 56)
+    print(dt_format(ms, "%Y-%m-%d"))
+    print(dt_format(ms, "%H:%M:%S"))
+    print(dt_diff_ms(dt_add(ms, {"days": 1}), ms))
+    print(dt_parts(ms)["day"])
+    print(dt_parts_offset(ms, 60)["hour"])
+    print(dt_local_offset_minutes() <= 1080)
+    print(dt_is_leap(2024))
+    print(dt_days_in_month(2024, 2))
+    print(dt_parse_iso("2024-02-29T12:34:56Z") == ms)
+    return 0
+}
+```
+
+```output
+1
+2024-02-29
+12:34:56
+86400000
+29
+13
+1
+1
+29
+1
+```
+
+Compression strings (runs, pure):
+
+```klang run
+fn main() -> i32 {
+    let g = gzip_compress("hello")
+    print(gzip_decompress(g))
+    print(zlib_decompress(zlib_compress("hello")))
+    return 0
+}
+```
+
+```output
+hello
+hello
+```
+
+Compression files + tar (check only — needs temp files at run time;
+gates cover live round trips):
+
+```klang check
+fn main() -> i32 {
+    print(gzip_file("a.txt", "a.gz"))
+    print(gunzip_file("a.gz", "b.txt"))
+    print(zlib_file("a.txt", "a.z"))
+    print(unzlib_file("a.z", "c.txt"))
+    print(tar_create("mydir", "out.tar"))
+    print(tar_extract("out.tar", "dest"))
+    print(tar_extract_limit("out.tar", "dest", 1000))
+    return 0
+}
+```
+
+Postgres (check only — needs DATABASE_URL at run time):
+
+```klang check
+fn main() -> i32 {
+    let db = pg_connect(get_env("DATABASE_URL"))
+    print(pg_exec(db, "SELECT 1", [])["changes"])
+    print(len(pg_query(db, "SELECT 1 as v", [])))
+    pg_begin(db)
+    pg_commit(db)
+    pg_begin(db)
+    pg_rollback(db)
+    pg_close(db)
+    return 0
+}
+```

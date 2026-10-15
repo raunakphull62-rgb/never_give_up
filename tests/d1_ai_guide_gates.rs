@@ -66,6 +66,9 @@ enum Block {
     Run { code: String, expected: Option<String> },
     Error { want: String, code: String },
     Silent { code: String },
+    /// Parse + type-check only (no run): for examples needing network or
+    /// a database (http_serve, pg_*). Verified via `Parser` + `TypedHIR`.
+    Check { code: String },
 }
 
 fn extract_blocks(md: &str) -> Vec<Block> {
@@ -133,6 +136,17 @@ fn extract_blocks(md: &str) -> Vec<Block> {
             }
             i += 1;
             out.push(Block::Silent { code });
+            continue;
+        } else if t == "```klang check" {
+            let mut code = String::new();
+            i += 1;
+            while i < lines.len() && lines[i].trim() != "```" {
+                code.push_str(lines[i]);
+                code.push('\n');
+                i += 1;
+            }
+            i += 1;
+            out.push(Block::Check { code });
             continue;
         }
         i += 1;
@@ -205,6 +219,19 @@ fn test_silent_block(code: &str, label: &str) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn test_check_block(code: &str, label: &str) {
+    // Parse + type-check only (no run, no network/DB): the program must
+    // parse and pass `TypedHIR::check`. Used for backend examples that
+    // need `http_serve` or Postgres at run time.
+    let mut p = klang::parser::Parser::new(code);
+    let prog = p.parse_program().unwrap_or_else(|_| panic!("{label}: check block must parse\ncode:\n{code}"));
+    let diags = klang::hir::TypedHIR::check(prog);
+    assert!(
+        diags.is_ok(),
+        "{label}: check block must type-check clean, got {diags:?}\ncode:\n{code}"
+    );
+}
+
 fn md_files_to_gate() -> Vec<std::path::PathBuf> {
     // Source files (not the generated concatenation, to avoid double-run).
     let names = [
@@ -212,6 +239,7 @@ fn md_files_to_gate() -> Vec<std::path::PathBuf> {
         "pitfalls.md",
         "python-to-klang.md",
         "stdlib.md",
+        "backend.md",
         "errors.md",
     ];
     names.iter().map(|n| ai_dir().join(n)).collect()
@@ -222,6 +250,7 @@ fn d1_all_fenced_blocks_pass() {
     let mut total_run = 0;
     let mut total_err = 0;
     let mut total_silent = 0;
+    let mut total_check = 0;
     for path in md_files_to_gate() {
         let md = std::fs::read_to_string(&path)
             .unwrap_or_else(|_| panic!("read {}", path.display()));
@@ -241,6 +270,10 @@ fn d1_all_fenced_blocks_pass() {
                     test_silent_block(code, &label);
                     total_silent += 1;
                 }
+                Block::Check { code } => {
+                    test_check_block(code, &label);
+                    total_check += 1;
+                }
             }
         }
     }
@@ -254,7 +287,7 @@ fn d1_all_fenced_blocks_pass() {
         total_silent >= 10,
         "expected >=10 silent blocks, got {total_silent}"
     );
-    eprintln!("d1 blocks: {total_run} run, {total_err} error, {total_silent} silent");
+    eprintln!("d1 blocks: {total_run} run, {total_err} error, {total_silent} silent, {total_check} check");
 }
 
 #[test]
@@ -442,7 +475,7 @@ fn d1_build_script_deterministic() {
     assert!(status.success(), "build script must exit 0");
     let after = std::fs::read_to_string(&out_path).expect("re-read guide");
     assert_eq!(before, after, "build script must be deterministic");
-    for part in ["core.md", "pitfalls.md", "python-to-klang.md", "stdlib.md", "errors.md"] {
+    for part in ["core.md", "pitfalls.md", "python-to-klang.md", "stdlib.md", "backend.md", "errors.md"] {
         assert!(
             after.contains(&format!("{part}")),
             "concatenated guide must contain {part} marker"

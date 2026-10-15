@@ -1771,3 +1771,210 @@ fn main() -> i32 {
 ```output
 1
 ```
+
+## Backend traps (A1/A2/A3/L1/A3b) — verified
+
+### B1 `conn_read` is one syscall, loop for exact sizes
+
+`conn_read(c, max)` returns one read (short reads return early).
+Loop for exact sizes; `conn_read_line` frames lines (strips `\n`/`\r\n`,
+`null` at close, final partial line returned once).
+
+```klang check
+fn copy_all(c: map) -> i32 {
+    return 0
+}
+
+fn main() -> i32 {
+    print(is_null(json_decode("null")))
+    return 0
+}
+```
+
+### B2 JSON `true`/`false` become `1`/`0`, no Bool value
+
+`Bool` erases to `Int` at runtime (prints `0`/`1`).
+
+```klang run
+fn main() -> i32 {
+    print(json_decode("true"))
+    print(json_decode("false"))
+    print(json_decode("null"))
+    print(json_stringify(json_decode("{\"a\": null}"), 0))
+    return 0
+}
+```
+
+```output
+1
+0
+null
+{"a":null}
+```
+
+### B3 HTTP bodies need `Content-Length`, chunked is `400`
+
+The server requires `Content-Length` (missing means `""`);
+`Transfer-Encoding: chunked` is `400`; oversize is `413`, slow is `408`.
+
+```klang check
+fn handle(req: map) -> map {
+    return http_json(200, {"len": len(req["body"])})
+}
+
+fn main() -> i32 {
+    let s = http_serve("127.0.0.1", 0, "handle", {"workers": 1})
+    print(server_port(s) > 0)
+    http_stop(s)
+    return 0
+}
+```
+
+### B4 `json_decode` is native, `json_parse` is the package
+
+The pure-Klang `json` package defines `json_parse` (with `$json`
+markers); the fast native is `json_decode` (throws `E-JSON-PARSE`).
+Same-named natives would trip `W-SHADOW`.
+
+```klang run
+fn main() -> i32 {
+    print(json_decode("{\"a\": 1}"))
+    return 0
+}
+```
+
+```output
+{"a": 1}
+```
+
+```klang error E-JSON-PARSE
+fn main() -> i32 {
+    print(json_decode("{bad"))
+    return 0
+}
+```
+
+### B5 `null` has no literal, use `is_null`
+
+Only `tcp_accept_timeout`/`conn_read_line`/`recv` produce `Null`;
+`str(null)` is `"null"`, null is falsy, `==` only to null.
+
+```klang run
+fn main() -> i32 {
+    print(is_null(json_decode("null")))
+    print(is_null(0))
+    print(str(json_decode("null")))
+    return 0
+}
+```
+
+```output
+1
+0
+null
+```
+
+### B6 handles are shared by clone, give to ONE worker
+
+`Listener`/`Conn`/`Chan` cross threads by `Arc` clone (same socket);
+concurrent use serializes, close-anywhere closes-everywhere. Move to at
+most one worker; sharing never crashes but interleaves.
+
+```klang check
+fn worker(c: map) -> i32 {
+    return 0
+}
+
+fn main() -> i32 {
+    let ch = chan(1)
+    send(ch, 1)
+    print(recv(ch))
+    close(ch)
+    return 0
+}
+```
+
+### B7 `chan(0)` is rejected, forgetting `thread_join` hides failures
+
+Capacity is `1..1000000` (`0` is `E-CHAN-CAPACITY`); unjoined threads are
+reaped with results ignored (join to observe `E-THREAD-FAILED`).
+
+```klang error E-CHAN-CAPACITY
+fn main() -> i32 {
+    let ch = chan(0)
+    return 0
+}
+```
+
+### B8 sandbox caps threads at 4, denies sockets/pg/HTTP
+
+Plain `run` allows network/threads; `run --sandbox` denies with
+`E-SANDBOX-*` (`is_null`/`thread_id`/pure JSON stay allowed).
+
+```klang check
+fn main() -> i32 {
+    print(thread_id() == 0)
+    print(is_null(json_decode("null")))
+    return 0
+}
+```
+
+### B9 datetime is UTC, fixed offsets only, years 1..9999
+
+Named zones unsupported; `%z` is `+0000`; `dt_parts_offset` takes
+`-1080..1080` minutes; `dt_from_parts` needs `1..9999`.
+
+```klang run
+fn main() -> i32 {
+    let ms = dt_from_parts(2024, 2, 29, 12, 0, 0)
+    print(dt_format(ms, "%Y-%m-%d %z"))
+    print(dt_is_leap(2024))
+    print(dt_days_in_month(2024, 2))
+    return 0
+}
+```
+
+```output
+2024-02-29 +0000
+1
+29
+```
+
+```klang error E-TIME-RANGE
+fn main() -> i32 {
+    print(dt_from_parts(2024, 2, 30, 0, 0, 0))
+    return 0
+}
+```
+
+### B10 `tar_create` archives, does not compress
+
+`tar_create(dir, out)` writes plain tar; combine with `gzip_file` for
+`.tar.gz`. Extraction rejects `..`/absolute/links
+(`E-COMPRESS-UNSAFE-PATH`) and caps at 256 MB (`E-COMPRESS-TOO-LARGE`).
+
+```klang check
+fn main() -> i32 {
+    print(gzip_decompress(gzip_compress("hi")))
+    return 0
+}
+```
+
+### B11 Postgres NUMERIC needs a cast, BOOL via literals, per-request conns
+
+Bare `NUMERIC` reads are `E-PG-TYPE`; use `n::text` (exact `Str`) or
+`n::float8` (Float). `BOOL` reads as `Int` 0/1; writes use SQL literals
+(no bool literal; `Int` params are INT). Handlers open per-request
+connections (no pool; avoids txn cross-talk).
+
+```klang check
+fn main() -> i32 {
+    let db = pg_connect(get_env("DATABASE_URL"))
+    let rows = pg_query(db, "SELECT n::text as n FROM t", [])
+    pg_exec(db, "INSERT INTO notes (text) VALUES ($1)", ["hi"])
+    pg_begin(db)
+    pg_rollback(db)
+    pg_close(db)
+    return 0
+}
+```

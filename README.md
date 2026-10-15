@@ -12,6 +12,7 @@ The current language includes functions, control flow, structs, arrays, maps, st
 - **Format source:** render a canonical form with consistent indentation and parenthesized operators.
 - **Integrate with coding agents:** run `klang check --json`, `klang run --sandbox`, and `klang fmt` so an external harness can check, run, and format with deterministic compiler feedback.
 - **Explore a separate v2 track:** explicitly check or run v2 programs using resonance types, schemas, flows, and echoes. V2 uses separate commands or an explicit language flag; `.klang` files do not silently switch modes.
+- **Write backends:** serve HTTP JSON APIs (`http_serve` + `route_match`), run worker threads with channels (`thread_spawn` + `chan`), store in Postgres (`pg_connect`/`pg_exec`/`pg_query` with bound `$1` params), and compress logs (`gzip_*` + `tar_*`). See `examples/apps/hello_api`, `examples/apps/notes_api`, `examples/apps/logship` and `docs/ai/backend.md`.
 
 ## Quick start
 

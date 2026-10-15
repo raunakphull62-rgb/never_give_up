@@ -1,6 +1,6 @@
 # Python to Klang translation
 
-60 common operations. Python column is for reference; Klang column was
+76 common operations. Python column is for reference; Klang column was
 executed (each snippet runs; full programs in `core.md` and `examples/`).
 Klang has no `None`, no classes, no `in` operator, no slicing syntax.
 
@@ -66,6 +66,22 @@ Klang has no `None`, no classes, no `in` operator, no slicing syntax.
 | 58 | argv | `sys.argv[1:]` | `args()` |
 | 59 | stdin line | `input()` | `read_line()` |
 | 60 | exit | `sys.exit(5)` | `exit(5)` |
+| 61 | HTTP GET | `requests.get(url).json()` | `http_request("GET", url, {}, "", 10000)["body"]` + `json_decode` |
+| 62 | HTTP server | `http.server` / `flask` | `http_serve("0.0.0.0", port, "handle", {"workers": 4})` + `http_stop` |
+| 63 | JSON null | `None` | `json_decode("null")` (`is_null`), no literal |
+| 64 | JSON round-trip | `json.loads/dumps` | `json_decode(s)` / `json_stringify(v, 0)` |
+| 65 | URL routing | `flask @route("/notes/<id>")` | `route_match("/notes/:id", path)["id"]` |
+| 66 | threads | `threading.Thread` | `thread_spawn("fn_name", [args])` + `thread_join` |
+| 67 | queue | `queue.Queue(n)` | `chan(n)` + `send`/`recv`/`close` |
+| 68 | signals | `signal.signal(SIGTERM, …)` | `signal_watch("TERM")` + `signal_pending("TERM")` |
+| 69 | sockets | `socket.create_connection` | `tcp_connect(host, port, ms)` + `conn_read`/`conn_write` |
+| 70 | DNS | `socket.gethostbyname` | `dns_lookup(host)` |
+| 71 | datetime now | `time.time()*1000` | `dt_now()` (epoch millis, UTC) |
+| 72 | parse ISO | `datetime.fromisoformat` | `dt_parse_iso(s)` |
+| 73 | format date | `strftime` | `dt_format(ms, "%Y-%m-%d")` |
+| 74 | gzip | `gzip.compress(b)` | `gzip_compress(s)` (hex) / `gzip_file(src, dst)` |
+| 75 | tar | `tarfile.open` | `tar_create(dir, out)` (plain tar; combine with gzip) |
+| 76 | postgres | `psycopg.connect` + `%s` params | `pg_connect(url)` + `pg_query(db, sql, [params])` (`$1` bound, never interpolated) |
 
 Verified mini-programs (each runs):
 

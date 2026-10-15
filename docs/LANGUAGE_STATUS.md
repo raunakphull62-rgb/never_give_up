@@ -465,6 +465,17 @@ capability/sandboxing model, and a versioning plan — Phase 2 design item D5).
   ≥ 2^63 bytes would wrap — unverifiable in this environment, flagged for the
   D3 design note.
 
+## Wave 2 backend stages (A1/A2/A3/L1/A3b; docs only here)
+
+Sockets/threads/HTTP/datetime/compression/Postgres are implemented and
+gated (`tests/a1_gates` 29, `a2_gates` 27, `a3_gates` 31, `l1_gates` 30,
+`a3b_gates` 21). See `docs/ai/backend.md` (HTTP JSON API, Postgres CRUD
+via `examples/apps/notes_api`, graceful `TERM`/`INT` shutdown, worker
+channels, gzip jobs) and `docs/progress/a1.md/a2.md/a3.md/l1.md/a3b.md`.
+`Bool` still erases to `Int` 0/1 at runtime (JSON `true`/`false` and PG
+`BOOL` read as `1`/`0`); there is no `null` literal (`is_null` tests
+`Null`/SQL NULL).
+
 ## Files changed (this phase)
 
 - `docs/LANGUAGE_STATUS.md` (this file; new). No compiler, runtime, stdlib,

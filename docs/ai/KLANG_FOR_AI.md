@@ -2892,10 +2892,217 @@ fn main() -> i32 {
 1
 ```
 
+## Backend traps (A1/A2/A3/L1/A3b) — verified
+
+### B1 `conn_read` is one syscall, loop for exact sizes
+
+`conn_read(c, max)` returns one read (short reads return early).
+Loop for exact sizes; `conn_read_line` frames lines (strips `\n`/`\r\n`,
+`null` at close, final partial line returned once).
+
+```klang check
+fn copy_all(c: map) -> i32 {
+    return 0
+}
+
+fn main() -> i32 {
+    print(is_null(json_decode("null")))
+    return 0
+}
+```
+
+### B2 JSON `true`/`false` become `1`/`0`, no Bool value
+
+`Bool` erases to `Int` at runtime (prints `0`/`1`).
+
+```klang run
+fn main() -> i32 {
+    print(json_decode("true"))
+    print(json_decode("false"))
+    print(json_decode("null"))
+    print(json_stringify(json_decode("{\"a\": null}"), 0))
+    return 0
+}
+```
+
+```output
+1
+0
+null
+{"a":null}
+```
+
+### B3 HTTP bodies need `Content-Length`, chunked is `400`
+
+The server requires `Content-Length` (missing means `""`);
+`Transfer-Encoding: chunked` is `400`; oversize is `413`, slow is `408`.
+
+```klang check
+fn handle(req: map) -> map {
+    return http_json(200, {"len": len(req["body"])})
+}
+
+fn main() -> i32 {
+    let s = http_serve("127.0.0.1", 0, "handle", {"workers": 1})
+    print(server_port(s) > 0)
+    http_stop(s)
+    return 0
+}
+```
+
+### B4 `json_decode` is native, `json_parse` is the package
+
+The pure-Klang `json` package defines `json_parse` (with `$json`
+markers); the fast native is `json_decode` (throws `E-JSON-PARSE`).
+Same-named natives would trip `W-SHADOW`.
+
+```klang run
+fn main() -> i32 {
+    print(json_decode("{\"a\": 1}"))
+    return 0
+}
+```
+
+```output
+{"a": 1}
+```
+
+```klang error E-JSON-PARSE
+fn main() -> i32 {
+    print(json_decode("{bad"))
+    return 0
+}
+```
+
+### B5 `null` has no literal, use `is_null`
+
+Only `tcp_accept_timeout`/`conn_read_line`/`recv` produce `Null`;
+`str(null)` is `"null"`, null is falsy, `==` only to null.
+
+```klang run
+fn main() -> i32 {
+    print(is_null(json_decode("null")))
+    print(is_null(0))
+    print(str(json_decode("null")))
+    return 0
+}
+```
+
+```output
+1
+0
+null
+```
+
+### B6 handles are shared by clone, give to ONE worker
+
+`Listener`/`Conn`/`Chan` cross threads by `Arc` clone (same socket);
+concurrent use serializes, close-anywhere closes-everywhere. Move to at
+most one worker; sharing never crashes but interleaves.
+
+```klang check
+fn worker(c: map) -> i32 {
+    return 0
+}
+
+fn main() -> i32 {
+    let ch = chan(1)
+    send(ch, 1)
+    print(recv(ch))
+    close(ch)
+    return 0
+}
+```
+
+### B7 `chan(0)` is rejected, forgetting `thread_join` hides failures
+
+Capacity is `1..1000000` (`0` is `E-CHAN-CAPACITY`); unjoined threads are
+reaped with results ignored (join to observe `E-THREAD-FAILED`).
+
+```klang error E-CHAN-CAPACITY
+fn main() -> i32 {
+    let ch = chan(0)
+    return 0
+}
+```
+
+### B8 sandbox caps threads at 4, denies sockets/pg/HTTP
+
+Plain `run` allows network/threads; `run --sandbox` denies with
+`E-SANDBOX-*` (`is_null`/`thread_id`/pure JSON stay allowed).
+
+```klang check
+fn main() -> i32 {
+    print(thread_id() == 0)
+    print(is_null(json_decode("null")))
+    return 0
+}
+```
+
+### B9 datetime is UTC, fixed offsets only, years 1..9999
+
+Named zones unsupported; `%z` is `+0000`; `dt_parts_offset` takes
+`-1080..1080` minutes; `dt_from_parts` needs `1..9999`.
+
+```klang run
+fn main() -> i32 {
+    let ms = dt_from_parts(2024, 2, 29, 12, 0, 0)
+    print(dt_format(ms, "%Y-%m-%d %z"))
+    print(dt_is_leap(2024))
+    print(dt_days_in_month(2024, 2))
+    return 0
+}
+```
+
+```output
+2024-02-29 +0000
+1
+29
+```
+
+```klang error E-TIME-RANGE
+fn main() -> i32 {
+    print(dt_from_parts(2024, 2, 30, 0, 0, 0))
+    return 0
+}
+```
+
+### B10 `tar_create` archives, does not compress
+
+`tar_create(dir, out)` writes plain tar; combine with `gzip_file` for
+`.tar.gz`. Extraction rejects `..`/absolute/links
+(`E-COMPRESS-UNSAFE-PATH`) and caps at 256 MB (`E-COMPRESS-TOO-LARGE`).
+
+```klang check
+fn main() -> i32 {
+    print(gzip_decompress(gzip_compress("hi")))
+    return 0
+}
+```
+
+### B11 Postgres NUMERIC needs a cast, BOOL via literals, per-request conns
+
+Bare `NUMERIC` reads are `E-PG-TYPE`; use `n::text` (exact `Str`) or
+`n::float8` (Float). `BOOL` reads as `Int` 0/1; writes use SQL literals
+(no bool literal; `Int` params are INT). Handlers open per-request
+connections (no pool; avoids txn cross-talk).
+
+```klang check
+fn main() -> i32 {
+    let db = pg_connect(get_env("DATABASE_URL"))
+    let rows = pg_query(db, "SELECT n::text as n FROM t", [])
+    pg_exec(db, "INSERT INTO notes (text) VALUES ($1)", ["hi"])
+    pg_begin(db)
+    pg_rollback(db)
+    pg_close(db)
+    return 0
+}
+```
+
 <!-- ===== python-to-klang.md ===== -->
 # Python to Klang translation
 
-60 common operations. Python column is for reference; Klang column was
+76 common operations. Python column is for reference; Klang column was
 executed (each snippet runs; full programs in `core.md` and `examples/`).
 Klang has no `None`, no classes, no `in` operator, no slicing syntax.
 
@@ -2961,6 +3168,22 @@ Klang has no `None`, no classes, no `in` operator, no slicing syntax.
 | 58 | argv | `sys.argv[1:]` | `args()` |
 | 59 | stdin line | `input()` | `read_line()` |
 | 60 | exit | `sys.exit(5)` | `exit(5)` |
+| 61 | HTTP GET | `requests.get(url).json()` | `http_request("GET", url, {}, "", 10000)["body"]` + `json_decode` |
+| 62 | HTTP server | `http.server` / `flask` | `http_serve("0.0.0.0", port, "handle", {"workers": 4})` + `http_stop` |
+| 63 | JSON null | `None` | `json_decode("null")` (`is_null`), no literal |
+| 64 | JSON round-trip | `json.loads/dumps` | `json_decode(s)` / `json_stringify(v, 0)` |
+| 65 | URL routing | `flask @route("/notes/<id>")` | `route_match("/notes/:id", path)["id"]` |
+| 66 | threads | `threading.Thread` | `thread_spawn("fn_name", [args])` + `thread_join` |
+| 67 | queue | `queue.Queue(n)` | `chan(n)` + `send`/`recv`/`close` |
+| 68 | signals | `signal.signal(SIGTERM, …)` | `signal_watch("TERM")` + `signal_pending("TERM")` |
+| 69 | sockets | `socket.create_connection` | `tcp_connect(host, port, ms)` + `conn_read`/`conn_write` |
+| 70 | DNS | `socket.gethostbyname` | `dns_lookup(host)` |
+| 71 | datetime now | `time.time()*1000` | `dt_now()` (epoch millis, UTC) |
+| 72 | parse ISO | `datetime.fromisoformat` | `dt_parse_iso(s)` |
+| 73 | format date | `strftime` | `dt_format(ms, "%Y-%m-%d")` |
+| 74 | gzip | `gzip.compress(b)` | `gzip_compress(s)` (hex) / `gzip_file(src, dst)` |
+| 75 | tar | `tarfile.open` | `tar_create(dir, out)` (plain tar; combine with gzip) |
+| 76 | postgres | `psycopg.connect` + `%s` params | `pg_connect(url)` + `pg_query(db, sql, [params])` (`$1` bound, never interpolated) |
 
 Verified mini-programs (each runs):
 
@@ -3503,6 +3726,398 @@ fn main() -> i32 {
 }
 ```
 
+Backend builtins (A1/A2/A3/L1/A3b) — verified
+
+Sockets + null (check only — needs loopback at run time; pure `is_null`
+runs):
+
+```klang check
+fn main() -> i32 {
+    let l = tcp_listen("127.0.0.1", 0)
+    print(listener_port(l))
+    let c = tcp_accept_timeout(l, 0)
+    print(is_null(c))
+    let s = tcp_connect("127.0.0.1", 0, 0)
+    print(conn_peer(s))
+    conn_set_timeout(s, 0)
+    print(conn_write(s, "hi"))
+    print(conn_read(s, 10))
+    print(conn_read_line(s))
+    print(conn_read_hex(s, 10))
+    print(conn_write_hex(s, "hi"))
+    conn_close(s)
+    conn_close(l)
+    let u = udp_bind("127.0.0.1", 0)
+    print(udp_send_to(u, "127.0.0.1", 0, "hi"))
+    print(udp_recv_from(u, 100, 0))
+    print(dns_lookup("localhost"))
+    print(is_null(c))
+    return 0
+}
+```
+
+```klang run
+fn main() -> i32 {
+    print(is_null(json_decode("null")))
+    print(is_null(0))
+    return 0
+}
+```
+
+```output
+1
+0
+```
+
+Threads, channels, signals (runs — no network):
+
+```klang run
+fn double(n: i32) -> i32 {
+    return n * 2
+}
+
+fn main() -> i32 {
+    print(thread_id() == 0)
+    let ch = chan(2)
+    send(ch, 5)
+    print(recv(ch))
+    print(recv_timeout(ch, 0))
+    print(try_recv(ch))
+    close(ch)
+    print(close(ch))
+    let t = thread_spawn("double", [21])
+    print(thread_join(t))
+    signal_watch("INT")
+    print(signal_pending("INT") == false)
+    return 0
+}
+```
+
+```output
+1
+5
+null
+null
+1
+42
+1
+```
+
+HTTP + JSON + routing (pure parts run; serve/request check only):
+
+```klang run
+fn main() -> i32 {
+    print(http_json(200, {"a": 1})["status"])
+    print(http_text(200, "hi")["status"])
+    print(http_redirect("http://x/")["status"])
+    print(route_match("/notes/:id", "/notes/7")["id"])
+    print(is_null(route_match("/a", "/b")))
+    print(json_decode("{\"a\": null}"))
+    print(json_stringify({"a": json_decode("null")}, 0))
+    return 0
+}
+```
+
+```output
+200
+200
+302
+7
+1
+{"a": null}
+{"a":null}
+```
+
+```klang check
+fn h(req: map) -> map {
+    return http_json(200, {"ok": 1})
+}
+
+fn main() -> i32 {
+    let s = http_serve("127.0.0.1", 0, "h", {"workers": 1})
+    print(server_port(s))
+    print(http_request("GET", "http://127.0.0.1/", {}, "", 1000)["status"])
+    http_stop(s)
+    print(json_decode("null"))
+    return 0
+}
+```
+
+Datetime (runs, UTC):
+
+```klang run
+fn main() -> i32 {
+    print(dt_now() > 0)
+    let ms = dt_from_parts(2024, 2, 29, 12, 34, 56)
+    print(dt_format(ms, "%Y-%m-%d"))
+    print(dt_format(ms, "%H:%M:%S"))
+    print(dt_diff_ms(dt_add(ms, {"days": 1}), ms))
+    print(dt_parts(ms)["day"])
+    print(dt_parts_offset(ms, 60)["hour"])
+    print(dt_local_offset_minutes() <= 1080)
+    print(dt_is_leap(2024))
+    print(dt_days_in_month(2024, 2))
+    print(dt_parse_iso("2024-02-29T12:34:56Z") == ms)
+    return 0
+}
+```
+
+```output
+1
+2024-02-29
+12:34:56
+86400000
+29
+13
+1
+1
+29
+1
+```
+
+Compression strings (runs, pure):
+
+```klang run
+fn main() -> i32 {
+    let g = gzip_compress("hello")
+    print(gzip_decompress(g))
+    print(zlib_decompress(zlib_compress("hello")))
+    return 0
+}
+```
+
+```output
+hello
+hello
+```
+
+Compression files + tar (check only — needs temp files at run time;
+gates cover live round trips):
+
+```klang check
+fn main() -> i32 {
+    print(gzip_file("a.txt", "a.gz"))
+    print(gunzip_file("a.gz", "b.txt"))
+    print(zlib_file("a.txt", "a.z"))
+    print(unzlib_file("a.z", "c.txt"))
+    print(tar_create("mydir", "out.tar"))
+    print(tar_extract("out.tar", "dest"))
+    print(tar_extract_limit("out.tar", "dest", 1000))
+    return 0
+}
+```
+
+Postgres (check only — needs DATABASE_URL at run time):
+
+```klang check
+fn main() -> i32 {
+    let db = pg_connect(get_env("DATABASE_URL"))
+    print(pg_exec(db, "SELECT 1", [])["changes"])
+    print(len(pg_query(db, "SELECT 1 as v", [])))
+    pg_begin(db)
+    pg_commit(db)
+    pg_begin(db)
+    pg_rollback(db)
+    pg_close(db)
+    return 0
+}
+```
+
+<!-- ===== backend.md ===== -->
+# Klang backend guide — HTTP, threads, Postgres, gzip
+
+Example-first. This chapter shows how to write a backend: a JSON API
+with routing (`route_match` + `http_json`), an HTTP server with graceful
+shutdown (`http_serve` + `signal_pending`), worker threads with channels
+(`thread_spawn` + `chan`/`send`/`recv`), a Postgres CRUD API (`pg_*`,
+based on `examples/apps/notes_api/main.klang`), and a logship-style gzip
+job (`dt_*` + `gzip_compress`). Blocks marked `klang run` execute;
+blocks marked `klang check` only parse and type-check (they need a
+network or database at run time).
+
+## JSON API with routing (runs)
+
+`route_match` returns a params map on match, `null` (`is_null`) on
+no-match. `http_json`/`http_text` build response maps.
+
+```klang run
+fn handle(path: str) -> str {
+    let m = route_match("/notes/:id", path)
+    if (is_null(m) == false) {
+        return m["id"]
+    }
+    return "none"
+}
+
+fn main() -> i32 {
+    print(handle("/notes/42"))
+    print(is_null(route_match("/a/:x", "/b/c")))
+    let r = http_json(200, {"status": "ok"})
+    print(r["status"])
+    return 0
+}
+```
+
+```output
+42
+1
+200
+```
+
+## HTTP server with graceful shutdown (check only — needs a port)
+
+Bind `0.0.0.0` with `PORT` from the environment, poll `TERM`/`INT`,
+then `http_stop`. `PORT_FILE` is a test hook (Render ignores it).
+
+```klang check
+fn handle(req: map) -> map {
+    if (req["method"] == "GET") {
+        if (req["path"] == "/health") {
+            return http_json(200, {"status": "ok"})
+        }
+    }
+    return http_text(404, "not found")
+}
+
+fn main() -> i32 {
+    signal_watch("TERM")
+    signal_watch("INT")
+    let port_str = get_env("PORT")
+    let port = 0
+    if (port_str != "") {
+        port = parse_int(port_str)
+    }
+    let s = http_serve("0.0.0.0", port, "handle", {"workers": 4})
+    print(server_port(s))
+    let port_file = get_env("PORT_FILE")
+    if (port_file != "") {
+        write_file(port_file, str(server_port(s)))
+    }
+    while (signal_pending("TERM") == false) {
+        if (signal_pending("INT") == true) {
+            break
+        }
+        sleep_ms(50)
+    }
+    http_stop(s)
+    return 0
+}
+```
+
+Rules: `http_serve(host, port, handler, opts)` (port `0` = any);
+`server_port(s)` is `E-HTTP-CLOSED` after stop; `http_stop(s)` is
+idempotent; handler errors become `500` JSON and the server keeps
+running; bodies need `Content-Length` (`chunked` is `400`); sandbox
+denies serve/port/stop/request with `E-SANDBOX-NETWORK`.
+
+## Worker threads with channels (runs)
+
+`thread_spawn` runs a named top-level function on a new OS thread;
+`chan`/`send`/`recv` move values (deep-copied); `thread_join` observes
+the result; unjoined threads are reaped at exit (join to see failures).
+
+```klang run
+fn double(n: i32) -> i32 {
+    return n * 2
+}
+
+fn main() -> i32 {
+    let ch = chan(4)
+    send(ch, 21)
+    print(recv(ch))
+    close(ch)
+    let t = thread_spawn("double", [21])
+    print(thread_join(t))
+    print(thread_id() == 0)
+    return 0
+}
+```
+
+```output
+21
+42
+1
+```
+
+Rules: pass a handle to ONE worker (cloned `Arc`, shared socket);
+`chan(0)` is `E-CHAN-CAPACITY` (use `1`); `recv` on closed-empty is
+`null`; `send` on closed is `E-CHAN-CLOSED`; forgetting `thread_join`
+hides `E-THREAD-FAILED`; sandbox caps spawns at 4 (`E-SANDBOX-THREADS`).
+
+## Postgres CRUD (check only — needs DATABASE_URL)
+
+One connection per request (no pool); params are always bound (`$1`);
+`Null` (`json_decode("null")`) binds as SQL NULL and every SQL NULL
+reads back as `Null` (`is_null`); `BOOL` reads as `Int` 0/1 (write BOOL
+with SQL literals); `NUMERIC` needs `::text`/`::float8` casts.
+
+```klang check
+fn get_note(db_url: str, id: i32) -> i32 {
+    let db = pg_connect(db_url)
+    let rows = pg_query(db, "SELECT id, text FROM notes WHERE id = $1", [id])
+    pg_close(db)
+    return len(rows)
+}
+
+fn main() -> i32 {
+    let db_url = get_env("DATABASE_URL")
+    let db = pg_connect(db_url)
+    pg_exec(db, "CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, text TEXT NOT NULL)", [])
+    let rows = pg_query(db, "INSERT INTO notes (text) VALUES ($1) RETURNING id", ["hi"])
+    print(rows[0]["id"])
+    pg_exec(db, "DELETE FROM notes WHERE id = $1", [rows[0]["id"]])
+    pg_begin(db)
+    pg_exec(db, "INSERT INTO notes (text) VALUES ($1)", ["tx"])
+    pg_rollback(db)
+    pg_close(db)
+    pg_close(db)
+    return 0
+}
+```
+
+Rules: `pg_exec` returns `{changes}`; `pg_query` returns array of maps;
+`pg_begin` twice / `commit`/`rollback` without `begin` is `E-PG-TX`;
+use-after-`pg_close` is `E-PG-CLOSED`; bad SQL is `E-PG-SQL` with
+`[SQLSTATE]`; bad password is `E-PG-AUTH` (redacted `***`, never the
+secret); sandbox denies all seven with `E-SANDBOX-NETWORK`; each request
+opens its own connection (the example handler connects per request).
+
+## Timestamps, JSON null, gzip job (runs)
+
+Datetime is UTC millis (`Int`); `%z` is always `+0000`; years `1..9999`;
+`tar_create` archives (does not compress — combine with gzip).
+
+```klang run
+fn main() -> i32 {
+    let ms = dt_from_parts(2024, 2, 29, 12, 0, 0)
+    print(dt_format(ms, "%Y-%m-%d"))
+    print(dt_is_leap(2024))
+    print(json_decode("null"))
+    print(is_null(json_decode("null")))
+    print(json_stringify(json_decode("{\"a\": null}"), 0))
+    let g = gzip_compress("hello")
+    print(gzip_decompress(g))
+    return 0
+}
+```
+
+```output
+2024-02-29
+1
+null
+1
+{"a":null}
+hello
+```
+
+## Full notes API (see example file)
+
+`examples/apps/notes_api/main.klang` wires it together: `GET /health`,
+`POST /notes` (`json_decode` body, `INSERT ... RETURNING id`),
+`GET /notes`, `GET /notes/:id` (`route_match`, 404 when empty),
+`DELETE /notes/:id` (`{changes}` decides 404), table created on startup,
+`PORT`/`DATABASE_URL` from the environment, `TERM`/`INT` shutdown.
+
 <!-- ===== errors.md ===== -->
 # Klang error codes — causes, repros, fixes
 
@@ -3534,6 +4149,7 @@ programs.
 | `E-RESERVED-FIELD` | struct field `__*`/`f<digits>` | rename field |
 | `E-IMPORT` | selective import missing name / split `mod` | check available names / whole-file import |
 | `E-IO-NOT-FOUND` | missing import/file (also bare-package miss) | create file / `klang add` |
+| `E-THREAD-CLOSURE` | closure as `thread_spawn` body | name a top-level `fn` |
 | `W-SHADOW` | `fn` reuses builtin name (builtins win) | rename |
 | `E-PARSE-INT` | `parse_int` bad text/range (run-time) | check input / `try` |
 | `E-PARSE-FLOAT` | `parse_float` bad text (run-time) | check input / `try` |
@@ -3757,7 +4373,50 @@ fn main() -> i32 {
 | `E-TYPE` | run-time type mismatch (dynamic `unknown` misused) | check types |
 | `E-SANDBOX-FILE` | file outside temp dir (or `..`) under `klang run --sandbox` only | run without `--sandbox` or use temp-dir paths |
 | `E-SANDBOX-SPAWN` | `spawn`/`run`/`run_process` under `--sandbox` only | run without `--sandbox` |
-| `E-SANDBOX-NETWORK` | `http_get`/`http_post` (sync/async) under `--sandbox` only | run without `--sandbox` |
+| `E-SANDBOX-NETWORK` | network under `--sandbox` only (`tcp_*`/`conn_*`/`udp_*`/`dns_lookup`, `http_serve`/`server_port`/`http_stop`/`http_request`, all `pg_*`) | run without `--sandbox` |
+| `E-SANDBOX-THREADS` | `thread_spawn` past 4 / any `chan`/`send`/`recv`/`recv_timeout`/`try_recv`/`close` under `--sandbox` | run without `--sandbox` (or `thread_id`, which stays allowed) |
+| `E-SANDBOX-SIGNAL` | `signal_watch`/`signal_pending` under `--sandbox` | run without `--sandbox` |
+| `E-NET-REFUSED` | `tcp_connect` refused | check listener/port |
+| `E-NET-TIMEOUT` | connect/read/write/`udp_recv_from` deadline | raise timeout / check peer |
+| `E-NET-ADDR-INVALID` | bad host/port | fix host, port `0..65535` |
+| `E-NET-ADDR-IN-USE` | bind to held port | use port `0` |
+| `E-NET-CLOSED` | locally-closed handle reused | don't reuse after close |
+| `E-NET-IO` | other IO (bad `max_bytes`/hex, RW failure) | check sizes/hex |
+| `E-NET-DNS` | `dns_lookup` / connect resolve failure | fix hostname |
+| `E-THREAD-UNKNOWN` | unknown `thread_spawn` target | check fn name |
+| `E-THREAD-ARITY` | target arg count mismatch | match params |
+| `E-THREAD-LIMIT` | over plain-mode max (default 256) | fewer threads / raise limit |
+| `E-THREAD-FAILED` | `thread_join` re-raises failure | fix thread body |
+| `E-CHAN-CLOSED` | `send` on closed chan | don't send after `close` |
+| `E-CHAN-CAPACITY` | bad `chan` capacity (`1..1000000`) | use `1`+ |
+| `E-CHAN-TIMEOUT` | bad `recv_timeout` ms | `0..24h` |
+| `E-SIGNAL-UNKNOWN` | bad signal name | `INT`/`TERM`/`HUP` |
+| `E-SIGNAL-UNSUPPORTED` | `TERM`/`HUP` on Windows | use `INT` there |
+| `E-HTTP-URL` | bad URL / redirect URL | fix URL |
+| `E-HTTP-METHOD` | bad method | `GET`/`POST`/`PUT`/`DELETE`/`PATCH`/`HEAD`/`OPTIONS` |
+| `E-HTTP-HEADER` | bad header name/value | `str->str` map |
+| `E-HTTP-TIMEOUT` | bad timeout or connect/read expiry | `0..120000` |
+| `E-HTTP-CONNECT` | refused/dns/tls/io transport failure | check host/port/TLS |
+| `E-HTTP-REDIRECT` | too many / loop | fewer redirects / disable |
+| `E-HTTP-OPTIONS` | bad serve/request options | check ranges |
+| `E-HTTP-HANDLER` | unknown handler / bad arity | name a `fn(req)->map` of 1 |
+| `E-HTTP-CLOSED` | `server_port` on stopped server | don't reuse after `http_stop` |
+| `E-HTTP-STATUS` | bad status `100..599` | use `100..599` |
+| `E-HTTP-ROUTE` | empty pattern/path or `:name` | fix pattern |
+| `E-JSON-PARSE` | invalid JSON / trailing garbage / depth | fix JSON |
+| `E-JSON-STRINGIFY` | closures/handles, non-finite floats, depth, >10MB | convert first |
+| `E-TIME-PARSE` | `dt_parse_iso` unparseable | ISO-8601/RFC-3339 |
+| `E-TIME-RANGE` | bad date parts / offset / epoch / overflow | check ranges |
+| `E-TIME-PATTERN` | bad `dt_format` verb / trailing `%` | `%Y %m %d %H %M %S %f %z %a %A %b %B %j %p`, `%%` |
+| `E-COMPRESS-CORRUPT` | bad hex / invalid gzip/zlib / non-UTF8 out / corrupt tar | check input |
+| `E-COMPRESS-TOO-LARGE` | over string/file/tar caps | smaller input / raise `tar_extract_limit` |
+| `E-COMPRESS-UNSAFE-PATH` | tar entry absolute/`..`/link | safe archive |
+| `E-PG-CONNECT` | bad URL / refused / TLS failure (redacted `***`) | fix URL/host/`sslmode` |
+| `E-PG-AUTH` | bad password/user (`28P01`, redacted) | fix credentials |
+| `E-PG-SQL` | SQL failure (`[SQLSTATE]` message) | fix SQL/params |
+| `E-PG-TYPE` | unsupported param / column type (incl. bare NUMERIC) | cast in SQL (`::text`) |
+| `E-PG-CLOSED` | use after `pg_close` | don't reuse after close |
+| `E-PG-TX` | begin-twice / commit-without-begin | match txn state |
 
 Sandbox codes only trigger under `klang run --sandbox` (plain `run` uses
 `E-IO-*` for files and `E-PROCESS-*`/`E-NET-*` for spawn/network). Examples (shell,
@@ -3871,6 +4530,71 @@ fn main() -> i32 {
 ```klang error E-ENV-INVALID
 fn main() -> i32 {
     set_env("a=b", "x")
+    return 0
+}
+```
+
+```klang error E-NET-ADDR-INVALID
+fn main() -> i32 {
+    print(tcp_listen("127.0.0.1", 99999))
+    return 0
+}
+```
+
+```klang error E-CHAN-CAPACITY
+fn main() -> i32 {
+    let ch = chan(0)
+    return 0
+}
+```
+
+```klang error E-THREAD-CLOSURE
+fn main() -> i32 {
+    let t = thread_spawn(fn(x: i32) -> i32 {
+        return x
+    }, [])
+    return 0
+}
+```
+
+```klang error E-HTTP-URL
+fn main() -> i32 {
+    print(http_request("GET", "not a url !!!", {}, "", 1000))
+    return 0
+}
+```
+
+```klang error E-JSON-PARSE
+fn main() -> i32 {
+    print(json_decode("{bad"))
+    return 0
+}
+```
+
+```klang error E-TIME-PARSE
+fn main() -> i32 {
+    print(dt_parse_iso("not-a-date"))
+    return 0
+}
+```
+
+```klang error E-TIME-RANGE
+fn main() -> i32 {
+    print(dt_from_parts(2024, 2, 30, 0, 0, 0))
+    return 0
+}
+```
+
+```klang error E-COMPRESS-CORRUPT
+fn main() -> i32 {
+    print(gzip_decompress("zz"))
+    return 0
+}
+```
+
+```klang error E-PG-CONNECT
+fn main() -> i32 {
+    print(pg_connect("http://localhost/db"))
     return 0
 }
 ```

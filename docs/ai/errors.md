@@ -28,6 +28,7 @@ programs.
 | `E-RESERVED-FIELD` | struct field `__*`/`f<digits>` | rename field |
 | `E-IMPORT` | selective import missing name / split `mod` | check available names / whole-file import |
 | `E-IO-NOT-FOUND` | missing import/file (also bare-package miss) | create file / `klang add` |
+| `E-THREAD-CLOSURE` | closure as `thread_spawn` body | name a top-level `fn` |
 | `W-SHADOW` | `fn` reuses builtin name (builtins win) | rename |
 | `E-PARSE-INT` | `parse_int` bad text/range (run-time) | check input / `try` |
 | `E-PARSE-FLOAT` | `parse_float` bad text (run-time) | check input / `try` |
@@ -251,7 +252,50 @@ fn main() -> i32 {
 | `E-TYPE` | run-time type mismatch (dynamic `unknown` misused) | check types |
 | `E-SANDBOX-FILE` | file outside temp dir (or `..`) under `klang run --sandbox` only | run without `--sandbox` or use temp-dir paths |
 | `E-SANDBOX-SPAWN` | `spawn`/`run`/`run_process` under `--sandbox` only | run without `--sandbox` |
-| `E-SANDBOX-NETWORK` | `http_get`/`http_post` (sync/async) under `--sandbox` only | run without `--sandbox` |
+| `E-SANDBOX-NETWORK` | network under `--sandbox` only (`tcp_*`/`conn_*`/`udp_*`/`dns_lookup`, `http_serve`/`server_port`/`http_stop`/`http_request`, all `pg_*`) | run without `--sandbox` |
+| `E-SANDBOX-THREADS` | `thread_spawn` past 4 / any `chan`/`send`/`recv`/`recv_timeout`/`try_recv`/`close` under `--sandbox` | run without `--sandbox` (or `thread_id`, which stays allowed) |
+| `E-SANDBOX-SIGNAL` | `signal_watch`/`signal_pending` under `--sandbox` | run without `--sandbox` |
+| `E-NET-REFUSED` | `tcp_connect` refused | check listener/port |
+| `E-NET-TIMEOUT` | connect/read/write/`udp_recv_from` deadline | raise timeout / check peer |
+| `E-NET-ADDR-INVALID` | bad host/port | fix host, port `0..65535` |
+| `E-NET-ADDR-IN-USE` | bind to held port | use port `0` |
+| `E-NET-CLOSED` | locally-closed handle reused | don't reuse after close |
+| `E-NET-IO` | other IO (bad `max_bytes`/hex, RW failure) | check sizes/hex |
+| `E-NET-DNS` | `dns_lookup` / connect resolve failure | fix hostname |
+| `E-THREAD-UNKNOWN` | unknown `thread_spawn` target | check fn name |
+| `E-THREAD-ARITY` | target arg count mismatch | match params |
+| `E-THREAD-LIMIT` | over plain-mode max (default 256) | fewer threads / raise limit |
+| `E-THREAD-FAILED` | `thread_join` re-raises failure | fix thread body |
+| `E-CHAN-CLOSED` | `send` on closed chan | don't send after `close` |
+| `E-CHAN-CAPACITY` | bad `chan` capacity (`1..1000000`) | use `1`+ |
+| `E-CHAN-TIMEOUT` | bad `recv_timeout` ms | `0..24h` |
+| `E-SIGNAL-UNKNOWN` | bad signal name | `INT`/`TERM`/`HUP` |
+| `E-SIGNAL-UNSUPPORTED` | `TERM`/`HUP` on Windows | use `INT` there |
+| `E-HTTP-URL` | bad URL / redirect URL | fix URL |
+| `E-HTTP-METHOD` | bad method | `GET`/`POST`/`PUT`/`DELETE`/`PATCH`/`HEAD`/`OPTIONS` |
+| `E-HTTP-HEADER` | bad header name/value | `str->str` map |
+| `E-HTTP-TIMEOUT` | bad timeout or connect/read expiry | `0..120000` |
+| `E-HTTP-CONNECT` | refused/dns/tls/io transport failure | check host/port/TLS |
+| `E-HTTP-REDIRECT` | too many / loop | fewer redirects / disable |
+| `E-HTTP-OPTIONS` | bad serve/request options | check ranges |
+| `E-HTTP-HANDLER` | unknown handler / bad arity | name a `fn(req)->map` of 1 |
+| `E-HTTP-CLOSED` | `server_port` on stopped server | don't reuse after `http_stop` |
+| `E-HTTP-STATUS` | bad status `100..599` | use `100..599` |
+| `E-HTTP-ROUTE` | empty pattern/path or `:name` | fix pattern |
+| `E-JSON-PARSE` | invalid JSON / trailing garbage / depth | fix JSON |
+| `E-JSON-STRINGIFY` | closures/handles, non-finite floats, depth, >10MB | convert first |
+| `E-TIME-PARSE` | `dt_parse_iso` unparseable | ISO-8601/RFC-3339 |
+| `E-TIME-RANGE` | bad date parts / offset / epoch / overflow | check ranges |
+| `E-TIME-PATTERN` | bad `dt_format` verb / trailing `%` | `%Y %m %d %H %M %S %f %z %a %A %b %B %j %p`, `%%` |
+| `E-COMPRESS-CORRUPT` | bad hex / invalid gzip/zlib / non-UTF8 out / corrupt tar | check input |
+| `E-COMPRESS-TOO-LARGE` | over string/file/tar caps | smaller input / raise `tar_extract_limit` |
+| `E-COMPRESS-UNSAFE-PATH` | tar entry absolute/`..`/link | safe archive |
+| `E-PG-CONNECT` | bad URL / refused / TLS failure (redacted `***`) | fix URL/host/`sslmode` |
+| `E-PG-AUTH` | bad password/user (`28P01`, redacted) | fix credentials |
+| `E-PG-SQL` | SQL failure (`[SQLSTATE]` message) | fix SQL/params |
+| `E-PG-TYPE` | unsupported param / column type (incl. bare NUMERIC) | cast in SQL (`::text`) |
+| `E-PG-CLOSED` | use after `pg_close` | don't reuse after close |
+| `E-PG-TX` | begin-twice / commit-without-begin | match txn state |
 
 Sandbox codes only trigger under `klang run --sandbox` (plain `run` uses
 `E-IO-*` for files and `E-PROCESS-*`/`E-NET-*` for spawn/network). Examples (shell,
@@ -365,6 +409,71 @@ fn main() -> i32 {
 ```klang error E-ENV-INVALID
 fn main() -> i32 {
     set_env("a=b", "x")
+    return 0
+}
+```
+
+```klang error E-NET-ADDR-INVALID
+fn main() -> i32 {
+    print(tcp_listen("127.0.0.1", 99999))
+    return 0
+}
+```
+
+```klang error E-CHAN-CAPACITY
+fn main() -> i32 {
+    let ch = chan(0)
+    return 0
+}
+```
+
+```klang error E-THREAD-CLOSURE
+fn main() -> i32 {
+    let t = thread_spawn(fn(x: i32) -> i32 {
+        return x
+    }, [])
+    return 0
+}
+```
+
+```klang error E-HTTP-URL
+fn main() -> i32 {
+    print(http_request("GET", "not a url !!!", {}, "", 1000))
+    return 0
+}
+```
+
+```klang error E-JSON-PARSE
+fn main() -> i32 {
+    print(json_decode("{bad"))
+    return 0
+}
+```
+
+```klang error E-TIME-PARSE
+fn main() -> i32 {
+    print(dt_parse_iso("not-a-date"))
+    return 0
+}
+```
+
+```klang error E-TIME-RANGE
+fn main() -> i32 {
+    print(dt_from_parts(2024, 2, 30, 0, 0, 0))
+    return 0
+}
+```
+
+```klang error E-COMPRESS-CORRUPT
+fn main() -> i32 {
+    print(gzip_decompress("zz"))
+    return 0
+}
+```
+
+```klang error E-PG-CONNECT
+fn main() -> i32 {
+    print(pg_connect("http://localhost/db"))
     return 0
 }
 ```
