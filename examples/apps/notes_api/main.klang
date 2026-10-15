@@ -4,26 +4,45 @@ fn handle(req: map) -> map {
             return http_json(200, {"status": "ok"})
         }
         if (req["path"] == "/notes") {
-            let db = pg_connect(get_env("DATABASE_URL"))
-            let rows = pg_query(db, "SELECT id, text FROM notes ORDER BY id", [])
-            pg_close(db)
-            return http_json(200, rows)
+            try {
+                let db = pg_connect(get_env("DATABASE_URL"))
+                let rows = pg_query(db, "SELECT id, text FROM notes ORDER BY id", [])
+                pg_close(db)
+                return http_json(200, rows)
+            } catch e {
+                if (e["code"] == "E-PG-CONNECT") {
+                    return http_json(503, {"error": "db unavailable"})
+                }
+                return http_json(500, {"error": "internal server error"})
+            }
         }
         let m = route_match("/notes/:id", req["path"])
         if (is_null(m) == false) {
-            let db = pg_connect(get_env("DATABASE_URL"))
-            let rows = pg_query(db, "SELECT id, text FROM notes WHERE id = $1", [parse_int(m["id"])])
-            pg_close(db)
-            if (len(rows) == 0) {
-                return http_text(404, "not found")
+            try {
+                let db = pg_connect(get_env("DATABASE_URL"))
+                let rows = pg_query(db, "SELECT id, text FROM notes WHERE id = $1", [parse_int(m["id"])])
+                pg_close(db)
+                if (len(rows) == 0) {
+                    return http_text(404, "not found")
+                }
+                return http_json(200, rows[0])
+            } catch e {
+                if (e["code"] == "E-PG-CONNECT") {
+                    return http_json(503, {"error": "db unavailable"})
+                }
+                return http_json(500, {"error": "internal server error"})
             }
-            return http_json(200, rows[0])
         }
     }
     if (req["method"] == "POST") {
         if (req["path"] == "/notes") {
+            let v = {}
             try {
-                let v = json_decode(req["body"])
+                v = json_decode(req["body"])
+            } catch e {
+                return http_text(400, "bad json")
+            }
+            try {
                 let text = v["text"]
                 let db = pg_connect(get_env("DATABASE_URL"))
                 let rows = pg_query(db, "INSERT INTO notes (text) VALUES ($1) RETURNING id", [text])
@@ -31,20 +50,30 @@ fn handle(req: map) -> map {
                 pg_close(db)
                 return http_json(200, {"id": id})
             } catch e {
-                return http_text(400, "bad json")
+                if (e["code"] == "E-PG-CONNECT") {
+                    return http_json(503, {"error": "db unavailable"})
+                }
+                return http_json(500, {"error": "internal server error"})
             }
         }
     }
     if (req["method"] == "DELETE") {
         let m = route_match("/notes/:id", req["path"])
         if (is_null(m) == false) {
-            let db = pg_connect(get_env("DATABASE_URL"))
-            let r = pg_exec(db, "DELETE FROM notes WHERE id = $1", [parse_int(m["id"])])
-            pg_close(db)
-            if (r["changes"] == 0) {
-                return http_text(404, "not found")
+            try {
+                let db = pg_connect(get_env("DATABASE_URL"))
+                let r = pg_exec(db, "DELETE FROM notes WHERE id = $1", [parse_int(m["id"])])
+                pg_close(db)
+                if (r["changes"] == 0) {
+                    return http_text(404, "not found")
+                }
+                return http_json(200, {"deleted": 1})
+            } catch e {
+                if (e["code"] == "E-PG-CONNECT") {
+                    return http_json(503, {"error": "db unavailable"})
+                }
+                return http_json(500, {"error": "internal server error"})
             }
-            return http_json(200, {"deleted": 1})
         }
     }
     return http_text(404, "not found")

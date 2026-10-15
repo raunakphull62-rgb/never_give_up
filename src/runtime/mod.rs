@@ -3970,6 +3970,8 @@ fn handle_http_conn(
                     break;
                 }
                 if peer_closed && remaining > 0 {
+                    let resp = crate::stdlib::a3_http::format_response(400, &[], "bad request", false);
+                    let _ = crate::stdlib::a1_net::conn_write(&conn_clone, &resp);
                     break;
                 }
                 if acc.len() > opts.max_body_bytes {

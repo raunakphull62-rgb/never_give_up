@@ -2936,6 +2936,11 @@ null
 
 The server requires `Content-Length` (missing means `""`);
 `Transfer-Encoding: chunked` is `400`; oversize is `413`, slow is `408`.
+A body shorter than `Content-Length` with the client half-closed is `400`
+(H1: was silent close, now proper 4xx); a longer body is truncated to
+`Content-Length` (remainder pipelines as the next request). Keep-alive
+workers wait out `read_timeout_ms` (default 10s), so tests use
+`Connection: close` for fast shutdown.
 
 ```klang check
 fn handle(req: map) -> map {
@@ -3085,7 +3090,9 @@ fn main() -> i32 {
 Bare `NUMERIC` reads are `E-PG-TYPE`; use `n::text` (exact `Str`) or
 `n::float8` (Float). `BOOL` reads as `Int` 0/1; writes use SQL literals
 (no bool literal; `Int` params are INT). Handlers open per-request
-connections (no pool; avoids txn cross-talk).
+connections (no pool; avoids txn cross-talk; 4 workers stay far under
+PG `max_connections` 100). `E-PG-CONNECT` (e.g. exhaustion) surfaces as
+`503` in `notes_api` (not a panic, server stays up).
 
 ```klang check
 fn main() -> i32 {

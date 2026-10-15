@@ -199,3 +199,15 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
 - **Benchmarks**: live-model convergence is measured inside harnesses
   (`bench/run_live.sh` checks the harness signal per task with zero
   model calls); only the offline mock baseline is measured in-tree.
+
+## Backend hardening (H1 stress findings)
+
+- Short body with half-close is `400` (was silent close; fixed).
+- `notes_api` maps DB connection failures to `503` (`E-PG-CONNECT`),
+  other DB errors to `500`; server never panics on exhaustion (4 workers
+  stay under PG `max_connections` 100).
+- Graceful shutdown drains queued jobs (100/100 with 32 workers);
+  keep-alive workers wait out `read_timeout_ms`, so tests/clients use
+  `Connection: close` for fast stop.
+- 40k requests leak-flat (RSS +~2MB, fds 4, threads flat); 10k in 0.65s
+  (~15k rps, p50 0.23ms, p99 51ms on 2 CPUs).
