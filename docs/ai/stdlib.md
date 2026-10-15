@@ -131,6 +131,28 @@ Examples are executed; non-deterministic results use bounds/len checks.
 | `route_match` | `(pat: str, path: str)` | `unknown` (map or null) | `E-ARITY`, `E-TYPE`, `E-HTTP-ROUTE` |
 | `json_decode` | `(s: str)` | `unknown` (`null`->null) | `E-ARITY`, `E-TYPE`, `E-JSON-PARSE` |
 | `json_stringify` | `(v: unknown, pretty: int)` | `str` (`null`->`null`) | `E-ARITY`, `E-TYPE`, `E-JSON-STRINGIFY` |
+| `dt_now` | `()` | `int` (epoch millis) | `E-ARITY` |
+| `dt_parse_iso` | `(s: str)` | `int` (epoch millis) | `E-ARITY`, `E-TYPE`, `E-TIME-PARSE` |
+| `dt_format` | `(ms: int, pattern: str)` | `str` (UTC; `%Y %m %d %H %M %S %f %z %a %A %b %B %j %p`, `%%`) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE`, `E-TIME-PATTERN` |
+| `dt_add` | `(ms: int, delta: map)` | `int` (`{days,hours,minutes,seconds,ms}`) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE` |
+| `dt_diff_ms` | `(a: int, b: int)` | `int` (`a - b`) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE` |
+| `dt_parts` | `(ms: int)` | `map{year,month,day,hour,minute,second,millis,weekday,yday}` (UTC) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE` |
+| `dt_parts_offset` | `(ms: int, off: int)` | `map` (wall clock at fixed offset `-1080..1080`) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE` |
+| `dt_from_parts` | `(y: int, mo: int, d: int, h: int, mi: int, s: int)` | `int` (UTC; year 1..9999) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE` |
+| `dt_local_offset_minutes` | `()` | `int` (host offset) | `E-ARITY` |
+| `dt_is_leap` | `(year: int)` | `bool` | `E-ARITY`, `E-TYPE` |
+| `dt_days_in_month` | `(year: int, month: int)` | `int` (28..31) | `E-ARITY`, `E-TYPE`, `E-TIME-RANGE` |
+| `gzip_compress` | `(s: str)` | `str` (lowercase hex) | `E-ARITY`, `E-TYPE`, `E-COMPRESS-TOO-LARGE` |
+| `gzip_decompress` | `(hex: str)` | `str` | `E-ARITY`, `E-TYPE`, `E-COMPRESS-CORRUPT`, `E-COMPRESS-TOO-LARGE` |
+| `gzip_file` | `(src: str, dst: str)` | `int` (output bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `gunzip_file` | `(src: str, dst: str)` | `int` (output bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `zlib_compress` | `(s: str)` | `str` (lowercase hex) | `E-ARITY`, `E-TYPE`, `E-COMPRESS-TOO-LARGE` |
+| `zlib_decompress` | `(hex: str)` | `str` | `E-ARITY`, `E-TYPE`, `E-COMPRESS-CORRUPT`, `E-COMPRESS-TOO-LARGE` |
+| `zlib_file` | `(src: str, dst: str)` | `int` (output bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `unzlib_file` | `(src: str, dst: str)` | `int` (output bytes) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `tar_create` | `(dir: str, out: str)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-CORRUPT`, `E-SANDBOX-FILE` (sandbox only) |
+| `tar_extract` | `(tar: str, dir: str)` | `int` (1; 256 MB cap) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
+| `tar_extract_limit` | `(tar: str, dir: str, max: int)` | `int` (1) | `E-ARITY`, `E-TYPE`, `E-IO-*`, `E-COMPRESS-*`, `E-SANDBOX-FILE` (sandbox only) |
 
 ## Methods
 

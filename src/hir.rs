@@ -3732,6 +3732,14 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
         "http_serve" => 4,
         "server_port" | "http_stop" | "http_redirect" | "json_decode" => 1,
         "http_json" | "http_text" | "route_match" | "json_stringify" => 2,
+        "dt_now" | "dt_local_offset_minutes" => 0,
+        "dt_parse_iso" | "dt_parts" | "dt_is_leap" | "gzip_compress" | "gzip_decompress"
+        | "zlib_compress" | "zlib_decompress" => 1,
+        "dt_format" | "dt_add" | "dt_diff_ms" | "dt_parts_offset" | "dt_days_in_month"
+        | "gzip_file" | "gunzip_file" | "zlib_file" | "unzlib_file" | "tar_create"
+        | "tar_extract" => 2,
+        "tar_extract_limit" => 3,
+        "dt_from_parts" => 6,
         _ => return Ty::Unknown,
     };
     if args.len() != arity {
@@ -4578,6 +4586,130 @@ fn check_builtin_call(file: &str, func: &str, args: &[Ty], diags: &mut Vec<Diagn
             }
             Ty::Str
         }
+        // L1 datetime (epoch-millisecond Instants are Ints; parts are Maps).
+        "dt_now" => Ty::Int,
+        "dt_parse_iso" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_parse_iso()` s", "str", &args[0]));
+            }
+            Ty::Int
+        }
+        "dt_format" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_format()` ms", "i32", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_format()` pattern", "str", &args[1]));
+            }
+            Ty::Str
+        }
+        "dt_add" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_add()` ms", "i32", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Map | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_add()` delta", "map", &args[1]));
+            }
+            Ty::Int
+        }
+        "dt_diff_ms" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`dt_diff_ms()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "dt_parts" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_parts()` ms", "i32", &args[0]));
+            }
+            Ty::Map
+        }
+        "dt_parts_offset" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`dt_parts_offset()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            Ty::Map
+        }
+        "dt_from_parts" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`dt_from_parts()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "dt_local_offset_minutes" => Ty::Int,
+        "dt_is_leap" => {
+            if !matches!(&args[0], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`dt_is_leap()` year", "i32", &args[0]));
+            }
+            Ty::Bool
+        }
+        "dt_days_in_month" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Int | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`dt_days_in_month()` arg {i}"),
+                        "i32",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        // L1 compression (strings are hex; files/tars are paths).
+        "gzip_compress" | "gzip_decompress" | "zlib_compress" | "zlib_decompress" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, &format!("`{func}()` arg 0"), "str", &args[0]));
+            }
+            Ty::Str
+        }
+        "gzip_file" | "gunzip_file" | "zlib_file" | "unzlib_file" | "tar_create"
+        | "tar_extract" => {
+            for (i, a) in args.iter().enumerate() {
+                if !matches!(a, Ty::Str | Ty::Unknown) {
+                    diags.push(type_mismatch(
+                        file,
+                        &format!("`{func}()` arg {i}"),
+                        "str",
+                        a,
+                    ));
+                }
+            }
+            Ty::Int
+        }
+        "tar_extract_limit" => {
+            if !matches!(&args[0], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tar_extract_limit()` tar", "str", &args[0]));
+            }
+            if !matches!(&args[1], Ty::Str | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tar_extract_limit()` dir", "str", &args[1]));
+            }
+            if !matches!(&args[2], Ty::Int | Ty::Unknown) {
+                diags.push(type_mismatch(file, "`tar_extract_limit()` limit", "i32", &args[2]));
+            }
+            Ty::Int
+        }
         _ => Ty::Unknown,
     }
 }
@@ -4804,6 +4936,28 @@ pub fn is_builtin(name: &str) -> bool {
             | "route_match"
             | "json_decode"
             | "json_stringify"
+            | "dt_now"
+            | "dt_parse_iso"
+            | "dt_format"
+            | "dt_add"
+            | "dt_diff_ms"
+            | "dt_parts"
+            | "dt_parts_offset"
+            | "dt_from_parts"
+            | "dt_local_offset_minutes"
+            | "dt_is_leap"
+            | "dt_days_in_month"
+            | "gzip_compress"
+            | "gzip_decompress"
+            | "gzip_file"
+            | "gunzip_file"
+            | "zlib_compress"
+            | "zlib_decompress"
+            | "zlib_file"
+            | "unzlib_file"
+            | "tar_create"
+            | "tar_extract"
+            | "tar_extract_limit"
     )
 }
 

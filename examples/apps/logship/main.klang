@@ -1,0 +1,21 @@
+fn main() -> i32 {
+    let logs = ["2024-02-28T10:00:00Z INFO start", "2024-02-28T12:30:00Z WARN slow", "2024-02-29T09:00:00Z INFO leap-day", "2024-02-29T18:15:00Z ERROR oops", "2024-03-01T08:00:00Z INFO next-day"]
+    let counts = {}
+    let blobs = {}
+    for log in logs {
+        let day = dt_format(dt_parse_iso(slice(log, 0, 20)), "%Y-%m-%d")
+        if counts.contains(day) {
+            counts[day] = (counts[day] + 1)
+            blobs[day] = ((blobs[day] + "\n") + log)
+        } else {
+            counts[day] = 1
+            blobs[day] = log
+        }
+    }
+    print("day count gzbytes")
+    for day in counts {
+        let gz = gzip_compress(blobs[day])
+        print(((((day + " ") + str(counts[day])) + " ") + str((len(gz) / 2))))
+    }
+    return 0
+}

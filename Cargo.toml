@@ -24,3 +24,10 @@ sha2 = "0.10"
 # HMAC-SHA256 for AWS SigV4 request signing (Backblaze B2 S3-compatible
 # API). Pure Rust, no system dependencies, no AWS SDK.
 hmac = "0.12"
+# L1 datetime+compression (Wave 2 Stage L1): chrono for UTC civil math (no
+# timezone database; named zones unsupported), flate2 with the pure-Rust
+# miniz_oxide backend (no miniz-sys/zlib C code) for gzip/zlib, tar for
+# plain (uncompressed) archives. All three keep the offline-install story.
+chrono = "0.4"
+flate2 = "1"
+tar = "0.4"
