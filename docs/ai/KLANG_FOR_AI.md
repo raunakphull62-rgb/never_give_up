@@ -2938,9 +2938,11 @@ The server requires `Content-Length` (missing means `""`);
 `Transfer-Encoding: chunked` is `400`; oversize is `413`, slow is `408`.
 A body shorter than `Content-Length` with the client half-closed is `400`
 (H1: was silent close, now proper 4xx); a longer body is truncated to
-`Content-Length` (remainder pipelines as the next request). Keep-alive
-workers wait out `read_timeout_ms` (default 10s), so tests use
-`Connection: close` for fast shutdown.
+`Content-Length` (remainder pipelines as the next request). Between
+requests an idle keep-alive conn parks in the server's poller and closes
+after `idle_timeout_ms` (default 5s) or `max_requests_per_conn`
+(default 1000) — clients must expect and re-open conns at those bounds
+(H2); tests that stop the server fast still use `Connection: close`.
 
 ```klang check
 fn handle(req: map) -> map {
@@ -3850,6 +3852,10 @@ fn main() -> i32 {
 }
 ```
 
+`http_serve` opts keys: `workers`, `max_body_bytes`, `read_timeout_ms`,
+`max_header_bytes`, `idle_timeout_ms` (0 = never idle-close),
+`max_requests_per_conn` (0 = unlimited); semantics in `backend.md`.
+
 Datetime (runs, UTC):
 
 ```klang run
@@ -4013,9 +4019,16 @@ fn main() -> i32 {
 
 Rules: `http_serve(host, port, handler, opts)` (port `0` = any);
 `server_port(s)` is `E-HTTP-CLOSED` after stop; `http_stop(s)` is
-idempotent; handler errors become `500` JSON and the server keeps
-running; bodies need `Content-Length` (`chunked` is `400`); sandbox
-denies serve/port/stop/request with `E-SANDBOX-NETWORK`.
+idempotent and graceful (drains the listen backlog + queued conns,
+closes the listener last); handler errors become `500` JSON and the
+server keeps running; bodies need `Content-Length` (`chunked` is `400`);
+opts: `workers` (default 4), `max_body_bytes` (1MB), `read_timeout_ms`
+(10s), `max_header_bytes` (16KB), `idle_timeout_ms` (5s; `0` = never
+idle-close; idle keep-alive conns park in a per-server poller so they
+cannot starve workers), `max_requests_per_conn` (1000; `0` = unlimited;
+the closing response carries `Connection: close`); invalid keys/values
+are `E-HTTP-OPTIONS`; sandbox denies serve/port/stop/request with
+`E-SANDBOX-NETWORK`.
 
 ## Worker threads with channels (runs)
 

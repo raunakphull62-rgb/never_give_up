@@ -75,6 +75,14 @@ pub const MAX_JSON_OUT: usize = 10 * 1024 * 1024;
 pub const MAX_CLIENT_TIMEOUT_MS: i64 = 120_000;
 /// Default client timeout when `timeout_ms == 0` (30 s).
 pub const DEFAULT_CLIENT_TIMEOUT_MS: u64 = 30_000;
+/// Max idle keep-alive timeout (60 s; 0 = never close an idle conn).
+pub const MAX_IDLE_TIMEOUT_MS: u64 = 60_000;
+/// Default idle keep-alive timeout (5 s).
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 5_000;
+/// Default cap on requests served over one keep-alive conn (0 = unlimited).
+pub const DEFAULT_MAX_REQUESTS_PER_CONN: u64 = 1_000;
+/// Max requests-per-conn cap.
+pub const MAX_REQUESTS_PER_CONN: u64 = 1_000_000;
 /// Accept poll interval (lets `http_stop` land quickly).
 pub const ACCEPT_POLL_MS: i64 = 100;
 
@@ -642,11 +650,23 @@ pub struct ServeOptions {
     pub max_body_bytes: usize,
     pub read_timeout_ms: u64,
     pub max_header_bytes: usize,
+    /// Idle keep-alive timeout: a conn with no next request for this long
+    /// is quietly closed (0 = never expire). Applied only between requests.
+    pub idle_timeout_ms: u64,
+    /// Cap on requests served over one keep-alive conn (0 = unlimited).
+    pub max_requests_per_conn: u64,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
-        Self { workers: DEFAULT_WORKERS, max_body_bytes: DEFAULT_MAX_BODY, read_timeout_ms: DEFAULT_READ_TIMEOUT_MS, max_header_bytes: DEFAULT_MAX_HEADER }
+        Self {
+            workers: DEFAULT_WORKERS,
+            max_body_bytes: DEFAULT_MAX_BODY,
+            read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
+            max_header_bytes: DEFAULT_MAX_HEADER,
+            idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
+            max_requests_per_conn: DEFAULT_MAX_REQUESTS_PER_CONN,
+        }
     }
 }
 
@@ -689,7 +709,19 @@ pub fn parse_serve_options(v: &Value) -> Result<ServeOptions, Diagnostic> {
                 }
                 out.max_header_bytes = n as usize;
             }
-            other => return Err(options_err(OP, &format!("unknown option {other:?} (want workers, max_body_bytes, read_timeout_ms, max_header_bytes)"))),
+            "idle_timeout_ms" => {
+                if n < 0 || (n as u64) > MAX_IDLE_TIMEOUT_MS {
+                    return Err(options_err(OP, &format!("idle_timeout_ms {n} (want 0..{MAX_IDLE_TIMEOUT_MS})")));
+                }
+                out.idle_timeout_ms = n as u64;
+            }
+            "max_requests_per_conn" => {
+                if n < 0 || (n as u64) > MAX_REQUESTS_PER_CONN {
+                    return Err(options_err(OP, &format!("max_requests_per_conn {n} (want 0..{MAX_REQUESTS_PER_CONN})")));
+                }
+                out.max_requests_per_conn = n as u64;
+            }
+            other => return Err(options_err(OP, &format!("unknown option {other:?} (want workers, max_body_bytes, read_timeout_ms, max_header_bytes, idle_timeout_ms, max_requests_per_conn)"))),
         }
     }
     Ok(out)
@@ -881,8 +913,10 @@ pub fn check_response_headers(v: &Value) -> Result<Vec<(String, String)>, String
 // ---------------------------------------------------------------------------
 
 /// Opaque HTTP server. `running` flips false on `http_stop` (or at
-/// program exit); the accept loop polls it via `tcp_accept_timeout`.
-/// Job queue is an A2 channel of `Value::Conn`.
+/// program exit); the accept loop blocks on `listener_accept_blocking`
+/// and is woken by a self-connect (`listener_wake`). Job queue is an A2
+/// channel of `Value::Conn`; idle keep-alive conns park in `idle` (one
+/// poller thread per server).
 pub struct ServerState {
     pub listener: crate::stdlib::a1_net::ListenerHandle,
     pub port: i64,
@@ -893,9 +927,12 @@ pub struct ServerState {
     pub max_header_bytes: usize,
     pub running: Arc<AtomicBool>,
     pub jobs: Value,
-    /// Accept + worker join handles (taken on `http_stop`).
+    /// Parked idle keep-alive conns (the poller peeks + hands them back).
+    pub idle: std::sync::Arc<IdlePool>,
+    /// Accept + worker + poller join handles (taken on `http_stop`).
     pub accept: Option<std::thread::JoinHandle<()>>,
     pub worker_handles: Vec<std::thread::JoinHandle<()>>,
+    pub poller: Option<std::thread::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for ServerState {
@@ -926,6 +963,142 @@ pub fn mark_http_worker() {
     IS_HTTP_WORKER.with(|c| c.set(true));
 }
 
+// ---------------------------------------------------------------------------
+// Idle keep-alive pool (fix for worker starvation).
+// ---------------------------------------------------------------------------
+
+/// Parked idle keep-alive connections, owned by one poller thread per
+/// server. A worker that finishes a keep-alive response hands the conn
+/// here when no next request is already readable; the poller peeks each
+/// parked socket (never consuming bytes) and hands readable conns back to
+/// the worker pool. Workers therefore never block on idle sockets, and an
+/// idle conn is never closed just because other work is queued.
+pub struct IdlePool {
+    inner: std::sync::Mutex<IdleInner>,
+    cv: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct IdleInner {
+    /// Parked conns with the time of their last served request.
+    conns: Vec<(Value, std::time::Instant)>,
+    stopped: bool,
+}
+
+impl IdlePool {
+    pub fn new() -> Self {
+        Self { inner: std::sync::Mutex::new(IdleInner::default()), cv: std::sync::Condvar::new() }
+    }
+
+    /// Hand a keep-alive conn to the poller (worker → pool ownership).
+    /// False when the pool is stopped: the caller must close the conn.
+    pub fn park(&self, conn: Value) -> bool {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.stopped {
+            return false;
+        }
+        g.conns.push((conn, std::time::Instant::now()));
+        self.cv.notify_all();
+        true
+    }
+
+    /// Shutdown: the poller closes every parked conn and exits.
+    pub fn stop(&self) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stopped = true;
+        self.cv.notify_all();
+    }
+}
+
+/// The idle poller: round-robin peeks parked conns and hands readable
+/// ones back to the job queue. Per-conn probe timeout shrinks with the
+/// pool size so one detection cycle stays ≤ ~50 ms regardless of how many
+/// conns are parked; `idle_timeout_ms` (0 = never) closes conns idle past
+/// the budget quietly.
+pub fn idle_poller_loop(pool: std::sync::Arc<IdlePool>, jobs: Value, running: Arc<AtomicBool>, idle_timeout_ms: u64) {
+    let drain_close = |conns: &mut Vec<(Value, std::time::Instant)>| {
+        for (c, _) in conns.drain(..) {
+            let _ = crate::stdlib::a1_net::conn_close(&c);
+        }
+    };
+    loop {
+        let (batch, probe) = {
+            let mut g = pool.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if g.stopped {
+                drain_close(&mut g.conns);
+                return;
+            }
+            if g.conns.is_empty() {
+                let (g2, _t) = pool
+                    .cv
+                    .wait_timeout(g, std::time::Duration::from_millis(200))
+                    .unwrap_or_else(|e| e.into_inner());
+                g = g2;
+                if g.stopped {
+                    drain_close(&mut g.conns);
+                    return;
+                }
+                if g.conns.is_empty() {
+                    continue;
+                }
+            }
+            let n = g.conns.len();
+            let probe = (50 / n as u64).max(1);
+            (std::mem::take(&mut g.conns), probe)
+        };
+        let mut still_idle: Vec<(Value, std::time::Instant)> = Vec::new();
+        for (c, since) in batch {
+            if !running.load(Ordering::SeqCst) {
+                // Shutting down: the drain rule still serves a request
+                // that is already readable on an accepted conn. Anything
+                // else (still idle, EOF, error) closes quietly.
+                match crate::stdlib::a1_net::conn_poll_readable(&c, probe as i64) {
+                    Ok(crate::stdlib::a1_net::ConnPoll::Data) => {
+                        if crate::stdlib::a2_threads::send(&jobs, &c).is_err() {
+                            let _ = crate::stdlib::a1_net::conn_close(&c);
+                        }
+                    }
+                    _ => {
+                        let _ = crate::stdlib::a1_net::conn_close(&c);
+                    }
+                }
+                continue;
+            }
+            if idle_timeout_ms != 0 && since.elapsed() >= std::time::Duration::from_millis(idle_timeout_ms) {
+                // Idle budget spent: quiet close (no 408).
+                let _ = crate::stdlib::a1_net::conn_close(&c);
+                continue;
+            }
+            match crate::stdlib::a1_net::conn_poll_readable(&c, probe as i64) {
+                Ok(crate::stdlib::a1_net::ConnPoll::Data) => {
+                    // A request (complete or partial) arrived: the next
+                    // worker reads and serves it (running=false still
+                    // serves one response — the drain rule, handled above).
+                    if crate::stdlib::a2_threads::send(&jobs, &c).is_err() {
+                        let _ = crate::stdlib::a1_net::conn_close(&c);
+                    }
+                }
+                Ok(crate::stdlib::a1_net::ConnPoll::Eof) => {
+                    let _ = crate::stdlib::a1_net::conn_close(&c);
+                }
+                Ok(crate::stdlib::a1_net::ConnPoll::Timeout) => still_idle.push((c, since)),
+                Err(_) => {
+                    let _ = crate::stdlib::a1_net::conn_close(&c);
+                }
+            }
+        }
+        if !still_idle.is_empty() {
+            let mut g = pool.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if g.stopped {
+                drain_close(&mut still_idle);
+                drain_close(&mut g.conns);
+                return;
+            }
+            g.conns.extend(still_idle);
+        }
+    }
+}
+
 fn as_server(op: &str, v: &Value) -> Result<ServerHandle, Diagnostic> {
     match v {
         Value::Server(h) => Ok(h.clone()),
@@ -949,41 +1122,97 @@ pub fn server_port(v: &Value) -> Result<i64, Diagnostic> {
     Ok(st.port)
 }
 
-/// `http_stop(s) -> 1` (graceful: finish in-flight requests).
-/// Signals stop, closes the listener + job queue, then joins the
-/// accept/worker threads unless called from a worker (then it only
-/// signals). Idempotent.
+/// `http_stop(s) -> 1` (graceful: stop accepting new work, drain the
+/// listen backlog, finish every accepted connection, then close the
+/// listener last). Signals stop, wakes the acceptor with a self-connect
+/// (a `close()` does not wake a blocked accept on Linux), joins the
+/// accept + worker threads unless called from a worker (then a detached
+/// finisher thread does the join). Idempotent.
 pub fn http_stop(v: &Value) -> Result<(), Diagnostic> {
     const OP: &str = "http_stop";
     if crate::sandbox::is_sandbox() {
         return Err(crate::sandbox::deny_network(OP));
     }
     let h = as_server(OP, v)?;
-    // Signal + close under the lock, take handles out, join outside.
-    let (accept, workers) = {
+    // Signal + wake under the lock, take handles out, join outside.
+    let (listener, jobs, accept, workers, poller, idle) = {
         let mut st = h.lock().unwrap_or_else(|e| e.into_inner());
-        st.running.store(false, Ordering::SeqCst);
-        // Close the listener so a blocking accept wakes (accept uses
-        // timeout polling, but closing covers the race).
-        let lv = Value::Listener(st.listener.clone());
-        let _ = crate::stdlib::a1_net::conn_close(&lv);
-        // Close the job queue so idle workers wake (blocked sends in
-        // the acceptor fail closed, blocked recvs drain-then-null).
-        let _ = crate::stdlib::a2_threads::close(&st.jobs);
-        let a = st.accept.take();
-        let w = std::mem::take(&mut st.worker_handles);
-        (a, w)
-    };
-    // Join unless we are a worker (self-join would deadlock).
-    if !is_http_worker() {
-        if let Some(jh) = accept {
-            let _ = jh.join();
+        if st.accept.is_none() {
+            return Ok(()); // already stopped / already finishing (idempotent)
         }
-        for jh in workers {
-            let _ = jh.join();
+        st.running.store(false, Ordering::SeqCst);
+        let listener = st.listener.clone();
+        let jobs = st.jobs.clone();
+        let accept = st.accept.take();
+        let workers = std::mem::take(&mut st.worker_handles);
+        let poller = st.poller.take();
+        let idle = st.idle.clone();
+        (listener, jobs, accept, workers, poller, idle)
+    };
+    // Wake the blocking accept: the wake socket is dropped, so the
+    // accepted end reads instant EOF (it can never stall a worker).
+    let _ = crate::stdlib::a1_net::listener_wake(&Value::Listener(listener.clone()));
+    if is_http_worker() {
+        // Self-join would deadlock; a detached finisher (not marked as a
+        // worker) does the join + drain. Its handle replaces `accept`, so a
+        // later stop/reap joins the finisher instead.
+        let fin = std::thread::Builder::new()
+            .name("klang-http-finisher".to_string())
+            .spawn(move || finish_shutdown(listener, jobs, accept, workers, poller, idle))
+            .ok();
+        if let Some(fin) = fin {
+            let mut st = h.lock().unwrap_or_else(|e| e.into_inner());
+            st.accept = Some(fin);
+        }
+        return Ok(());
+    }
+    finish_shutdown(listener, jobs, accept, workers, poller, idle);
+    Ok(())
+}
+
+/// Join the acceptor, drain the listen backlog into the job queue, stop
+/// the idle poller (closing parked conns), close the queue, join the
+/// workers, and close the listener last. Every connection accepted (or
+/// already handshake-completed in the backlog) at the time of the stop
+/// request is served exactly once.
+fn finish_shutdown(
+    listener: crate::stdlib::a1_net::ListenerHandle,
+    jobs: Value,
+    accept: Option<std::thread::JoinHandle<()>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    poller: Option<std::thread::JoinHandle<()>>,
+    idle: std::sync::Arc<IdlePool>,
+) {
+    if let Some(jh) = accept {
+        let _ = jh.join();
+    }
+    // Drain: take every connection still queued in the kernel backlog
+    // (handshake complete, never accepted) and hand it to the workers.
+    loop {
+        match crate::stdlib::a1_net::listener_accept_nonblocking(&Value::Listener(listener.clone())) {
+            Ok(v @ Value::Conn(_)) => {
+                // Blocking send: workers are still draining the queue, so
+                // this frees up (never deadlocks).
+                let _ = crate::stdlib::a2_threads::send(&jobs, &v);
+            }
+            _ => break, // backlog empty (WouldBlock) or listener gone
         }
     }
-    Ok(())
+    // Stop the idle poller BEFORE closing the job queue: it may still be
+    // handing readable conns over. stop() makes it close every parked conn
+    // and exit; join so no further sends race the queue close.
+    idle.stop();
+    if let Some(jh) = poller {
+        let _ = jh.join();
+    }
+    // Close the job queue so idle workers wake; blocked recvs drain the
+    // remaining connections first, then see null.
+    let _ = crate::stdlib::a2_threads::close(&jobs);
+    for jh in workers {
+        let _ = jh.join();
+    }
+    // Close the listener last: draining needs it open.
+    let _ = crate::stdlib::a1_net::conn_close(&Value::Listener(listener));
 }
 
 /// Is this server still running?

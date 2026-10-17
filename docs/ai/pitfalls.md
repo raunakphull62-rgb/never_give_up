@@ -1818,9 +1818,11 @@ The server requires `Content-Length` (missing means `""`);
 `Transfer-Encoding: chunked` is `400`; oversize is `413`, slow is `408`.
 A body shorter than `Content-Length` with the client half-closed is `400`
 (H1: was silent close, now proper 4xx); a longer body is truncated to
-`Content-Length` (remainder pipelines as the next request). Keep-alive
-workers wait out `read_timeout_ms` (default 10s), so tests use
-`Connection: close` for fast shutdown.
+`Content-Length` (remainder pipelines as the next request). Between
+requests an idle keep-alive conn parks in the server's poller and closes
+after `idle_timeout_ms` (default 5s) or `max_requests_per_conn`
+(default 1000) — clients must expect and re-open conns at those bounds
+(H2); tests that stop the server fast still use `Connection: close`.
 
 ```klang check
 fn handle(req: map) -> map {

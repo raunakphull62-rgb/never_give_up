@@ -64,12 +64,15 @@ pub struct ListenerState {
 
 /// Connected stream plus line-read leftover buffer. `stream` is `None`
 /// once closed. `peer` is the `ip:port` string captured at accept/connect.
+/// `requests` counts served requests (HTTP keep-alive cap; survives the
+/// worker→pool→worker handoffs).
 #[derive(Debug)]
 pub struct ConnState {
     pub stream: Option<TcpStream>,
     pub buf: Vec<u8>,
     pub closed: bool,
     pub peer: String,
+    pub requests: u64,
 }
 
 /// UDP socket. `socket` is `None` once closed.
@@ -365,13 +368,7 @@ pub fn tcp_accept(v: &Value) -> Result<Value, Diagnostic> {
         }
         st.listener.as_ref().expect("checked").accept().map_err(|e| io_err(OP, "listener", &e.to_string()))?
     };
-    let peer = addr.to_string();
-    Ok(Value::Conn(Arc::new(Mutex::new(ConnState {
-        stream: Some(stream),
-        buf: Vec::new(),
-        closed: false,
-        peer,
-    }))))
+    Ok(make_conn(stream, addr))
 }
 
 /// `tcp_accept_timeout(l, ms) -> Conn` or null (timeout is `Null`, not an error).
@@ -419,14 +416,111 @@ pub fn tcp_accept_timeout(v: &Value, ms: i64) -> Result<Value, Diagnostic> {
         None => Ok(Value::Null),
         Some((stream, addr)) => {
             let _ = stream.set_nonblocking(false);
-            Ok(Value::Conn(Arc::new(Mutex::new(ConnState {
-                stream: Some(stream),
-                buf: Vec::new(),
-                closed: false,
-                peer: addr.to_string(),
-            }))))
+            Ok(make_conn(stream, addr))
         }
     }
+}
+
+/// Build a `Value::Conn` from an accepted/connect socket (internal helper).
+fn make_conn(stream: TcpStream, addr: SocketAddr) -> Value {
+    Value::Conn(Arc::new(Mutex::new(ConnState {
+        stream: Some(stream),
+        buf: Vec::new(),
+        closed: false,
+        peer: addr.to_string(),
+        requests: 0,
+    })))
+}
+
+/// Blocking accept for the HTTP server acceptor. Unlike `tcp_accept` it
+/// does NOT hold the listener mutex across the accept (the listener state
+/// is duplicated under the lock and accepted outside it), so `server_port`
+/// and `conn_close` never block behind a waiting acceptor. On Linux
+/// `close()` does not wake a blocked accept — [`listener_wake`] is the
+/// wake path.
+pub fn listener_accept_blocking(v: &Value) -> Result<Value, Diagnostic> {
+    const OP: &str = "listener_accept_blocking";
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network(OP));
+    }
+    let h = as_listener(OP, v)?;
+    let dup = {
+        let st = h.lock().unwrap_or_else(|e| e.into_inner());
+        if st.closed || st.listener.is_none() {
+            return Err(closed(OP, "Listener"));
+        }
+        st.listener
+            .as_ref()
+            .expect("checked")
+            .try_clone()
+            .map_err(|e| io_err(OP, "listener", &e.to_string()))?
+    };
+    let (stream, addr) = dup.accept().map_err(|e| io_err(OP, "listener", &e.to_string()))?;
+    Ok(make_conn(stream, addr))
+}
+
+/// One non-blocking accept attempt (drain helper for graceful shutdown):
+/// `Ok(Null)` when the backlog is empty. Restores blocking mode so later
+/// accepts block again.
+pub fn listener_accept_nonblocking(v: &Value) -> Result<Value, Diagnostic> {
+    const OP: &str = "listener_accept_nonblocking";
+    if crate::sandbox::is_sandbox() {
+        return Err(crate::sandbox::deny_network(OP));
+    }
+    let h = as_listener(OP, v)?;
+    let attempt = {
+        let st = h.lock().unwrap_or_else(|e| e.into_inner());
+        if st.closed || st.listener.is_none() {
+            return Err(closed(OP, "Listener"));
+        }
+        let l = st.listener.as_ref().expect("checked");
+        let _ = l.set_nonblocking(true);
+        let r = l.accept();
+        let _ = l.set_nonblocking(false);
+        r
+    };
+    match attempt {
+        Ok((stream, addr)) => Ok(make_conn(stream, addr)),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Value::Null),
+        Err(e) => Err(io_err(OP, "listener", &e.to_string())),
+    }
+}
+
+/// Wake a thread blocked in [`listener_accept_blocking`] by connecting to
+/// the listener's own address (a `close()` does not wake a blocked accept
+/// on Linux). The wake socket is dropped immediately, so the accepted end
+/// reads instant EOF and can never stall a worker. Bounded 200 ms;
+/// best-effort (a full backlog unblocks via the job queue draining, and
+/// shutdown proceeds regardless).
+pub fn listener_wake(v: &Value) -> Result<(), Diagnostic> {
+    const OP: &str = "http_stop";
+    let h = as_listener(OP, v)?;
+    let addr = {
+        let st = h.lock().unwrap_or_else(|e| e.into_inner());
+        if st.closed || st.listener.is_none() {
+            return Ok(()); // nothing to wake (already closed)
+        }
+        st.listener
+            .as_ref()
+            .expect("checked")
+            .local_addr()
+            .map_err(|e| io_err(OP, "listener", &e.to_string()))?
+    };
+    let mut targets = vec![addr];
+    if addr.ip().is_unspecified() {
+        targets = vec![
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port()),
+            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), addr.port()),
+        ];
+    }
+    for a in targets {
+        // Drop the socket right away: the handshake-completed connection
+        // still lands in the accept queue, but with instant EOF.
+        if TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok() {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// `tcp_connect(host, port, timeout_ms) -> Conn`.
@@ -454,12 +548,7 @@ pub fn tcp_connect(host: &str, port: i64, timeout_ms: i64) -> Result<Value, Diag
         };
         match res {
             Ok(stream) => {
-                return Ok(Value::Conn(Arc::new(Mutex::new(ConnState {
-                    stream: Some(stream),
-                    buf: Vec::new(),
-                    closed: false,
-                    peer: addr.to_string(),
-                }))));
+                return Ok(make_conn(stream, *addr));
             }
             Err(d) => {
                 last = Some(d);
@@ -699,6 +788,76 @@ pub fn conn_set_timeout(v: &Value, ms: i64) -> Result<(), Diagnostic> {
     s.set_read_timeout(dur).map_err(|e| io_err(OP, &st.peer, &e.to_string()))?;
     s.set_write_timeout(dur).map_err(|e| io_err(OP, &st.peer, &e.to_string()))?;
     Ok(())
+}
+
+/// Served-request count for the HTTP keep-alive cap (internal helper).
+pub fn conn_requests(v: &Value) -> Result<u64, Diagnostic> {
+    let h = match v {
+        Value::Conn(h) => h.clone(),
+        other => return Err(crate::runtime::type_err("conn_requests", "a Conn", other)),
+    };
+    let st = h.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(st.requests)
+}
+
+/// Bump the served-request count; returns the new value (internal helper).
+pub fn conn_bump_requests(v: &Value) -> Result<u64, Diagnostic> {
+    let h = match v {
+        Value::Conn(h) => h.clone(),
+        other => return Err(crate::runtime::type_err("conn_bump_requests", "a Conn", other)),
+    };
+    let mut st = h.lock().unwrap_or_else(|e| e.into_inner());
+    st.requests += 1;
+    Ok(st.requests)
+}
+
+/// What a non-consuming readiness probe found (internal helper, HTTP idle
+/// poller + worker fast path). Uses `TcpStream::peek`, so nothing is
+/// consumed and no buffered partial line is touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnPoll {
+    /// Bytes are readable (a request, complete or partial, has arrived).
+    Data,
+    /// Peer closed (EOF).
+    Eof,
+    /// Nothing readable within `timeout_ms`.
+    Timeout,
+}
+
+/// Peek the socket with a short read timeout; does NOT consume bytes and
+/// does not disturb buffered data. Only the READ timeout is touched (the
+/// write timeout is left alone, so a caller mid-write is unaffected).
+pub fn conn_poll_readable(v: &Value, timeout_ms: i64) -> Result<ConnPoll, Diagnostic> {
+    const OP: &str = "conn_poll_readable";
+    let h = match v {
+        Value::Conn(h) => h.clone(),
+        other => return Err(crate::runtime::type_err(OP, "a Conn", other)),
+    };
+    let wait = check_timeout_ms(OP, timeout_ms)?;
+    let mut st = h.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed || st.stream.is_none() {
+        return Err(closed(OP, "Conn"));
+    }
+    // A leftover from an earlier chunked read counts as readable: the
+    // next (or partial next) request is already in memory — parking this
+    // conn would orphan it (the kernel queue can be empty meanwhile).
+    if !st.buf.is_empty() {
+        return Ok(ConnPoll::Data);
+    }
+    let dur = if wait == 0 { None } else { Some(Duration::from_millis(wait)) };
+    let peer = st.peer.clone();
+    let s = st.stream.as_mut().expect("checked");
+    let res = {
+        s.set_read_timeout(dur).map_err(|e| io_err(OP, &peer, &e.to_string()))?;
+        let mut b = [0u8; 1];
+        s.peek(&mut b)
+    };
+    match res {
+        Ok(0) => Ok(ConnPoll::Eof),
+        Ok(_) => Ok(ConnPoll::Data),
+        Err(e) if is_timeout_err(&e) => Ok(ConnPoll::Timeout),
+        Err(e) => Err(io_err(OP, &peer, &e.to_string())),
+    }
 }
 
 /// `conn_peer(c) -> Str` (`"ip:port"`).

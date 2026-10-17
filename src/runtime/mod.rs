@@ -3663,6 +3663,7 @@ fn start_http_server(
     let cap = ((opts.workers * 4).max(8).min(1000)) as i64;
     let jobs_val = crate::stdlib::a2_threads::chan(cap)?;
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let idle_pool = std::sync::Arc::new(crate::stdlib::a3_http::IdlePool::new());
     let state = Arc::new(Mutex::new(crate::stdlib::a3_http::ServerState {
         listener: listener_handle.clone(),
         port: port_got,
@@ -3673,8 +3674,10 @@ fn start_http_server(
         max_header_bytes: opts.max_header_bytes,
         running: running.clone(),
         jobs: jobs_val.clone(),
+        idle: idle_pool.clone(),
         accept: None,
         worker_handles: Vec::new(),
+        poller: None,
     }));
     {
         let mut reg = ctx.servers.lock().unwrap_or_else(|e| e.into_inner());
@@ -3687,22 +3690,26 @@ fn start_http_server(
         .name("klang-http-accept".to_string())
         .stack_size(SPAWN_STACK_BYTES)
         .spawn(move || {
+            // Blocking accept: a new connection is picked up the moment it
+            // lands (no poll window). Shutdown wakes the accept via a
+            // self-connect from `http_stop` (`listener_wake`).
             loop {
                 if !running_for_accept.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
-                match crate::stdlib::a1_net::tcp_accept_timeout(
-                    &listener_for_accept,
-                    crate::stdlib::a3_http::ACCEPT_POLL_MS,
-                ) {
-                    Ok(Value::Null) => continue,
+                match crate::stdlib::a1_net::listener_accept_blocking(&listener_for_accept) {
                     Ok(conn_val) => {
+                        // Post-stop arrivals are closed, never served.
+                        if !running_for_accept.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = crate::stdlib::a1_net::conn_close(&conn_val);
+                            break;
+                        }
                         match crate::stdlib::a2_threads::send(&jobs_for_accept, &conn_val) {
                             Ok(()) => {}
-                            Err(e) => {
-                                if e.code == "E-CHAN-CLOSED" {
-                                    break;
-                                }
+                            Err(_) => {
+                                // Job queue closed (stop): close the conn quietly.
+                                let _ = crate::stdlib::a1_net::conn_close(&conn_val);
+                                break;
                             }
                         }
                     }
@@ -3712,6 +3719,8 @@ fn start_http_server(
                         {
                             break;
                         }
+                        // Transient accept error (e.g. fd pressure): brief
+                        // backoff, then re-check running.
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
@@ -3724,6 +3733,8 @@ fn start_http_server(
         let jobs_clone = jobs_val.clone();
         let running_clone = running.clone();
         let handler_owned = handler_name.to_string();
+        let opts_copy = opts.clone();
+        let idle_for_worker = idle_pool.clone();
         let h = std::thread::Builder::new()
             .name(format!("klang-http-worker-{i}"))
             .stack_size(SPAWN_STACK_BYTES)
@@ -3731,12 +3742,6 @@ fn start_http_server(
                 crate::stdlib::a3_http::mark_http_worker();
                 let wid = crate::stdlib::a2_threads::alloc_thread_id();
                 crate::stdlib::a2_threads::set_current_thread_id(wid);
-                let opts_copy = crate::stdlib::a3_http::ServeOptions {
-                    workers: opts.workers,
-                    max_body_bytes: opts.max_body_bytes,
-                    read_timeout_ms: opts.read_timeout_ms,
-                    max_header_bytes: opts.max_header_bytes,
-                };
                 loop {
                     let job = match crate::stdlib::a2_threads::recv(&jobs_clone) {
                         Ok(Value::Null) => break,
@@ -3751,16 +3756,28 @@ fn start_http_server(
                             continue;
                         }
                     };
-                    handle_http_conn(&child, &job, &handler_owned, &opts_copy, &running_clone);
+                    handle_http_conn(&child, &job, &handler_owned, &opts_copy, &running_clone, &idle_for_worker);
                 }
             })
             .map_err(|e| concurrent_err(&format!("failed to spawn http worker: {e}")))?;
         worker_handles.push(h);
     }
+    // Idle keep-alive poller: parked conns are peeked here and handed back
+    // when a request arrives (workers never block on idle sockets).
+    let poller = std::thread::Builder::new()
+        .name("klang-http-idle-poller".to_string())
+        .spawn({
+            let pool = idle_pool.clone();
+            let jobs = jobs_val.clone();
+            let running = running.clone();
+            move || crate::stdlib::a3_http::idle_poller_loop(pool, jobs, running, opts.idle_timeout_ms)
+        })
+        .map_err(|e| concurrent_err(&format!("failed to spawn http idle poller: {e}")))?;
     {
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         st.accept = Some(acc_handle);
         st.worker_handles = worker_handles;
+        st.poller = Some(poller);
     }
     Ok(Value::Server(state))
 }
@@ -3771,21 +3788,15 @@ fn handle_http_conn(
     handler_name: &str,
     opts: &crate::stdlib::a3_http::ServeOptions,
     running: &Arc<std::sync::atomic::AtomicBool>,
+    idle_pool: &std::sync::Arc<crate::stdlib::a3_http::IdlePool>,
 ) {
     let conn_clone = conn_val.clone();
-    if opts.read_timeout_ms == 0 {
-        let _ = crate::stdlib::a1_net::conn_set_timeout(&conn_clone, 0);
-    } else {
-        let _ = crate::stdlib::a1_net::conn_set_timeout(&conn_clone, opts.read_timeout_ms as i64);
-    }
+    http_rearm(&conn_clone, opts);
     let remote = match crate::stdlib::a1_net::conn_peer(&conn_clone) {
         Ok(s) => s,
         Err(_) => "unknown".to_string(),
     };
     loop {
-        if !running.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
-        }
         let line_val = match crate::stdlib::a1_net::conn_read_line(&conn_clone) {
             Ok(v) => v,
             Err(e) => {
@@ -4020,6 +4031,11 @@ fn handle_http_conn(
         if !running.load(std::sync::atomic::Ordering::SeqCst) {
             keep_alive = false;
         }
+        let served_now = crate::stdlib::a1_net::conn_requests(&conn_clone).unwrap_or(u64::MAX);
+        if opts.max_requests_per_conn != 0 && served_now + 1 >= opts.max_requests_per_conn {
+            // Requests-per-conn cap: close after this response.
+            keep_alive = false;
+        }
         for (k, v) in &resp_headers {
             if k.to_lowercase() == "connection" && v.to_lowercase().contains("close") {
                 keep_alive = false;
@@ -4029,11 +4045,37 @@ fn handle_http_conn(
         if crate::stdlib::a1_net::conn_write(&conn_clone, &resp_str).is_err() {
             break;
         }
+        let _ = crate::stdlib::a1_net::conn_bump_requests(&conn_clone);
         if !keep_alive {
             break;
         }
+        // Fast path: if the next request is already readable, serve it now
+        // (no pool round trip). Otherwise hand the conn to the idle poller:
+        // it waits for the next request or the idle budget and queues the
+        // conn back, so this worker never blocks on an idle socket.
+        match crate::stdlib::a1_net::conn_poll_readable(&conn_clone, 1) {
+            Ok(crate::stdlib::a1_net::ConnPoll::Data) => {
+                // Probe set a 1ms read timeout; restore the full one for
+                // the request being read (headers/body included).
+                http_rearm(&conn_clone, opts);
+                continue;
+            }
+            Ok(crate::stdlib::a1_net::ConnPoll::Eof) | Err(_) => break,
+            Ok(crate::stdlib::a1_net::ConnPoll::Timeout) => {
+                if idle_pool.park(conn_clone.clone()) {
+                    return; // ownership moved to the poller
+                }
+                break; // pool stopped (shutdown): close quietly
+            }
+        }
     }
     let _ = crate::stdlib::a1_net::conn_close(&conn_clone);
+}
+
+/// Reset the conn's socket timeouts to the serve options' read timeout
+/// (conn_set_timeout covers both directions; writes use the same budget).
+fn http_rearm(conn: &Value, opts: &crate::stdlib::a3_http::ServeOptions) {
+    let _ = crate::stdlib::a1_net::conn_set_timeout(conn, if opts.read_timeout_ms == 0 { 0 } else { opts.read_timeout_ms as i64 });
 }
 
 fn response_from_value(v: &Value) -> Result<(i64, Vec<(String, String)>, String), String> {

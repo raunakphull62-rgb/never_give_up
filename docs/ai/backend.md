@@ -80,9 +80,16 @@ fn main() -> i32 {
 
 Rules: `http_serve(host, port, handler, opts)` (port `0` = any);
 `server_port(s)` is `E-HTTP-CLOSED` after stop; `http_stop(s)` is
-idempotent; handler errors become `500` JSON and the server keeps
-running; bodies need `Content-Length` (`chunked` is `400`); sandbox
-denies serve/port/stop/request with `E-SANDBOX-NETWORK`.
+idempotent and graceful (drains the listen backlog + queued conns,
+closes the listener last); handler errors become `500` JSON and the
+server keeps running; bodies need `Content-Length` (`chunked` is `400`);
+opts: `workers` (default 4), `max_body_bytes` (1MB), `read_timeout_ms`
+(10s), `max_header_bytes` (16KB), `idle_timeout_ms` (5s; `0` = never
+idle-close; idle keep-alive conns park in a per-server poller so they
+cannot starve workers), `max_requests_per_conn` (1000; `0` = unlimited;
+the closing response carries `Connection: close`); invalid keys/values
+are `E-HTTP-OPTIONS`; sandbox denies serve/port/stop/request with
+`E-SANDBOX-NETWORK`.
 
 ## Worker threads with channels (runs)
 

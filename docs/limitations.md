@@ -211,3 +211,44 @@ structured JSON diagnostic on stderr and exit 1. Exit codes are OS
   `Connection: close` for fast stop.
 - 40k requests leak-flat (RSS +~2MB, fds 4, threads flat); 10k in 0.65s
   (~15k rps, p50 0.23ms, p99 51ms on 2 CPUs).
+
+## Server throughput + shutdown correctness (H2 findings)
+
+- **New-connection throughput**: the accept loop no longer polls (100ms
+  window + 5ms sleeps ≈ 5ms latency per new conn, ~197 rps sequential
+  on 2 CPUs). It now blocks in `listener_accept_blocking` (duplicated
+  listener fd, no state-mutex held across the accept) and is woken on
+  stop by a self-connect (`listener_wake`), because `close()` does not
+  wake a blocked accept on Linux. Sequential new-conn rate after the
+  fix: ~7,650-9,500 rps (0.11-0.13 ms/req); keep-alive unchanged
+  (~12k rps). H2 gate floor: 1,500 rps.
+- **Graceful shutdown drains the backlog**: on stop the acceptor is
+  joined, the kernel listen backlog is drained non-blocking into the
+  job queue, workers finish every queued + in-flight conn, and the
+  listener closes last. Restored H1 gate (8 workers, 100ms handlers,
+  100 in-flight): 100/100 (was 81/100 — backlog conns dropped when the
+  listener closed first); the 32-worker/300ms variant stays green as an
+  extra test. The price is stop latency: every queued handler runs to
+  completion, so a stop with 4 workers, 300ms handlers and 300 conns
+  exits after ~21s (measured); the queue cap (1000) bounds the worst
+  case, and a deploy's SIGKILL grace bounds it anyway.
+- **Idle keep-alive cannot starve workers**: after each response a
+  worker probes the socket for ~1ms (`TcpStream::peek`, consumes
+  nothing); a request already there is served immediately (fast path),
+  otherwise the conn is parked in a per-server **idle pool** owned by a
+  poller thread. The poller round-robins parked conns with an adaptive
+  probe (one detection cycle ≤ ~50ms for ≤50 parked conns, growing
+  ~1ms/conn above that) and hands readable conns back to the worker
+  queue; EOF or the idle budget closes a conn quietly (no 408).
+  `http_stop` stops the poller before closing the job queue, so no conn
+  is lost. Gate: 4 workers + 20 idle keep-alive conns, fresh request
+  answered well under 1s.
+- **New serve opts** (all `E-HTTP-OPTIONS` when invalid, alongside the
+  existing four): `idle_timeout_ms` (default `5000`, range `0..60000`,
+  `0` = never idle-close) and `max_requests_per_conn` (default `1000`,
+  range `0..1000000`, `0` = unlimited; the closing response carries
+  `Connection: close`, and the H1 20k-request leak probe now reconnects
+  at the cap like a real client).
+- Not fixed: the poller's detection latency is per-cycle (does not
+  scale to thousands of parked conns on a small box); a burst larger
+  than the job-queue cap can drop SYNs to SYN-retry (~1s) as before.

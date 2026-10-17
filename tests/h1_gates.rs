@@ -262,37 +262,54 @@ fn content_len(headers: &[u8]) -> usize {
     0
 }
 
-/// N sequential GETs on one keep-alive connection (fast leak probe).
+/// N sequential GETs on keep-alive connections (fast leak probe). The
+/// server closes a conn after `max_requests_per_conn` (default 1000), so
+/// the client reconnects like a real client and keeps counting.
 fn keepalive_gets(port: u16, n: usize) {
     let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
     s.set_read_timeout(Some(std::time::Duration::from_secs(15))).ok();
     for i in 0..n {
-        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n").expect("write");
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 4096];
-        let mut hend: Option<usize> = None;
-        let mut want = 0usize;
-        loop {
-            let r = s.read(&mut tmp).expect("read");
-            assert!(r > 0, "peer closed at {i}");
-            buf.extend_from_slice(&tmp[..r]);
-            if hend.is_none() {
-                if let Some(p) = find_sub(&buf, b"\r\n\r\n") {
-                    hend = Some(p + 4);
-                    want = content_len(&buf[..p]);
-                }
-            }
-            if let Some(h) = hend {
-                if buf.len() >= h + want {
-                    break;
-                }
+        if !keepalive_one(&mut s) {
+            // Server capped/closed the conn: reconnect and retry this one.
+            s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("reconnect");
+            s.set_read_timeout(Some(std::time::Duration::from_secs(15))).ok();
+            assert!(keepalive_one(&mut s), "fresh conn must serve request {i}");
+        }
+    }
+}
+
+/// One keep-alive GET; false when the conn closed without a response.
+fn keepalive_one(s: &mut std::net::TcpStream) -> bool {
+    if s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let mut hend: Option<usize> = None;
+    let mut want = 0usize;
+    loop {
+        let r = match s.read(&mut tmp) {
+            Ok(0) | Err(_) => return false, // server closed (cap/keep-alive off)
+            Ok(r) => r,
+        };
+        buf.extend_from_slice(&tmp[..r]);
+        if hend.is_none() {
+            if let Some(p) = find_sub(&buf, b"\r\n\r\n") {
+                hend = Some(p + 4);
+                want = content_len(&buf[..p]);
             }
         }
-        let h = hend.unwrap();
-        let body = String::from_utf8_lossy(&buf[h..h + want]).into_owned();
-        assert!(body.contains("\"ok\""), "health {i}");
-        assert_eq!(buf.len(), h + want, "no pipelining");
+        if let Some(h) = hend {
+            if buf.len() >= h + want {
+                break;
+            }
+        }
     }
+    let h = hend.unwrap();
+    let body = String::from_utf8_lossy(&buf[h..h + want]).into_owned();
+    assert!(body.contains("\"ok\""), "health body: {body}");
+    assert_eq!(buf.len(), h + want, "no pipelining");
+    true
 }
 
 // ---- 2. hostile input: server never panics/hangs, keeps serving ----
@@ -488,30 +505,42 @@ fn main() -> i32 {
 
 #[test]
 fn h1_graceful_shutdown_under_load() {
-    // Custom /sleep server (300ms per request) so 100 concurrent are truly in flight.
+    graceful_run(8, 100);
+}
+
+/// 32-worker / 300ms-handler variant (kept from the H1 gate as an
+/// additional test): all 100 in-flight complete through the drain.
+#[test]
+fn h1_graceful_shutdown_under_load_32w() {
+    graceful_run(32, 300);
+}
+
+fn graceful_run(workers: i64, handler_sleep_ms: i64) {
     let dir = mktemp_dir("grace");
     let prog = dir.join("sleep.klang");
     std::fs::write(
         &prog,
-        r#"fn handle(req: map) -> map {
-    sleep_ms(300)
-    return http_json(200, {"ok": 1})
-}
+        format!(
+            r#"fn handle(req: map) -> map {{
+    sleep_ms({handler_sleep_ms})
+    return http_json(200, {{"ok": 1}})
+}}
 
-fn main() -> i32 {
+fn main() -> i32 {{
     signal_watch("TERM")
-    let s = http_serve("127.0.0.1", 0, "handle", {"workers": 32})
+    let s = http_serve("127.0.0.1", 0, "handle", {{"workers": {workers}}})
     let pf = get_env("PORT_FILE")
-    if (pf != "") {
+    if (pf != "") {{
         write_file(pf, str(server_port(s)))
-    }
-    while (signal_pending("TERM") == false) {
+    }}
+    while (signal_pending("TERM") == false) {{
         sleep_ms(20)
-    }
+    }}
     http_stop(s)
     return 0
-}
-"#,
+}}
+"#
+        ),
     )
     .expect("write");
     let port_file = dir.join("port.txt");
@@ -563,7 +592,7 @@ fn main() -> i32 {
             ok += 1;
         }
     }
-    eprintln!("h1 graceful: {ok}/100 in-flight completed");
+    eprintln!("h1 graceful({workers}w/{handler_sleep_ms}ms): {ok}/100 in-flight completed");
     assert!(ok >= 90, "in-flight must mostly complete, got {ok}/100");
     // Exit 0 bounded (10s).
     let start = std::time::Instant::now();
@@ -581,7 +610,7 @@ fn main() -> i32 {
     // No fd/thread leaks: process exited, so just assert it exited (fds freed by kernel).
     // Check no leftover child.
     assert!(child.try_wait().expect("try").is_some());
-    eprintln!("h1 graceful: fds_before={fds_before} thrs_before={thrs_before}");
+    eprintln!("h1 graceful({workers}w/{handler_sleep_ms}ms): fds_before={fds_before} thrs_before={thrs_before}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
