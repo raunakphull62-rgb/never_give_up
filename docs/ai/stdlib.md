@@ -570,6 +570,10 @@ fn main() -> i32 {
 }
 ```
 
+`http_serve` opts keys: `workers`, `max_body_bytes`, `read_timeout_ms`,
+`max_header_bytes`, `idle_timeout_ms` (0 = never idle-close),
+`max_requests_per_conn` (0 = unlimited); semantics in `backend.md`.
+
 Datetime (runs, UTC):
 
 ```klang run
